@@ -3,6 +3,7 @@ Price Service — recupera prezzi da MT5 (primario) o yfinance (fallback).
 Valuta entry/TP/SL per ogni segnale e aggiorna lo stato nel DB.
 """
 import asyncio
+import os
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional
