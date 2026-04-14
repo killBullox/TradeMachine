@@ -1,0 +1,109 @@
+INFO:     Will watch for changes in these directories: ['C:\\Users\\gianl\\Inner Circle TradeMachine\\backend']
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+INFO:     Started reloader process [30580] using WatchFiles
+[Static] Serving frontend da C:\Users\gianl\Inner Circle TradeMachine\frontend\dist
+INFO:     Started server process [35708]
+INFO:     Waiting for application startup.
+[MT5Trader] Auto-trading ATTIVATO
+[Startup] Avvio connessione Telegram...
+[Startup] Avvio price service...
+INFO:     Application startup complete.
+[Telegram] Caricamento messaggi da '?? Inner Circle Trader'...
+INFO:     127.0.0.1:55770 - "GET /api/mt5/status HTTP/1.1" 200 OK
+[Telegram] Recuperati 2000 messaggi, salvataggio in DB...
+[Telegram] Caricati 6 messaggi storici (0 errori).
+[Telegram] Listener attivo su '?? Inner Circle Trader' ? in attesa di nuovi messaggi...
+[Backfill] Valutazione 1 segnali...
+[MT5] Server offset rilevato: +3h (raw=10800s)
+[Backfill] #233 XAUUSD ? 1634 tick MT5, sl_moves=0
+[Backfill] #233 XAUUSD buy ? tp1 @ 4774.0
+[Backfill] Completato: 1/1 aggiornati
+[Risk] Ricalcolati 232 segnali (risk=250.00$)
+[Monitor] Price monitor avviato (intervallo 15s)
+[MT5Trader] #233 XAUUSD annullato: attivo senza ticket MT5
+[MT5Trader] Annullati 1 segnali expired: [233]
+[MT5Sync] Annullati segnali expired: [233]
+[LLMParser] type=update sym=XAUUSD dir=None
+[LLMParser] type=update sym=XAUUSD dir=None
+WARNING:  WatchFiles detected changes in 'price_service.py'. Reloading...
+ [LLMParser] type=other sym=USDJPY dir=None
+[LLMParser] type=reenter sym=None dir=None
+[Reenter] Nuovo segnale #234 clonato da #233 XAUUSD
+[MT5Trader] #234 risk=$250 lots=0.17x3=0.51 sl_pips=500 eff_risk=$255.00
+[MT5Trader] #234 BUY MARKET: ask=4773.14 range=4769.0-4771.0 max_entry=4776.00
+[MT5Trader] #234 TP1 ticket=512172699 confermato in MT5
+[MT5Trader] #234 TP1 ticket=512172699 lots=0.17 entry=4773.14 sl=4764.0 tp=4774.0
+[MT5Trader] #234 TP2 ticket=512172700 confermato in MT5
+[MT5Trader] #234 TP2 ticket=512172700 lots=0.17 entry=4773.14 sl=4764.0 tp=4779.0
+[MT5Trader] #234 TP3 ticket=512172702 confermato in MT5
+[MT5Trader] #234 TP3 ticket=512172702 lots=0.17 entry=4773.14 sl=4764.0 tp=4785.0
+[Reenter] #234 ? tickets=[512172699, 512172700, 512172702]
+[LLMParser] type=signal sym=USDJPY dir=sell
+[MT5Trader] #235 risk=$250 lots=0.71x3=2.12 sl_pips=18 eff_risk=$248.04
+[MT5Trader] #235 SELL MARKET: bid=158.986 range=159.02-159.05 min_entry=158.84
+[MT5Trader] #235 TP1 ticket=512172709 confermato in MT5
+[MT5Trader] #235 TP1 ticket=512172709 lots=0.71 entry=158.986 sl=159.2 tp=158.9
+[MT5Trader] #235 TP2 ticket=512172710 confermato in MT5
+[MT5Trader] #235 TP2 ticket=512172710 lots=0.71 entry=158.986 sl=159.2 tp=158.75
+[MT5Trader] #235 TP3 ticket=512172711 confermato in MT5
+[MT5Trader] #235 TP3 ticket=512172711 lots=0.71 entry=158.986 sl=159.2 tp=158.6
+[AutoTrade] #235 USDJPY ? tickets=[512172709, 512172710, 512172711]
+[MT5Trader] #234 actual_entry_price=4773.14 (da posizione aperta)
+[MT5Trader] #235 actual_entry_price=158.986 (da posizione aperta)
+[MT5Trader] Server offset rilevato: 10800s (3h)
+[MT5Trader] modify_sl ticket=512172700 new_sl=4773.14 -> OK
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172700
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> OK
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172700 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172700
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172700 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172700
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172700 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172700
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[LLMParser] type=update sym=USDJPY dir=None
+[MT5Trader] modify_sl ticket=512172700 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172700
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[LLMParser] type=other sym=None dir=None
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[LLMParser] type=update sym=XAUUSD dir=None
+[LLMParser] type=update sym=XAUUSD dir=None
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[LLMParser] type=update sym=XAUUSD dir=None
+[LLMParser] type=update sym=None dir=None
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
+[MT5Trader] modify_sl ticket=512172702 new_sl=4773.14 -> FAIL retcode=10025
+[MT5Trader] #234 TP1 hit ? breakeven SL=4773.14 su ticket=512172702
