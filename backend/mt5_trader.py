@@ -367,26 +367,30 @@ def place_orders(sig) -> list:
 
     if is_buy:
         entry_upper = max(ep1, ep2) if ep1 and ep2 else (ep1 or ep2 or entry)
-        # Margine: se il prezzo è sopra il range ma ancora sotto SL distance → entra a mercato
-        max_entry = entry_upper + sl_distance  # accetta fino alla SL distance sopra il range
+        max_entry = entry_upper + sl_distance
         if current_ask <= max_entry:
+            # Prezzo nel range o vicino → entra a mercato
             order_type = mt5.ORDER_TYPE_BUY
             entry = current_ask
-            log(f"#{sig.id} BUY MARKET: ask={current_ask} range={ep1}-{ep2} max_entry={max_entry:.2f}")
+            log(f"#{sig.id} BUY MARKET: ask={current_ask} range={ep1}-{ep2}")
         else:
-            # Prezzo troppo sopra → non entrare, trade già partito
-            log(f"#{sig.id} BUY SKIP: ask={current_ask} > max_entry={max_entry:.2f} — timing mancato")
-            return []
+            # Prezzo sopra il range → BUY LIMIT, aspetta che scenda al range
+            order_type = mt5.ORDER_TYPE_BUY_LIMIT
+            entry = _round_price(float(entry_upper), digits)
+            log(f"#{sig.id} BUY LIMIT: ask={current_ask} > range, limit a {entry}")
     else:
         entry_lower = min(ep1, ep2) if ep1 and ep2 else (ep1 or ep2 or entry)
-        min_entry = entry_lower - sl_distance  # accetta fino alla SL distance sotto il range
+        min_entry = entry_lower - sl_distance
         if current_bid >= min_entry:
+            # Prezzo nel range o vicino → entra a mercato
             order_type = mt5.ORDER_TYPE_SELL
             entry = current_bid
-            log(f"#{sig.id} SELL MARKET: bid={current_bid} range={ep1}-{ep2} min_entry={min_entry:.2f}")
+            log(f"#{sig.id} SELL MARKET: bid={current_bid} range={ep1}-{ep2}")
         else:
-            log(f"#{sig.id} SELL SKIP: bid={current_bid} < min_entry={min_entry:.2f} — timing mancato")
-            return []
+            # Prezzo sotto il range → SELL LIMIT, aspetta che salga al range
+            order_type = mt5.ORDER_TYPE_SELL_LIMIT
+            entry = _round_price(float(entry_lower), digits)
+            log(f"#{sig.id} SELL LIMIT: bid={current_bid} < range, limit a {entry}")
 
     if sl and abs(entry - sl) < min_dist:
         log(f"#{sig.id} SL troppo vicino al prezzo, skip")
@@ -795,6 +799,7 @@ def sync_positions() -> list:
     try:
         open_sigs = db.query(Signal).filter(
             Signal.mt5_ticket.isnot(None),
+            Signal.closed_at.is_(None),
             Signal.status.in_(["open", "pending", "tp1", "tp2"])
         ).all()
 
