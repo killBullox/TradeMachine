@@ -24,7 +24,7 @@ def main():
     while True:
         print(f"[Runner] Avvio server (PID={os.getpid()})...", flush=True)
         try:
-            config = uvicorn.Config("main:app", host="127.0.0.1", port=8001, timeout_keep_alive=120)
+            config = uvicorn.Config("main:app", host="0.0.0.0", port=8002, timeout_keep_alive=120)
             server = MonitoredServer(config)
             asyncio.run(server.serve())
         except KeyboardInterrupt:
