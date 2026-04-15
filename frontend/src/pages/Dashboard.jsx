@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { formatDistanceToNow } from 'date-fns'
 import { it } from 'date-fns/locale'
-import { TrendingUp, TrendingDown, Target, ShieldAlert, Activity } from 'lucide-react'
+import { TrendingUp, TrendingDown, Target, ShieldAlert, Activity, DollarSign, Calendar, BarChart3 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 const STATUS_COLORS = {
@@ -342,13 +342,68 @@ export default function Dashboard({ wsEvents }) {
 
       <MT5Panel />
 
-      {/* Stats */}
+      {/* P&L Cards */}
       {perf && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <StatCard label="Segnali totali" value={perf.total_signals} icon={Activity} color="bg-brand-900/40 text-brand-400" />
-          <StatCard label="Win rate" value={perf.win_rate_pct != null ? `${perf.win_rate_pct}%` : '—'} icon={Target} color="bg-emerald-900/40 text-emerald-400" />
-          <StatCard label="SL hit" value={perf.sl_hits} icon={ShieldAlert} color="bg-rose-900/40 text-rose-400" />
-          <StatCard label="Ultimi 7gg" value={perf.signals_last_7d} icon={TrendingUp} color="bg-violet-900/40 text-violet-400" />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* P&L Oggi */}
+          <div className={`card border ${perf.today_pnl >= 0 ? 'border-emerald-700/40' : 'border-rose-700/40'}`}>
+            <div className="flex items-center gap-3 mb-2">
+              <div className={`p-2 rounded-lg ${perf.today_pnl >= 0 ? 'bg-emerald-900/40 text-emerald-400' : 'bg-rose-900/40 text-rose-400'}`}>
+                <Calendar size={18} />
+              </div>
+              <span className="text-sm text-slate-400">P&L Oggi</span>
+            </div>
+            <p className={`text-3xl font-bold font-mono ${perf.today_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {perf.today_pnl >= 0 ? '+' : ''}{perf.today_pnl?.toFixed(2)}$
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              {perf.today_trades} trade{perf.today_trades !== 1 ? 's' : ''} · {perf.today_wins}W / {perf.today_losses}L
+            </p>
+          </div>
+
+          {/* P&L Totale */}
+          <div className={`card border ${perf.total_pnl_usd >= 0 ? 'border-emerald-700/40' : 'border-rose-700/40'}`}>
+            <div className="flex items-center gap-3 mb-2">
+              <div className={`p-2 rounded-lg ${perf.total_pnl_usd >= 0 ? 'bg-emerald-900/40 text-emerald-400' : 'bg-rose-900/40 text-rose-400'}`}>
+                <DollarSign size={18} />
+              </div>
+              <span className="text-sm text-slate-400">P&L Totale</span>
+            </div>
+            <p className={`text-3xl font-bold font-mono ${perf.total_pnl_usd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {perf.total_pnl_usd >= 0 ? '+' : ''}{perf.total_pnl_usd?.toFixed(2)}$
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              {perf.closed_trades} trade chiusi · PF {perf.profit_factor ?? '—'}
+            </p>
+          </div>
+
+          {/* Stats compatte */}
+          <div className="card border border-slate-700/40">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="p-2 rounded-lg bg-brand-900/40 text-brand-400">
+                <BarChart3 size={18} />
+              </div>
+              <span className="text-sm text-slate-400">Statistiche</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <div>
+                <span className="text-slate-500 text-xs">Win rate</span>
+                <p className="font-bold text-white">{perf.win_rate_pct != null ? `${perf.win_rate_pct}%` : '—'}</p>
+              </div>
+              <div>
+                <span className="text-slate-500 text-xs">Max DD</span>
+                <p className="font-bold text-rose-400">-{perf.max_drawdown_usd?.toFixed(0)}$</p>
+              </div>
+              <div>
+                <span className="text-slate-500 text-xs">Avg win</span>
+                <p className="font-bold text-emerald-400">+{perf.avg_win_usd?.toFixed(0)}$</p>
+              </div>
+              <div>
+                <span className="text-slate-500 text-xs">Avg loss</span>
+                <p className="font-bold text-rose-400">{perf.avg_loss_usd?.toFixed(0)}$</p>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

@@ -689,6 +689,7 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 "data": {"symbol": parsed.symbol, "reason": parsed.reason}
             })
 
+
         elif msg_type == "level" and parsed:
             await broadcast_ws({
                 "event": "market_levels",

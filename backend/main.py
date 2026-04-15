@@ -521,6 +521,14 @@ def get_performance(
     recent = [s for s in signals if s.created_at and s.created_at >= week_ago]
     recent_pnl = round(sum(s.pnl_usd for s in recent if s.pnl_usd), 2)
 
+    # P&L di oggi
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_closed = [s for s in closed if s.closed_at and s.closed_at >= today_start]
+    today_pnl = round(sum(s.pnl_usd for s in today_closed), 2)
+    today_wins = sum(1 for s in today_closed if s.pnl_usd and s.pnl_usd > 0)
+    today_losses = sum(1 for s in today_closed if s.pnl_usd and s.pnl_usd < 0)
+    today_trades = len(today_closed)
+
     # Risk settings
     rs = db.query(RiskSettings).first()
     risk_info = {
@@ -547,6 +555,11 @@ def get_performance(
         "max_drawdown_usd": max_dd,
         "best_streak": best_streak,
         "worst_streak": worst_streak,
+        # Oggi
+        "today_pnl": today_pnl,
+        "today_trades": today_trades,
+        "today_wins": today_wins,
+        "today_losses": today_losses,
         # Recente
         "signals_last_7d": len(recent),
         "pnl_last_7d": recent_pnl,
