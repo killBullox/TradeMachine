@@ -629,9 +629,12 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
             try:
                 import mt5_trader
                 import json as _json
-                # Trova l'ultimo segnale chiuso per questo simbolo (o qualsiasi)
+                # Trova l'ultimo segnale chiuso tradabile (escludi cancelled/non-MT5)
+                from mt5_trader import MT5_SYMBOL_MAP
+                tradeable_syms = list(MT5_SYMBOL_MAP.keys())
                 q = db.query(Signal).filter(
-                    Signal.status.in_(["sl_hit", "closed", "cancelled"])
+                    Signal.status.in_(["sl_hit", "closed", "tp1", "tp2", "tp3"]),
+                    Signal.symbol.in_(tradeable_syms),
                 ).order_by(Signal.created_at.desc())
                 if parsed.symbol:
                     q = q.filter(Signal.symbol == parsed.symbol)
