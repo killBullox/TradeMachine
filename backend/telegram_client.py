@@ -668,7 +668,14 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             new_sig.status = "open"
                             log(f"[Reenter] #{new_sig.id} → tickets={tickets}")
                         else:
-                            _append_trade_log(new_sig, "mt5_failed", "Nessun ticket ottenuto")
+                            # Simbolo non supportato o ordine fallito → annulla
+                            from mt5_trader import MT5_SYMBOL_MAP
+                            if new_sig.symbol.upper() not in MT5_SYMBOL_MAP:
+                                _append_trade_log(new_sig, "cancelled", f"Simbolo {new_sig.symbol} non supportato su MT5, segnale annullato")
+                                new_sig.status = "cancelled"
+                                new_sig.notes = (new_sig.notes or "") + " [Non gestibile su MT5]"
+                            else:
+                                _append_trade_log(new_sig, "mt5_failed", "Nessun ticket ottenuto")
                     db.add(new_sig)
                     db.commit()
 
