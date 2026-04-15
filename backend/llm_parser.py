@@ -77,6 +77,51 @@ Esempi di sl_move:
 """
 
 
+def _build_context() -> str:
+    """Costruisce il contesto dei trade aperti e messaggi recenti per il LLM."""
+    try:
+        from database import SessionLocal, Signal, RawMessage
+        from datetime import datetime, timedelta
+        db = SessionLocal()
+        try:
+            # Trade aperti/recenti
+            active = db.query(Signal).filter(
+                Signal.status.in_(["pending", "open", "tp1", "tp2"]),
+                Signal.is_archived == False,
+            ).order_by(Signal.created_at.desc()).limit(5).all()
+
+            # Ultimi trade chiusi (per contesto reenter)
+            recent_closed = db.query(Signal).filter(
+                Signal.status.in_(["sl_hit", "tp1", "tp2", "tp3", "closed"]),
+                Signal.created_at >= datetime.utcnow() - timedelta(hours=12),
+            ).order_by(Signal.created_at.desc()).limit(3).all()
+
+            # Ultimi messaggi (per contesto conversazione)
+            recent_msgs = db.query(RawMessage).filter(
+                RawMessage.created_at >= datetime.utcnow() - timedelta(minutes=30),
+            ).order_by(RawMessage.created_at.desc()).limit(5).all()
+
+            parts = []
+            if active:
+                parts.append("TRADE ATTIVI:")
+                for s in active:
+                    parts.append(f"  #{s.id} {s.symbol} {s.direction} entry={s.entry_price}-{s.entry_price_high} sl={s.stoploss} status={s.status}")
+            if recent_closed:
+                parts.append("TRADE RECENTI CHIUSI:")
+                for s in recent_closed:
+                    parts.append(f"  #{s.id} {s.symbol} {s.direction} status={s.status} pnl={s.pnl_usd}")
+            if recent_msgs:
+                parts.append("MESSAGGI RECENTI (dal piu recente):")
+                for m in recent_msgs:
+                    clean = ''.join(c if ord(c) < 128 else '' for c in (m.text or ''))[:100]
+                    parts.append(f"  [{m.msg_type}] {clean}")
+            return "\n".join(parts) if parts else ""
+        finally:
+            db.close()
+    except Exception:
+        return ""
+
+
 def parse_with_llm(text: str) -> Optional[dict]:
     """
     Parsa un messaggio Telegram usando Claude Haiku.
@@ -86,12 +131,17 @@ def parse_with_llm(text: str) -> Optional[dict]:
     if client is None:
         return None
 
+    context = _build_context()
+    user_msg = f"Messaggio: {text}"
+    if context:
+        user_msg = f"CONTESTO ATTUALE:\n{context}\n\n{user_msg}"
+
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=300,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": f"Messaggio: {text}"}]
+            messages=[{"role": "user", "content": user_msg}]
         )
         raw = response.content[0].text.strip()
         # Estrai JSON anche se c'è testo extra
