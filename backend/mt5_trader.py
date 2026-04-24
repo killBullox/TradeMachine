@@ -365,10 +365,18 @@ def place_orders(sig) -> list:
     # Solo se il prezzo è oltre lo SL (trade già perso) → non entrare.
     sl_distance = abs(float(entry) - float(sl_raw)) if sl_raw else 0
 
+    entry_lower = min(ep1, ep2) if ep1 and ep2 else (ep1 or ep2 or entry)
+    entry_upper = max(ep1, ep2) if ep1 and ep2 else (ep1 or ep2 or entry)
+    max_entry = entry_upper + sl_distance
+    min_entry = entry_lower - sl_distance
+
     if is_buy:
-        entry_upper = max(ep1, ep2) if ep1 and ep2 else (ep1 or ep2 or entry)
-        max_entry = entry_upper + sl_distance
-        if current_ask <= max_entry:
+        if current_ask < min_entry:
+            # Prezzo troppo sotto il range → BUY STOP, aspetta breakout verso il range
+            order_type = mt5.ORDER_TYPE_BUY_STOP
+            entry = _round_price(float(entry_lower), digits)
+            log(f"#{sig.id} BUY STOP: ask={current_ask} < range, stop a {entry}")
+        elif current_ask <= max_entry:
             # Prezzo nel range o vicino → entra a mercato
             order_type = mt5.ORDER_TYPE_BUY
             entry = current_ask
@@ -379,9 +387,12 @@ def place_orders(sig) -> list:
             entry = _round_price(float(entry_upper), digits)
             log(f"#{sig.id} BUY LIMIT: ask={current_ask} > range, limit a {entry}")
     else:
-        entry_lower = min(ep1, ep2) if ep1 and ep2 else (ep1 or ep2 or entry)
-        min_entry = entry_lower - sl_distance
-        if current_bid >= min_entry:
+        if current_bid > max_entry:
+            # Prezzo troppo sopra il range → SELL STOP, aspetta breakdown verso il range
+            order_type = mt5.ORDER_TYPE_SELL_STOP
+            entry = _round_price(float(entry_upper), digits)
+            log(f"#{sig.id} SELL STOP: bid={current_bid} > range, stop a {entry}")
+        elif current_bid >= min_entry:
             # Prezzo nel range o vicino → entra a mercato
             order_type = mt5.ORDER_TYPE_SELL
             entry = current_bid
