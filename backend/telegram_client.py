@@ -426,8 +426,14 @@ def _save_level(db, parsed: ParsedLevel, msg_id: int):
     db.commit()
 
 
-async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: int = None, use_llm: bool = False):
-    """Parsa e salva un messaggio, poi notifica i client WS."""
+async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: int = None, use_llm: bool = False,
+                          msg_date: datetime = None, origin: str = "realtime"):
+    """Parsa e salva un messaggio, poi notifica i client WS.
+
+    origin: 'realtime' (listener live) | 'edited' (msg editato dal trader) | 'replay' (history replay)
+    msg_date: timestamp originale del messaggio TG (UTC naive). Se None usa datetime.utcnow().
+    Se il ritardo tra msg_date e ora è > 60s, anche un 'realtime' diventa 'delayed'.
+    """
     if not text:
         return
 
@@ -502,25 +508,33 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         _already_has_tickets = bool(sig.mt5_ticket or sig.mt5_tickets)
                         if _already_has_tickets:
                             log(f"[AutoTrade] #{sig.id} {sig.symbol} ha gia ticket MT5 - skip place_orders")
-                        # Segnali da history replay: esegui se recenti (< 30 min), annulla se vecchi
+                        # Determina origine effettiva: realtime se msg appena arrivato, altrimenti late catch
                         from datetime import timedelta as _td
-                        is_recent = (datetime.utcnow() - (sig.created_at or datetime.utcnow())) < _td(minutes=30)
+                        signal_ts = msg_date or sig.created_at or datetime.utcnow()
+                        delay_sec = (datetime.utcnow() - signal_ts).total_seconds()
+                        if origin == "edited":
+                            effective_origin = "edited"
+                            catch_reason = "Messaggio TG editato dal trader"
+                        elif origin == "replay":
+                            effective_origin = "replay"
+                            catch_reason = "Segnale da history replay (TM riavviato)"
+                        elif delay_sec > 60:
+                            effective_origin = "delayed"
+                            catch_reason = f"Listener TM ritardato di {int(delay_sec)}s rispetto al messaggio TG"
+                        else:
+                            effective_origin = "realtime"
+                            catch_reason = None
                         if _already_has_tickets:
                             pass
-                        elif not use_llm and not is_recent:
-                            _append_trade_log(sig, "cancelled", "Segnale troppo vecchio per history replay (> 30 min)")
-                            sig.status = "cancelled"
-                            sig.notes = (sig.notes or "") + " [Annullato per timing - trade già partito]"
-                            db.add(sig)
-                            db.commit()
-                            log(f"[AutoTrade] #{sig.id} {sig.symbol} annullato: timing mancato (history replay > 30min)")
                         else:
-                            if not use_llm and is_recent:
-                                log(f"[AutoTrade] #{sig.id} {sig.symbol} segnale recente da history replay → eseguo comunque")
+                            if effective_origin != "realtime":
+                                log(f"[AutoTrade] #{sig.id} {sig.symbol} LATE CATCH ({effective_origin}): {catch_reason}")
+                                _append_trade_log(sig, "late_catch", catch_reason)
                             _append_trade_log(sig, "mt5_placing", f"Invio ordini a MT5 per {sig.symbol} {sig.direction}")
                             db.add(sig)
                             db.commit()
-                            tickets = mt5_trader.place_orders(sig)
+                            tickets = mt5_trader.place_orders(sig, catch_origin=effective_origin,
+                                                              catch_reason=catch_reason, signal_ts=signal_ts)
                             if tickets:
                                 _append_trade_log(sig, "mt5_placed", f"Ordini MT5 piazzati con successo: tickets={tickets}")
                                 sig.mt5_ticket = tickets[0]
@@ -530,29 +544,33 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 db.commit()
                                 log(f"[AutoTrade] #{sig.id} {sig.symbol} → tickets={tickets}")
                             else:
+                                # Late catch: pre-check ha annullato → motivazione pronta
+                                _late_reason = getattr(sig, '_late_catch_cancel_reason', None)
                                 # Ordine fallito: verifica se il trade è già partito (prezzo oltre entry)
-                                _cancel_reason = None
-                                try:
-                                    mt5 = mt5_trader._get_mt5()
-                                    if mt5:
-                                        mt5_sym = mt5_trader.MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol)
-                                        mt5.symbol_select(mt5_sym, True)
-                                        tick = mt5.symbol_info_tick(mt5_sym)
-                                        if tick and tick.ask > 0:
-                                            is_buy = sig.direction.lower() == "buy"
-                                            entry_upper = max(sig.entry_price or 0, sig.entry_price_high or 0)
-                                            entry_lower = min(sig.entry_price or entry_upper, sig.entry_price_high or entry_upper)
-                                            if is_buy and tick.ask > entry_upper * 1.002:
-                                                _cancel_reason = f"Prezzo {tick.ask} oltre entry {entry_upper} - timing mancato"
-                                            elif not is_buy and tick.bid < entry_lower * 0.998:
-                                                _cancel_reason = f"Prezzo {tick.bid} oltre entry {entry_lower} - timing mancato"
-                                except Exception:
-                                    pass
+                                _cancel_reason = _late_reason
+                                if not _cancel_reason:
+                                    try:
+                                        mt5 = mt5_trader._get_mt5()
+                                        if mt5:
+                                            mt5_sym = mt5_trader.MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol)
+                                            mt5.symbol_select(mt5_sym, True)
+                                            tick = mt5.symbol_info_tick(mt5_sym)
+                                            if tick and tick.ask > 0:
+                                                is_buy = sig.direction.lower() == "buy"
+                                                entry_upper = max(sig.entry_price or 0, sig.entry_price_high or 0)
+                                                entry_lower = min(sig.entry_price or entry_upper, sig.entry_price_high or entry_upper)
+                                                if is_buy and tick.ask > entry_upper * 1.002:
+                                                    _cancel_reason = f"Prezzo {tick.ask} oltre entry {entry_upper} - timing mancato"
+                                                elif not is_buy and tick.bid < entry_lower * 0.998:
+                                                    _cancel_reason = f"Prezzo {tick.bid} oltre entry {entry_lower} - timing mancato"
+                                    except Exception:
+                                        pass
 
                                 if _cancel_reason:
                                     sig.status = "cancelled"
-                                    sig.notes = f"Ordine MT5 fallito, {_cancel_reason}"
-                                    _append_trade_log(sig, "mt5_failed", f"Ordine fallito e annullato: {_cancel_reason}")
+                                    sig.notes = (sig.notes or "") + f" [{_cancel_reason}]"
+                                    _tag = "late_catch_cancel" if _late_reason else "mt5_failed"
+                                    _append_trade_log(sig, _tag, _cancel_reason)
                                     log(f"[AutoTrade] #{sig.id} {sig.symbol} ANNULLATO: {_cancel_reason}")
                                 else:
                                     _append_trade_log(sig, "mt5_failed", "Nessun ticket MT5 ottenuto - controllare log MT5 per dettaglio errore")
@@ -853,7 +871,12 @@ async def start_listener():
             sender_name = getattr(event.sender, 'username', '') or \
                           getattr(event.sender, 'first_name', '') or ''
         reply_to = event.message.reply_to_msg_id if event.message.reply_to else None
-        await process_message(event.message.id, sender_name, event.message.text or "", reply_to_msg_id=reply_to, use_llm=True)
+        msg_date = event.message.date
+        if msg_date and msg_date.tzinfo:
+            msg_date = msg_date.replace(tzinfo=None)
+        await process_message(event.message.id, sender_name, event.message.text or "",
+                              reply_to_msg_id=reply_to, use_llm=True,
+                              msg_date=msg_date, origin="realtime")
 
     @tg.on(events.MessageEdited(chats=target))
     async def on_edited(event):
@@ -886,12 +909,16 @@ async def start_listener():
                         db.commit()
                         db.refresh(sig)
                         log(f"[Edit] #{sig.id} aggiornato: {changed}")
-                        # Ritenta piazzamento MT5 se auto-trade attivo
+                        # Ritenta piazzamento MT5 se auto-trade attivo (origine: edit TG → late catch)
                         import mt5_trader
                         if mt5_trader.is_enabled():
                             import json as _json
-                            log(f"[Edit] Ritento piazzamento MT5 per #{sig.id}")
-                            tickets = mt5_trader.place_orders(sig)
+                            log(f"[Edit] Ritento piazzamento MT5 per #{sig.id} (origin=edited)")
+                            _edit_reason = "Messaggio TG editato dal trader"
+                            _append_trade_log(sig, "late_catch", _edit_reason)
+                            tickets = mt5_trader.place_orders(sig, catch_origin="edited",
+                                                              catch_reason=_edit_reason,
+                                                              signal_ts=sig.created_at)
                             if tickets:
                                 _append_trade_log(sig, "mt5_placed", f"Ordini MT5 piazzati dopo edit: tickets={tickets}")
                                 sig.mt5_ticket = tickets[0]
@@ -900,6 +927,15 @@ async def start_listener():
                                 db.add(sig)
                                 db.commit()
                                 log(f"[Edit] #{sig.id} piazzato: tickets={tickets}")
+                            else:
+                                _late_reason = getattr(sig, '_late_catch_cancel_reason', None)
+                                if _late_reason:
+                                    sig.status = "cancelled"
+                                    sig.notes = (sig.notes or "") + f" [{_late_reason}]"
+                                    _append_trade_log(sig, "late_catch_cancel", _late_reason)
+                                    db.add(sig)
+                                    db.commit()
+                                    log(f"[Edit] #{sig.id} ANNULLATO: {_late_reason}")
                     else:
                         log(f"[Edit] #{sig.id} nessuna modifica rilevata nell'edit")
         except Exception as e:

@@ -199,10 +199,75 @@ def _send_single_order(mt5, mt5_sym, order_type, action, entry, sl, tp, lots, si
     return ticket
 
 
-def place_orders(sig) -> list:
+def _analyze_late_catch_ticks(mt5, mt5_sym, sig, signal_ts, now_ts, pip_size):
+    """
+    Analizza i ticks nell'intervallo [signal_ts, now_ts] per determinare:
+      - 'in_range'      → prezzo sempre dentro il range
+      - 'out_range'     → prezzo sempre fuori dal range
+      - 'crossed_above' → prezzo ha oltrepassato entry_high durante il ritardo
+      - 'crossed_below' → prezzo ha oltrepassato entry_low durante il ritardo
+      - 'no_data'       → impossibile recuperare ticks (fallback: no verdetto)
+    Range:
+      - se entry_high esiste → [entry_low, entry_high]
+      - se solo entry_price → [entry - pip_size, entry + pip_size]
+    """
+    ep_low = float(sig.entry_price) if sig.entry_price else None
+    ep_high = float(sig.entry_price_high) if sig.entry_price_high else None
+    if ep_low is None and ep_high is None:
+        return ("no_data", None, None, None)
+    if ep_high is None:
+        rng_low = ep_low - pip_size
+        rng_high = ep_low + pip_size
+    elif ep_low is None:
+        rng_low = ep_high - pip_size
+        rng_high = ep_high + pip_size
+    else:
+        rng_low = min(ep_low, ep_high)
+        rng_high = max(ep_low, ep_high)
+
+    try:
+        ticks = mt5.copy_ticks_range(mt5_sym, signal_ts, now_ts, mt5.COPY_TICKS_ALL)
+    except Exception as e:
+        log(f"#{sig.id} copy_ticks_range errore: {e}")
+        return ("no_data", rng_low, rng_high, None)
+    if ticks is None or len(ticks) == 0:
+        return ("no_data", rng_low, rng_high, None)
+
+    saw_in = False
+    saw_above = False
+    saw_below = False
+    for t in ticks:
+        mid = (t['bid'] + t['ask']) / 2.0 if t['bid'] and t['ask'] else (t['bid'] or t['ask'])
+        if mid < rng_low:
+            saw_below = True
+        elif mid > rng_high:
+            saw_above = True
+        else:
+            saw_in = True
+
+    n = len(ticks)
+    if saw_in and not saw_above and not saw_below:
+        return ("in_range", rng_low, rng_high, n)
+    if (saw_above or saw_below) and not saw_in:
+        return ("out_range", rng_low, rng_high, n)
+    # Transizione
+    if saw_above and saw_below:
+        return ("crossed_above", rng_low, rng_high, n)  # è comunque "crossed"; log verrà generico
+    if saw_above:
+        return ("crossed_above", rng_low, rng_high, n)
+    return ("crossed_below", rng_low, rng_high, n)
+
+
+def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str] = None,
+                 signal_ts: Optional[datetime] = None) -> list:
     """
     Piazza 2-3 ordini separati (uno per ogni TP) con lotti divisi equamente.
     Ritorna lista di ticket piazzati con successo.
+
+    catch_origin: 'realtime' | 'delayed' | 'edited' | 'replay'
+      Se != 'realtime', esegue la pre-check late-catch analizzando i tick
+      nell'intervallo [signal_ts, now] e può annullare il segnale se il
+      prezzo ha attraversato il range durante il ritardo.
     """
     if not _auto_trade_enabled:
         return []
@@ -234,6 +299,29 @@ def place_orders(sig) -> list:
     point       = sym_info.point
     stops_level = sym_info.trade_stops_level
     min_dist    = stops_level * point
+    pip_size    = point * 10  # 1 pip = 10 points (convenzione broker standard)
+
+    # ── Pre-check late catch ─────────────────────────────────────────────────
+    # Se il segnale NON è realtime, analizza i tick nell'intervallo di ritardo
+    # per decidere se l'ingresso è ancora valido.
+    if catch_origin != "realtime" and signal_ts is not None:
+        now_ts = datetime.utcnow()
+        verdict, rng_low, rng_high, n_ticks = _analyze_late_catch_ticks(
+            mt5, mt5_sym, sig, signal_ts, now_ts, pip_size
+        )
+        log(f"#{sig.id} late-catch pre-check: origin={catch_origin} verdict={verdict} "
+            f"range=[{rng_low},{rng_high}] ticks={n_ticks} reason='{catch_reason}'")
+        if verdict in ("crossed_above", "crossed_below"):
+            direction_txt = "sopra" if verdict == "crossed_above" else "sotto"
+            cancel_msg = (f"Late catch ({catch_origin}) {catch_reason or ''}: prezzo ha "
+                          f"attraversato il range [{rng_low:.5f},{rng_high:.5f}] "
+                          f"andando {direction_txt} durante il ritardo "
+                          f"({signal_ts.strftime('%H:%M:%S')}→{now_ts.strftime('%H:%M:%S')})")
+            sig._late_catch_cancel_reason = cancel_msg
+            log(f"#{sig.id} ANNULLATO: {cancel_msg}")
+            return []
+        # in_range / out_range / no_data → procede con la logica normale sotto.
+    # ─────────────────────────────────────────────────────────────────────────
 
     is_buy = (sig.direction or "buy").lower() == "buy"
     entry  = sig.entry_price or sig.entry_price_high
@@ -835,6 +923,8 @@ def sync_positions() -> list:
 
             total_profit   = 0.0
             open_count     = 0
+            positions_count = 0
+            pendings_count = 0
             closed_tickets = []
             tp1_hit        = False
 
@@ -843,6 +933,7 @@ def sync_positions() -> list:
                     pos = open_positions[ticket]
                     total_profit += pos.profit
                     open_count += 1
+                    positions_count += 1
                     # Cattura actual_entry_price quando un BUY/SELL LIMIT viene riempito
                     if not sig.actual_entry_price and pos.price_open:
                         sig.actual_entry_price = pos.price_open
@@ -851,6 +942,7 @@ def sync_positions() -> list:
 
                 if ticket in pending_orders:
                     open_count += 1
+                    pendings_count += 1
                     continue
 
                 # Ticket chiuso — cerca deal
@@ -901,6 +993,17 @@ def sync_positions() -> list:
 
             # Aggiorna P&L live (somma profit aperte + chiuse parziali)
             sig.pnl_usd = round(total_profit, 2)
+
+            # Allinea lo status con la realtà MT5:
+            # - solo pending → 'pending' (ordini non ancora fillati)
+            # - almeno una posizione aperta → 'open' (se non è già tp1/tp2)
+            if sig.status in ("open", "pending") and not closed_tickets:
+                if positions_count == 0 and pendings_count > 0 and sig.status != "pending":
+                    sig.status = "pending"
+                    log(f"#{sig.id} status allineato: pending ({pendings_count} ordini pending, 0 posizioni aperte)")
+                elif positions_count > 0 and sig.status == "pending":
+                    sig.status = "open"
+                    log(f"#{sig.id} status allineato: open ({positions_count} posizioni aperte)")
 
             # Tutti i ticket orfani (non trovati in MT5 dopo 30min) → marca cancelled
             if open_count == 0 and not closed_tickets:
