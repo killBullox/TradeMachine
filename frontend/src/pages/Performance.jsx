@@ -412,10 +412,21 @@ export default function Performance() {
       </div>
 
       {/* Seconda riga KPI */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <KPI
+          label="Segnali ricevuti"
+          value={<>{perf.total_signals ?? '—'} <span className="text-slate-500 text-lg font-normal">({perf.managed_signals ?? 0})</span></>}
+          color="text-white"
+          sub="totali (gestiti)"
+        />
         <KPI label="Totale Wins" value={fmt$(perf.total_wins_usd)} color="text-emerald-400" sub={`Media: ${fmt$(perf.avg_win_usd)}`} />
         <KPI label="Totale Loss" value={fmt$(perf.total_loss_usd)} color="text-rose-400" sub={`Media: ${fmt$(perf.avg_loss_usd)}`} />
-        <KPI label="Ultimi 7gg (segnali)" value={perf.signals_last_7d} color="text-sky-400" />
+        <KPI
+          label="Ultimi 7gg (segnali)"
+          value={<>{perf.signals_last_7d ?? '—'} <span className="text-slate-500 text-lg font-normal">({perf.managed_signals_last_7d ?? 0})</span></>}
+          color="text-sky-400"
+          sub="totali (gestiti)"
+        />
         <KPI label="P&L Ultimi 7gg" value={fmt$(perf.pnl_last_7d)} color={clr(perf.pnl_last_7d)} />
       </div>
 

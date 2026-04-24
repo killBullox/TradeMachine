@@ -310,6 +310,7 @@ export default function HistoryPage() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [managedFilter, setManagedFilter] = useState('all') // 'all' | 'managed' | 'missed'
   const PAGE_SIZE = 50
 
   useEffect(() => {
@@ -320,14 +321,19 @@ export default function HistoryPage() {
     }
   }, [tab, refreshKey])
 
-  // Filtra per data
+  // Filtra per data e per stato "gestito" (ha prodotto un ordine MT5)
+  const isManaged = s => Boolean(s.mt5_ticket || s.mt5_tickets)
   const signals = allSignals.filter(s => {
     const ref = s.created_at ? new Date(s.created_at) : null
-    if (!ref) return true
-    if (dateFrom && ref < new Date(dateFrom)) return false
-    if (dateTo   && ref > new Date(dateTo + 'T23:59:59')) return false
+    if (ref) {
+      if (dateFrom && ref < new Date(dateFrom)) return false
+      if (dateTo   && ref > new Date(dateTo + 'T23:59:59')) return false
+    }
+    if (managedFilter === 'managed' && !isManaged(s)) return false
+    if (managedFilter === 'missed'  &&  isManaged(s)) return false
     return true
   })
+  const managedCount = allSignals.filter(isManaged).length
 
   // Paginazione sul filtrato
   const paginated = signals.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
@@ -339,8 +345,6 @@ export default function HistoryPage() {
   return (
     <div className="p-6 space-y-4">
       <h1 className="text-xl font-bold text-white">Storico</h1>
-
-      <RiskPanel onSaved={() => { setRefreshKey(k => k + 1); setTimeout(() => setRefreshKey(k => k + 1), 3500) }} />
 
       <ResetPanel onReset={() => setRefreshKey(k => k + 1)} />
 
@@ -355,8 +359,22 @@ export default function HistoryPage() {
         ))}
 
         {tab === 'signals' && (
-          <div className="flex items-center gap-2 ml-2">
-            <span className="text-xs text-slate-500">Dal</span>
+          <div className="flex items-center gap-2 ml-2 flex-wrap">
+            {[
+              { k: 'all',     label: 'Tutti',   count: allSignals.length },
+              { k: 'managed', label: 'Gestiti', count: managedCount },
+              { k: 'missed',  label: 'Mancati', count: allSignals.length - managedCount },
+            ].map(f => (
+              <button key={f.k} onClick={() => { setManagedFilter(f.k); setPage(0) }}
+                className={`text-xs px-3 py-1 rounded border transition-colors ${
+                  managedFilter === f.k
+                    ? 'bg-brand-600 border-brand-500 text-white'
+                    : 'border-slate-700 text-slate-400 hover:text-white'
+                }`}>
+                {f.label} <span className="opacity-70">({f.count})</span>
+              </button>
+            ))}
+            <span className="text-xs text-slate-500 ml-2">Dal</span>
             <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); setPage(0) }}
               className="text-xs px-2 py-1 bg-slate-800 border border-slate-700 rounded text-slate-200" />
             <span className="text-xs text-slate-500">Al</span>

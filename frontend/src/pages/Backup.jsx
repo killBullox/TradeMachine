@@ -1,8 +1,78 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { api } from '../api'
 import toast from 'react-hot-toast'
 import { format } from 'date-fns'
 import { it } from 'date-fns/locale'
+
+function RiskPanel() {
+  const [settings, setSettings] = useState(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    api.getRiskSettings().then(setSettings)
+  }, [])
+
+  if (!settings) return null
+
+  async function save() {
+    setSaving(true)
+    try {
+      await api.saveRiskSettings(settings)
+      toast.success('Impostazioni rischio salvate e ricalcolate!')
+    } catch {
+      toast.error('Errore nel salvataggio')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="card p-6 mb-8">
+      <h2 className="text-lg font-semibold text-white mb-4">Risk Management</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="space-y-1">
+          <label className="text-xs text-slate-400">Account ($)</label>
+          <input type="number" value={settings.account_size}
+            onChange={e => setSettings(s => ({...s, account_size: +e.target.value}))}
+            className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500" />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-slate-400">Rischio % / trade</label>
+          <input type="number" step="0.1" value={settings.risk_per_trade_pct}
+            onChange={e => setSettings(s => ({...s, risk_per_trade_pct: +e.target.value}))}
+            className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500" />
+        </div>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 mb-1">
+            <input type="checkbox" checked={settings.use_fixed_usd}
+              onChange={e => setSettings(s => ({...s, use_fixed_usd: e.target.checked}))}
+              className="w-4 h-4 rounded" id="use-fixed-settings" />
+            <label htmlFor="use-fixed-settings" className="text-xs text-slate-400">Importo fisso ($)</label>
+          </div>
+          <input type="number" value={settings.risk_per_trade_usd ?? ''}
+            disabled={!settings.use_fixed_usd}
+            onChange={e => setSettings(s => ({...s, risk_per_trade_usd: +e.target.value}))}
+            className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white disabled:opacity-40 focus:outline-none focus:border-brand-500" />
+        </div>
+        <div className="flex items-end">
+          <div className="w-full">
+            <div className="text-xs text-slate-500 mb-2">
+              Max risk per trade: <span className="text-white font-mono text-sm font-semibold">
+                {settings.use_fixed_usd && settings.risk_per_trade_usd
+                  ? `$${settings.risk_per_trade_usd}`
+                  : `$${((settings.account_size * settings.risk_per_trade_pct) / 100).toFixed(0)}`}
+              </span>
+            </div>
+            <button onClick={save} disabled={saving}
+              className="w-full px-4 py-2 text-sm bg-brand-600 hover:bg-brand-500 rounded-lg text-white font-medium disabled:opacity-50 transition-colors">
+              {saving ? 'Salvando...' : 'Salva & Ricalcola'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function fmtTs(ts) {
   if (!ts) return '—'
@@ -94,6 +164,9 @@ export default function Backup() {
   return (
     <div className="p-6 max-w-4xl mx-auto">
       <h1 className="text-2xl font-bold text-white mb-6">Impostazioni</h1>
+
+      {/* Risk Management */}
+      <RiskPanel />
 
       {/* Riavvio Server */}
       <div className="card p-6 mb-8 border border-amber-600/30">

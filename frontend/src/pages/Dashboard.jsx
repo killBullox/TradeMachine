@@ -345,7 +345,12 @@ export default function Dashboard({ wsEvents }) {
       {/* Stats */}
       {perf && (
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-          <StatCard label="Segnali totali" value={perf.total_signals} icon={Activity} color="bg-brand-900/40 text-brand-400" />
+          <StatCard
+            label="Segnali totali"
+            value={<>{perf.total_signals ?? '—'} <span className="text-slate-500 text-lg font-normal">({perf.managed_signals ?? 0})</span></>}
+            icon={Activity}
+            color="bg-brand-900/40 text-brand-400"
+          />
           <StatCard label="Win rate" value={perf.win_rate_pct != null ? `${perf.win_rate_pct}%` : '—'} icon={Target} color="bg-emerald-900/40 text-emerald-400" />
           <StatCard label="SL hit" value={perf.sl_hits} icon={ShieldAlert} color="bg-rose-900/40 text-rose-400" />
           <StatCard label="Ultimi 7gg" value={perf.signals_last_7d} icon={TrendingUp} color="bg-violet-900/40 text-violet-400" />

@@ -521,6 +521,12 @@ def get_performance(
     recent = [s for s in signals if s.created_at and s.created_at >= week_ago]
     recent_pnl = round(sum(s.pnl_usd for s in recent if s.pnl_usd), 2)
 
+    # Segnali "gestiti" = hanno prodotto almeno un ordine MT5 (mt5_ticket o mt5_tickets)
+    def _is_managed(s):
+        return bool(s.mt5_ticket or s.mt5_tickets)
+    managed_total  = sum(1 for s in signals if _is_managed(s))
+    managed_recent = sum(1 for s in recent   if _is_managed(s))
+
     # P&L di oggi
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     today_closed = [s for s in closed if s.closed_at and s.closed_at >= today_start]
@@ -563,6 +569,9 @@ def get_performance(
         # Recente
         "signals_last_7d": len(recent),
         "pnl_last_7d": recent_pnl,
+        # Segnali gestiti (con ordine MT5 piazzato)
+        "managed_signals": managed_total,
+        "managed_signals_last_7d": managed_recent,
         # Per simbolo
         "by_symbol": [
             {"symbol": sym, **data}
