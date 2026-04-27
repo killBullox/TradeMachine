@@ -545,6 +545,11 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
             _append_trade_log_mt5(sig, "mt5_order_failed", f"TP{tp_num}: ordine FALLITO | {order_type_str} | entry={entry} | sl={sl} | tp={tp}")
             log(f"#{sig.id} TP{tp_num} FALLITO entry={entry} sl={sl} tp={tp}")
 
+    # Salva sul signal i lotti totali EFFETTIVAMENTE piazzati su MT5,
+    # così il frontend mostra il valore reale e non un ricalcolo teorico.
+    if tickets:
+        sig.position_size = round(lots_each * len(tickets), 2)
+
     return tickets
 
 
@@ -934,6 +939,7 @@ def sync_positions() -> list:
                 tickets = [sig.mt5_ticket]
 
             total_profit   = 0.0
+            total_volume   = 0.0   # somma dei lotti effettivi su MT5 (per popolare position_size)
             open_count     = 0
             positions_count = 0
             pendings_count = 0
@@ -944,6 +950,7 @@ def sync_positions() -> list:
                 if ticket in open_positions:
                     pos = open_positions[ticket]
                     total_profit += pos.profit
+                    total_volume += pos.volume
                     open_count += 1
                     positions_count += 1
                     # Cattura actual_entry_price quando un BUY/SELL LIMIT viene riempito
@@ -953,6 +960,7 @@ def sync_positions() -> list:
                     continue
 
                 if ticket in pending_orders:
+                    total_volume += pending_orders[ticket].volume_initial
                     open_count += 1
                     pendings_count += 1
                     continue
@@ -965,16 +973,17 @@ def sync_positions() -> list:
                     close_ts    = _get_mt5_utc(close_deal.time)
                     total_profit += profit
                     closed_tickets.append((ticket, close_price, profit, close_ts))
-                    # Cattura actual_entry_price dal deal di entrata
-                    if not sig.actual_entry_price:
-                        entry_deals = mt5.history_deals_get(position=ticket)
-                        if entry_deals:
-                            for ed in entry_deals:
-                                if ed.entry == mt5.DEAL_ENTRY_IN:
+                    # Recupera deal di entrata: serve sia per actual_entry_price sia per volume iniziale
+                    entry_deals = mt5.history_deals_get(position=ticket)
+                    if entry_deals:
+                        for ed in entry_deals:
+                            if ed.entry == mt5.DEAL_ENTRY_IN:
+                                total_volume += ed.volume
+                                if not sig.actual_entry_price:
                                     sig.actual_entry_price = ed.price
                                     sig.entered_at = _get_mt5_utc(ed.time)
                                     log(f"#{sig.id} actual_entry_price={ed.price} entered_at={sig.entered_at} (da deal)")
-                                    break
+                                break
 
                     # Determina se è TP1
                     if sig.tp1 and ((is_buy and close_price >= sig.tp1) or
@@ -1005,6 +1014,14 @@ def sync_positions() -> list:
 
             # Aggiorna P&L live (somma profit aperte + chiuse parziali)
             sig.pnl_usd = round(total_profit, 2)
+
+            # Aggiorna position_size con la somma reale dei lotti su MT5,
+            # così il valore mostrato nel frontend riflette quello effettivo
+            # (e non un ricalcolo teorico che spesso differisce dalla realtà).
+            if total_volume > 0:
+                new_size = round(total_volume, 2)
+                if sig.position_size != new_size:
+                    sig.position_size = new_size
 
             # Allinea lo status con la realtà MT5:
             # - solo pending → 'pending' (ordini non ancora fillati)

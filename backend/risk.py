@@ -210,7 +210,13 @@ def recalculate_all():
             effective_risk = risk_amount * 0.5 if getattr(sig, 'is_risky', False) else risk_amount
             lots = calc_position_size(sig.symbol, entry, sl, effective_risk)
             sig.risk_usd = effective_risk
-            sig.position_size = lots
+            # Se il segnale è effettivamente piazzato su MT5 (ticket attivo, non
+            # cancellato), il position_size autorevole arriva da place_orders /
+            # sync_positions: NON sovrascrivere con il ricalcolo teorico, che
+            # usa una formula diversa e spesso differisce dalla realtà MT5.
+            is_mt5_active = bool(sig.mt5_ticket or sig.mt5_tickets) and sig.status != "cancelled"
+            if not is_mt5_active:
+                sig.position_size = lots
 
             if lots and entry:
                 # Segnali MT5: P&L autorevole da sync_positions, non sovrascrivere
