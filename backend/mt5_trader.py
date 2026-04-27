@@ -559,6 +559,51 @@ def place_order(sig) -> Optional[int]:
     return tickets[0] if tickets else None
 
 
+def backfill_position_size() -> list:
+    """
+    One-shot: per ogni segnale con MT5 ticket attivo (non cancelled), ricalcola
+    position_size dai deal di entrata (DEAL_ENTRY_IN) reali su MT5.
+    Utile per sistemare i record salvati con il vecchio ricalcolo teorico.
+    """
+    from database import SessionLocal, Signal
+    import json as jsonlib
+
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return []
+
+    db = SessionLocal()
+    try:
+        sigs = db.query(Signal).filter(
+            (Signal.mt5_ticket.isnot(None)) | (Signal.mt5_tickets.isnot(None)),
+            Signal.status != "cancelled",
+        ).all()
+
+        updated = []
+        for sig in sigs:
+            tickets = jsonlib.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
+            total_vol = 0.0
+            for t in tickets:
+                deals = mt5.history_deals_get(position=t)
+                if not deals:
+                    continue
+                for d in deals:
+                    if d.entry == mt5.DEAL_ENTRY_IN:
+                        total_vol += d.volume
+                        break
+            if total_vol > 0:
+                new_size = round(total_vol, 2)
+                if sig.position_size != new_size:
+                    log(f"#{sig.id} backfill position_size: {sig.position_size} -> {new_size}")
+                    sig.position_size = new_size
+                    db.add(sig)
+                    updated.append({"id": sig.id, "old": None, "new": new_size, "tickets": tickets})
+        db.commit()
+        return updated
+    finally:
+        db.close()
+
+
 def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
     """Modifica lo SL di una posizione aperta."""
     mt5 = _get_mt5()

@@ -915,6 +915,13 @@ async def mt5_sync():
     updated = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.sync_positions)
     return {"ok": True, "updated": updated}
 
+
+@app.post("/api/mt5/backfill-position-size")
+async def mt5_backfill_position_size():
+    """One-shot: ricalcola position_size dai deal MT5 per tutti i segnali con ticket attivi."""
+    updated = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.backfill_position_size)
+    return {"ok": True, "count": len(updated), "updated": updated}
+
 @app.post("/api/mt5/close/{ticket}")
 async def mt5_close(ticket: int, db: Session = Depends(get_db)):
     sig = db.query(Signal).filter(Signal.mt5_ticket == ticket).first()
