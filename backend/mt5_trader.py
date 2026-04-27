@@ -458,38 +458,50 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     max_entry = entry_upper + sl_distance
     min_entry = entry_lower - sl_distance
 
+    # Soglia MARKET: per i catch realtime niente tolleranza dal lato sfavorevole
+    # (BUY sopra range / SELL sotto range) → in quel caso sempre LIMIT al bordo
+    # del range, aspettando il pullback. Per i late-catch (delayed/edited/replay)
+    # restiamo invece sulla tolleranza simmetrica originale, perché il pre-check
+    # _analyze_late_catch_ticks ha già validato che il prezzo non ha attraversato
+    # il range durante il ritardo.
+    is_realtime = (catch_origin == "realtime")
+    upper_threshold = entry_upper if is_realtime else max_entry
+    lower_threshold = entry_lower if is_realtime else min_entry
+
     if is_buy:
+        # BUY: favorevole = prezzo SOTTO range, sfavorevole = prezzo SOPRA.
         if current_ask < min_entry:
-            # Prezzo troppo sotto il range → BUY STOP, aspetta breakout verso il range
+            # Troppo sotto (oltre tolleranza) → BUY STOP a entry_lower
             order_type = mt5.ORDER_TYPE_BUY_STOP
             entry = _round_price(float(entry_lower), digits)
-            log(f"#{sig.id} BUY STOP: ask={current_ask} < range, stop a {entry}")
-        elif current_ask <= max_entry:
-            # Prezzo nel range o vicino → entra a mercato
+            log(f"#{sig.id} BUY STOP: ask={current_ask} < range-SLdist, stop a {entry}")
+        elif current_ask <= upper_threshold:
+            # Nel range, oppure (solo late-catch) sopra entro tolleranza → MARKET
             order_type = mt5.ORDER_TYPE_BUY
             entry = current_ask
-            log(f"#{sig.id} BUY MARKET: ask={current_ask} range={ep1}-{ep2}")
+            log(f"#{sig.id} BUY MARKET: ask={current_ask} range={ep1}-{ep2} origin={catch_origin}")
         else:
-            # Prezzo sopra il range → BUY LIMIT, aspetta che scenda al range
+            # Sopra range → BUY LIMIT a entry_upper, aspetta pullback
             order_type = mt5.ORDER_TYPE_BUY_LIMIT
             entry = _round_price(float(entry_upper), digits)
-            log(f"#{sig.id} BUY LIMIT: ask={current_ask} > range, limit a {entry}")
+            log(f"#{sig.id} BUY LIMIT: ask={current_ask} > range, limit a {entry} origin={catch_origin}")
     else:
+        # SELL: favorevole = prezzo SOPRA range, sfavorevole = prezzo SOTTO.
         if current_bid > max_entry:
-            # Prezzo troppo sopra il range → SELL STOP, aspetta breakdown verso il range
+            # Troppo sopra (oltre tolleranza) → SELL STOP a entry_upper
             order_type = mt5.ORDER_TYPE_SELL_STOP
             entry = _round_price(float(entry_upper), digits)
-            log(f"#{sig.id} SELL STOP: bid={current_bid} > range, stop a {entry}")
-        elif current_bid >= min_entry:
-            # Prezzo nel range o vicino → entra a mercato
+            log(f"#{sig.id} SELL STOP: bid={current_bid} > range+SLdist, stop a {entry}")
+        elif current_bid >= lower_threshold:
+            # Nel range, oppure (solo late-catch) sotto entro tolleranza → MARKET
             order_type = mt5.ORDER_TYPE_SELL
             entry = current_bid
-            log(f"#{sig.id} SELL MARKET: bid={current_bid} range={ep1}-{ep2}")
+            log(f"#{sig.id} SELL MARKET: bid={current_bid} range={ep1}-{ep2} origin={catch_origin}")
         else:
-            # Prezzo sotto il range → SELL LIMIT, aspetta che salga al range
+            # Sotto range → SELL LIMIT a entry_lower, aspetta pullback
             order_type = mt5.ORDER_TYPE_SELL_LIMIT
             entry = _round_price(float(entry_lower), digits)
-            log(f"#{sig.id} SELL LIMIT: bid={current_bid} < range, limit a {entry}")
+            log(f"#{sig.id} SELL LIMIT: bid={current_bid} < range, limit a {entry} origin={catch_origin}")
 
     if sl and abs(entry - sl) < min_dist:
         log(f"#{sig.id} SL troppo vicino al prezzo, skip")
