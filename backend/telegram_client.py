@@ -614,10 +614,14 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 import mt5_trader
                 import json as _json
                 if mt5_trader.is_enabled():
-                    # Trova segnali aperti (con ticket MT5) per il simbolo
+                    # Trova segnali aperti (con ticket MT5) per il simbolo.
+                    # closed_at IS NULL esclude segnali completamente chiusi
+                    # (es. TP1 con tutti i ticket già usciti) — evita di provare
+                    # a modificare ticket che non esistono più su MT5.
                     q = db.query(Signal).filter(
                         Signal.status.in_(["open", "tp1", "tp2"]),
                         Signal.mt5_ticket.isnot(None),
+                        Signal.closed_at.is_(None),
                     )
                     if parsed.symbol:
                         q = q.filter(Signal.symbol == parsed.symbol)

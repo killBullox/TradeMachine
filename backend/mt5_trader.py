@@ -605,7 +605,7 @@ def backfill_position_size() -> list:
 
 
 def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
-    """Modifica lo SL di una posizione aperta."""
+    """Modifica lo SL di una posizione aperta. Skip silenzioso se è già al valore richiesto."""
     mt5 = _get_mt5()
     if mt5 is None:
         return False
@@ -613,6 +613,7 @@ def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
     mt5_sym = MT5_SYMBOL_MAP.get(symbol.upper(), symbol)
     sym_info = mt5.symbol_info(mt5_sym)
     digits = sym_info.digits if sym_info else 5
+    new_sl_rounded = round(new_sl, digits)
 
     positions = mt5.positions_get(ticket=ticket)
     if not positions:
@@ -622,28 +623,34 @@ def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
             log(f"Ticket {ticket} non trovato")
             return False
         order = orders[0]
+        # Skip se SL già al valore richiesto (evita retcode=10025 in loop)
+        if order.sl is not None and round(order.sl, digits) == new_sl_rounded:
+            return True
         request = {
             "action": mt5.TRADE_ACTION_MODIFY,
             "order": ticket,
             "price": order.price_open,
-            "sl": round(new_sl, digits),
+            "sl": new_sl_rounded,
             "tp": order.tp,
             "type_time": mt5.ORDER_TIME_GTC,
         }
     else:
         pos = positions[0]
+        # Skip se SL già al valore richiesto (evita retcode=10025 in loop)
+        if pos.sl is not None and round(pos.sl, digits) == new_sl_rounded:
+            return True
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
             "position": ticket,
             "symbol": pos.symbol,
-            "sl": round(new_sl, digits),
+            "sl": new_sl_rounded,
             "tp": pos.tp,
         }
 
     result = mt5.order_send(request)
     ok = result and result.retcode == mt5.TRADE_RETCODE_DONE
     status = "OK" if ok else f"FAIL retcode={result.retcode if result else '?'}"
-    log(f"modify_sl ticket={ticket} new_sl={new_sl} -> {status}")
+    log(f"modify_sl ticket={ticket} new_sl={new_sl_rounded} -> {status}")
     return ok
 
 
