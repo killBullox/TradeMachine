@@ -410,6 +410,33 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         log(f"#{sig.id} nessun TP definito, skip")
         return []
 
+    # Sanity check R/R: se TP1 è 5x più lontano dello SL dall'entry il segnale è
+    # probabilmente sbagliato (typo grave del trader, es. "Sell Near 4734-36 SL
+    # 4742 TP1 4624" — voleva 4634-36 e SL 4642). NON tentare auto-correzione
+    # speculativa: annulla e aspetta l'edit del messaggio.
+    if sl_raw and tps_raw:
+        sl_dist = abs(float(entry) - float(sl_raw))
+        tp1_dist = abs(float(entry) - float(tps_raw[0][1]))
+        if sl_dist > 0 and tp1_dist / sl_dist > 5:
+            from database import SessionLocal as _SL
+            ratio = tp1_dist / sl_dist
+            msg = (f"R/R sproporzionato {ratio:.1f}:1 (TP1_dist={tp1_dist:.1f}, "
+                   f"SL_dist={sl_dist:.1f}) — segnale probabilmente sbagliato, "
+                   f"in attesa di edit del trader")
+            log(f"#{sig.id} {msg}")
+            sig.status = "cancelled"
+            sig.notes = (sig.notes or "") + f" [Sospeso R/R: {msg}]"
+            _append_trade_log_mt5(sig, "rr_suspect", msg)
+            # Persisti subito la cancellazione: il chiamante (telegram_client)
+            # potrebbe non riavere sig se passa di mano fra sessioni.
+            _db = _SL()
+            try:
+                _db.merge(sig)
+                _db.commit()
+            finally:
+                _db.close()
+            return []
+
     # Position size totale
     from risk import get_risk_settings, calc_risk_amount, calc_position_size, get_spec
     settings  = get_risk_settings()

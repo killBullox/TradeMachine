@@ -889,11 +889,19 @@ async def start_listener():
         text = event.message.text or ""
         db = SessionLocal()
         try:
+            # Accetta sia 'pending' sia 'cancelled' senza ticket: in particolare
+            # i segnali sospesi per R/R sproporzionato vengono annullati in
+            # attesa proprio dell'edit del trader.
             sig = db.query(Signal).filter(
                 Signal.telegram_msg_id == msg_id,
-                Signal.status == "pending",
+                Signal.status.in_(["pending", "cancelled"]),
             ).first()
             if sig and not sig.mt5_ticket:
+                # Se era cancellato in attesa di edit, lo riportiamo a pending
+                # prima di ritentare il piazzamento.
+                if sig.status == "cancelled":
+                    sig.status = "pending"
+                    log(f"[Edit] #{sig.id} riapro segnale cancellato (in attesa di edit)")
                 log(f"[Edit] Messaggio TG {msg_id} editato — riprocesso segnale #{sig.id} {sig.symbol}")
                 # Riparsa il messaggio editato
                 from llm_parser import parse_message
