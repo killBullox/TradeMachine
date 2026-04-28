@@ -508,13 +508,33 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         _append_trade_log_mt5(sig, "mt5_skip", f"SL={sl} troppo vicino a entry={entry} (min_dist={min_dist:.5f}), ordini non inviati")
         return []
 
-    # Validazione direzione SL: per BUY sl deve essere sotto entry, per SELL sopra
+    # Validazione direzione SL: per BUY sl deve essere sotto entry, per SELL sopra.
+    # Se l'SL del segnale è dal lato sbagliato è quasi sempre un typo del trader
+    # (es. "Stoploss: 4719" invece di "4619" per un BUY a 4624). Auto-correggi
+    # sintetizzando un SL specchio rispetto a TP1 (stessa distanza, lato giusto)
+    # invece di bloccare il trade.
     if sl:
         sl_side_wrong = (is_buy and sl >= entry) or (not is_buy and sl <= entry)
         if sl_side_wrong:
-            log(f"#{sig.id} SL={sl} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} entry={entry}, skip")
-            _append_trade_log_mt5(sig, "mt5_skip", f"SL={sl} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} con entry={entry}, ordini non inviati")
-            return []
+            tp1_for_synth = sig.tp1
+            if tp1_for_synth and entry:
+                tp_distance = abs(float(tp1_for_synth) - float(entry))
+                if is_buy:
+                    sl_synthetic = round(float(entry) - tp_distance, digits)
+                else:
+                    sl_synthetic = round(float(entry) + tp_distance, digits)
+                msg = (f"SL={sl} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} "
+                       f"entry={entry} (probabile typo): auto-correzione → SL={sl_synthetic} "
+                       f"(specchio di TP1={tp1_for_synth}, distanza {tp_distance})")
+                log(f"#{sig.id} {msg}")
+                _append_trade_log_mt5(sig, "mt5_sl_autocorrect", msg)
+                sig.notes = (sig.notes or "") + f" [SL auto-corretto: {sl} → {sl_synthetic}]"
+                sl = sl_synthetic
+            else:
+                # Niente TP1 → non possiamo sintetizzare, blocchiamo come prima
+                log(f"#{sig.id} SL={sl} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} entry={entry} e niente TP1, skip")
+                _append_trade_log_mt5(sig, "mt5_skip", f"SL={sl} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} con entry={entry}, ordini non inviati")
+                return []
 
     is_market = order_type in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL)
     action = mt5.TRADE_ACTION_DEAL if is_market else mt5.TRADE_ACTION_PENDING
