@@ -122,6 +122,7 @@ function SignalRow({ s }) {
         className={`hover:bg-slate-800/30 transition-colors ${hasDetail ? 'cursor-pointer' : ''}`}
         onClick={() => hasDetail && setOpen(o => !o)}
       >
+        <td className="py-2 pr-3 font-mono text-slate-500 text-xs">#{s.id}</td>
         <td className="py-2 pr-3 font-medium text-white text-sm">
           {hasDetail
             ? <span className="text-slate-500 mr-1 text-xs">{open ? '▼' : '▶'}</span>
@@ -166,7 +167,7 @@ function SignalRow({ s }) {
       </tr>
       {open && hasDetail && (
         <tr className="bg-slate-900/60">
-          <td colSpan={14} className="px-10 pb-3">
+          <td colSpan={15} className="px-10 pb-3">
             {s.notes && (
               <div className="mb-2 px-3 py-2 bg-amber-900/20 border border-amber-700/30 rounded text-sm text-amber-300">
                 {s.notes}
@@ -404,6 +405,7 @@ export default function HistoryPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-slate-500 border-b border-slate-800">
+                  <th className="pb-2 pr-3">#</th>
                   <th className="pb-2 pr-3">Simbolo</th>
                   <th className="pb-2 pr-3">Dir.</th>
                   <th className="pb-2 pr-3">Segnale</th>
