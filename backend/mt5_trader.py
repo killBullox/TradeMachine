@@ -287,9 +287,19 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         log(f"Symbol info non disponibile per {mt5_sym}")
         return []
 
-    tick = mt5.symbol_info_tick(mt5_sym)
-    if tick is None:
-        log(f"Tick non disponibile per {mt5_sym}")
+    # Quando un simbolo viene appena aggiunto al Market Watch, il broker può
+    # impiegare qualche istante a inviare il primo tick. Senza tick valido
+    # mt5.order_send() risponde retcode=10015 Invalid price. Retry breve.
+    import time as _time
+    tick = None
+    for _attempt in range(8):
+        tick = mt5.symbol_info_tick(mt5_sym)
+        if tick and tick.bid > 0 and tick.ask > 0:
+            break
+        _time.sleep(0.25)
+    if tick is None or tick.bid <= 0 or tick.ask <= 0:
+        log(f"#{sig.id} tick non disponibile per {mt5_sym} (bid/ask=0 dopo retry) — skip")
+        _append_trade_log_mt5(sig, "mt5_skip", f"Tick non disponibile per {mt5_sym} (simbolo non in Market Watch?), ordini non inviati")
         return []
 
     digits      = sym_info.digits
