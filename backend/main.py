@@ -1019,19 +1019,41 @@ async def mt5_close_all(db: Session = Depends(get_db)):
 
 @app.post("/api/mt5/place/{signal_id}")
 async def mt5_place_order(signal_id: int, db: Session = Depends(get_db)):
-    """Piazza manualmente ordini MT5 per un segnale specifico (multi-ticket)."""
+    """Piazza manualmente ordini MT5 per un segnale specifico (multi-ticket).
+
+    Calcola il ritardo rispetto al created_at del segnale e usa
+    catch_origin='delayed' se > 60s, così il pre-check late-catch
+    (_analyze_late_catch_ticks) viene effettivamente eseguito invece di
+    saltare al MARKET cieco.
+    """
     sig = db.query(Signal).filter(Signal.id == signal_id).first()
     if not sig:
         raise HTTPException(status_code=404, detail="Segnale non trovato")
-    tickets = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.place_orders, sig)
+
+    signal_ts = sig.created_at or datetime.utcnow()
+    delay_sec = (datetime.utcnow() - signal_ts).total_seconds()
+    if delay_sec > 60:
+        catch_origin = "delayed"
+        catch_reason = f"Piazzamento manuale via API, ritardo {int(delay_sec)}s dal segnale"
+    else:
+        catch_origin = "realtime"
+        catch_reason = None
+
+    def _place():
+        return mt5_trader.place_orders(sig, catch_origin=catch_origin,
+                                       catch_reason=catch_reason, signal_ts=signal_ts)
+    tickets = await asyncio.get_event_loop().run_in_executor(None, _place)
     if tickets:
         sig.mt5_ticket = tickets[0]
         sig.mt5_tickets = json.dumps(tickets)
         sig.status = "open"
         db.add(sig)
         db.commit()
-        return {"ok": True, "tickets": tickets}
-    return {"ok": False, "tickets": []}
+        return {"ok": True, "tickets": tickets, "catch_origin": catch_origin, "delay_sec": int(delay_sec)}
+    # Late-catch potrebbe aver annullato il segnale: rileggi lo stato dal DB
+    db.refresh(sig)
+    return {"ok": False, "tickets": [], "catch_origin": catch_origin,
+            "delay_sec": int(delay_sec), "status": sig.status, "notes": sig.notes}
 
 
 # ─── Backup & Ripristino ─────────────────────────────────────────────────────
