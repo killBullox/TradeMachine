@@ -322,9 +322,10 @@ export default function HistoryPage() {
     }
   }, [tab, refreshKey])
 
-  // Filtra per data e per stato "gestito" = ha un ordine MT5 attivo (non cancellato).
-  // Segnali con ticket storico ma poi annullati (es. late-catch cancel) NON sono gestiti.
-  const isManaged = s => Boolean(s.mt5_ticket || s.mt5_tickets) && s.status !== 'cancelled'
+  // Filtra per data e per stato "gestito" = ha effettivamente prodotto un
+  // trade su MT5 (ticket + actual_entry_price). I segnali con solo pending mai
+  // riempiti o cancellati NON sono gestiti.
+  const isManaged = s => Boolean(s.mt5_ticket || s.mt5_tickets) && s.status !== 'cancelled' && s.actual_entry_price != null
   const signals = allSignals.filter(s => {
     const ref = s.created_at ? new Date(s.created_at) : null
     if (ref) {

@@ -387,12 +387,16 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                 sig.updated_at = now
                 db.add(sig)
         else:
-            # Chiusura totale: chiudi tutti i ticket
-            closed_any = False
+            # Chiusura totale: chiudi tutti i ticket. Distinguiamo fra
+            # posizioni effettivamente aperte (chiusura → 'closed') e pending
+            # mai eseguiti (cancellazione → 'cancelled' se nessuna posizione
+            # è mai stata riempita).
+            position_closed_any = False
+            pending_cancelled_any = False
             for ticket in tickets:
                 ok = mt5_trader.close_position(ticket, sig.symbol)
                 if ok:
-                    closed_any = True
+                    position_closed_any = True
                     log(f"[Close] #{sig.id} {sig.symbol} ticket={ticket} chiuso (motivo: {parsed.reason or 'manuale'})")
                 else:
                     # Potrebbe essere un ordine pending → cancella
@@ -402,14 +406,29 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                         if orders:
                             cancel_req = {"action": mt5.TRADE_ACTION_REMOVE, "order": ticket}
                             mt5.order_send(cancel_req)
-                            closed_any = True
+                            pending_cancelled_any = True
                             log(f"[Close] #{sig.id} {sig.symbol} pending ticket={ticket} cancellato")
 
-            if closed_any:
+            if position_closed_any:
+                # Almeno una posizione era effettivamente aperta → trade chiuso
                 sig.status = "closed"
                 sig.closed_at = now
                 sig.updated_at = now
                 db.add(sig)
+            elif pending_cancelled_any:
+                # Solo pending mai riempiti: il trade non si è mai aperto.
+                # Se non abbiamo un actual_entry_price il trade è "mancato" → cancelled.
+                if not sig.actual_entry_price:
+                    sig.status = "cancelled"
+                    sig.notes = (sig.notes or "") + " [Close ricevuto: pending mai eseguiti]"
+                    sig.closed_at = now
+                    sig.updated_at = now
+                    db.add(sig)
+                else:
+                    sig.status = "closed"
+                    sig.closed_at = now
+                    sig.updated_at = now
+                    db.add(sig)
 
     db.commit()
 

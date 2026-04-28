@@ -521,11 +521,14 @@ def get_performance(
     recent = [s for s in signals if s.created_at and s.created_at >= week_ago]
     recent_pnl = round(sum(s.pnl_usd for s in recent if s.pnl_usd), 2)
 
-    # Segnali "gestiti" = hanno un ordine MT5 ATTIVO (non cancellato).
-    # Un segnale può avere mt5_ticket storico ma poi essere stato annullato
-    # (es. late-catch cancel o cancel manuale): in quel caso NON conta come gestito.
+    # Segnali "gestiti" = quelli che hanno effettivamente prodotto un trade su MT5.
+    # Serve sia un ticket sia un actual_entry_price (= almeno una posizione si è
+    # davvero aperta). I segnali con solo pending mai riempiti, o cancellati,
+    # NON sono gestiti.
     def _is_managed(s):
-        return bool(s.mt5_ticket or s.mt5_tickets) and s.status != "cancelled"
+        return (bool(s.mt5_ticket or s.mt5_tickets)
+                and s.status != "cancelled"
+                and s.actual_entry_price is not None)
     managed_total  = sum(1 for s in signals if _is_managed(s))
     managed_recent = sum(1 for s in recent   if _is_managed(s))
 
