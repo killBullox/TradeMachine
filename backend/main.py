@@ -925,6 +925,22 @@ async def mt5_backfill_position_size():
     updated = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.backfill_position_size)
     return {"ok": True, "count": len(updated), "updated": updated}
 
+
+class ModifyTicketIn(BaseModel):
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    symbol: str = "XAUUSD"
+
+
+@app.post("/api/mt5/modify-ticket/{ticket}")
+async def mt5_modify_ticket(ticket: int, body: ModifyTicketIn):
+    """Modifica SL e/o TP di un ticket MT5 (posizione aperta o ordine pendente).
+    Usa il retry interno di modify_sl_tp, gestisce errori transitori."""
+    def _do():
+        return mt5_trader.modify_sl_tp(ticket, body.sl, body.tp, body.symbol)
+    ok = await asyncio.get_event_loop().run_in_executor(None, _do)
+    return {"ok": ok, "ticket": ticket, "sl": body.sl, "tp": body.tp}
+
 @app.post("/api/mt5/close/{ticket}")
 async def mt5_close(ticket: int, db: Session = Depends(get_db)):
     sig = db.query(Signal).filter(Signal.mt5_ticket == ticket).first()

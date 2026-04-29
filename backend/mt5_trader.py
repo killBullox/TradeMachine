@@ -390,11 +390,78 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
                 for fix in [tp_f / 10, tp_f * 10]:
                     fix_dist = abs(fix - e_f)
                     if fix_dist < avg_dist * 3 and fix_dist > 0:
-                        log(f"#{sig.id} TP{i}={tp_f} typo (zero di troppo?) — corretto a {fix}")
+                        log(f"#{sig.id} TP{i}={tp_f} typo (zero di troppo?) - corretto a {fix}")
                         _append_trade_log_mt5(sig, "mt5_tp_fix", f"TP{i} corretto da {tp_f} a {fix} (typo admin)")
                         setattr(sig, f'tp{i}', fix)
                         tp_f = fix
                         break
+
+    # Auto-correzione TP single-digit (typo di una sola cifra). Caso #280:
+    # "Buy 4534-36 TP1 4542 TP2 4645 TP3 4650" — voleva 4545/4550 (5->6 typo).
+    # Algoritmo: per ogni TP che è ben fuori scala rispetto a TP1, genera tutti
+    # i candidati ottenuti sostituendo UNA cifra; tieni solo quelli dal lato
+    # giusto, ordinati progressivamente (TP_i > TP_{i-1} per BUY, viceversa per
+    # SELL) e con distanza plausibile (entro 1.5x..6x di TP1_dist per TP2,
+    # 2x..10x per TP3). Se uno solo passa -> applica.
+    tp1_val = getattr(sig, 'tp1', None)
+    if tp1_val is not None:
+        tp1_f = float(tp1_val)
+        tp1_dist = abs(tp1_f - e_f)
+        if tp1_dist > 0:
+            # Bound dei multipli ragionevoli per TP2/TP3 vs TP1_dist
+            tp_range = {2: (1.2, 6.0), 3: (1.8, 12.0)}
+            for i in (2, 3):
+                tp_val = getattr(sig, f'tp{i}', None)
+                if tp_val is None:
+                    continue
+                tp_f = float(tp_val)
+                dist = abs(tp_f - e_f)
+                lo, hi = tp_range[i]
+                # Skippa se il TP è già nella scala plausibile
+                if lo * tp1_dist <= dist <= hi * tp1_dist:
+                    continue
+                # Prev TP (per garantire l'ordine progressivo)
+                prev_tp = float(getattr(sig, f'tp{i-1}'))
+                # Genera candidati single-digit del valore originale
+                tp_str_full = f"{tp_f:.{digits}f}" if digits else f"{int(tp_f)}"
+                seen = set()
+                candidates = []
+                for pos_idx, ch in enumerate(tp_str_full):
+                    if not ch.isdigit():
+                        continue
+                    for d in "0123456789":
+                        if d == ch:
+                            continue
+                        cand_str = tp_str_full[:pos_idx] + d + tp_str_full[pos_idx+1:]
+                        try:
+                            cand = float(cand_str)
+                        except ValueError:
+                            continue
+                        if cand in seen or cand <= 0:
+                            continue
+                        seen.add(cand)
+                        # Lato giusto rispetto a entry
+                        side_ok = (is_buy and cand > e_f) or (not is_buy and cand < e_f)
+                        if not side_ok:
+                            continue
+                        # Ordine progressivo rispetto al TP precedente
+                        order_ok = (is_buy and cand > prev_tp) or (not is_buy and cand < prev_tp)
+                        if not order_ok:
+                            continue
+                        # Distanza plausibile in scala con TP1
+                        cand_dist = abs(cand - e_f)
+                        if not (lo * tp1_dist <= cand_dist <= hi * tp1_dist):
+                            continue
+                        candidates.append(cand)
+
+                if len(candidates) == 1:
+                    fix = round(candidates[0], digits)
+                    log(f"#{sig.id} TP{i}={tp_f} typo single-digit - corretto a {fix} (TP1_dist={tp1_dist:.1f})")
+                    _append_trade_log_mt5(sig, "mt5_tp_fix", f"TP{i} corretto da {tp_f} a {fix} (typo single-digit)")
+                    setattr(sig, f'tp{i}', fix)
+                    sig.notes = (sig.notes or "") + f" [TP{i} auto-corretto: {tp_f} -> {fix}]"
+                elif len(candidates) > 1:
+                    log(f"#{sig.id} TP{i}={tp_f} fuori scala ma {len(candidates)} candidati ambigui - lascio com'e'")
 
     # Validazione coerenza direzione: scarta singoli TP ancora invalidi
     for i in range(1, 4):
@@ -718,8 +785,36 @@ def backfill_position_size() -> list:
         db.close()
 
 
+def _send_with_retry(mt5, request: dict, label: str, attempts: int = 3, delay: float = 0.5):
+    """Invia un order_send con retry breve. Restituisce (ok, result, last_err)."""
+    import time as _time
+    last_result = None
+    last_err = None
+    for i in range(attempts):
+        result = mt5.order_send(request)
+        last_result = result
+        if result is None:
+            last_err = mt5.last_error()
+            log(f"{label} tentativo {i+1}/{attempts}: result=None last_error={last_err}")
+        elif result.retcode == mt5.TRADE_RETCODE_DONE:
+            return True, result, None
+        else:
+            last_err = (result.retcode, getattr(result, 'comment', ''))
+            log(f"{label} tentativo {i+1}/{attempts}: retcode={result.retcode} comment='{last_err[1]}'")
+        if i < attempts - 1:
+            _time.sleep(delay)
+    return False, last_result, last_err
+
+
 def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
-    """Modifica lo SL di una posizione aperta. Skip silenzioso se è già al valore richiesto."""
+    """Modifica lo SL di una posizione aperta. Skip silenzioso se è già al valore
+    richiesto. Retry breve (3 tentativi) se MT5 risponde None o errore transitorio."""
+    return modify_sl_tp(ticket, new_sl, None, symbol)
+
+
+def modify_sl_tp(ticket: int, new_sl: Optional[float], new_tp: Optional[float], symbol: str) -> bool:
+    """Modifica SL e/o TP di una posizione aperta o un ordine pendente.
+    Passa None per lasciare invariato uno dei due. Retry su errore transitorio."""
     mt5 = _get_mt5()
     if mt5 is None:
         return False
@@ -727,7 +822,8 @@ def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
     mt5_sym = MT5_SYMBOL_MAP.get(symbol.upper(), symbol)
     sym_info = mt5.symbol_info(mt5_sym)
     digits = sym_info.digits if sym_info else 5
-    new_sl_rounded = round(new_sl, digits)
+    new_sl_rounded = round(new_sl, digits) if new_sl is not None else None
+    new_tp_rounded = round(new_tp, digits) if new_tp is not None else None
 
     positions = mt5.positions_get(ticket=ticket)
     if not positions:
@@ -737,34 +833,37 @@ def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
             log(f"Ticket {ticket} non trovato")
             return False
         order = orders[0]
-        # Skip se SL già al valore richiesto (evita retcode=10025 in loop)
-        if order.sl is not None and round(order.sl, digits) == new_sl_rounded:
+        target_sl = new_sl_rounded if new_sl_rounded is not None else order.sl
+        target_tp = new_tp_rounded if new_tp_rounded is not None else order.tp
+        # Skip se entrambi già al valore richiesto (evita retcode=10025 in loop)
+        if (round(order.sl, digits) == target_sl and round(order.tp, digits) == target_tp):
             return True
         request = {
             "action": mt5.TRADE_ACTION_MODIFY,
             "order": ticket,
             "price": order.price_open,
-            "sl": new_sl_rounded,
-            "tp": order.tp,
+            "sl": target_sl,
+            "tp": target_tp,
             "type_time": mt5.ORDER_TIME_GTC,
         }
     else:
         pos = positions[0]
-        # Skip se SL già al valore richiesto (evita retcode=10025 in loop)
-        if pos.sl is not None and round(pos.sl, digits) == new_sl_rounded:
+        target_sl = new_sl_rounded if new_sl_rounded is not None else pos.sl
+        target_tp = new_tp_rounded if new_tp_rounded is not None else pos.tp
+        if (round(pos.sl, digits) == target_sl and round(pos.tp, digits) == target_tp):
             return True
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
             "position": ticket,
             "symbol": pos.symbol,
-            "sl": new_sl_rounded,
-            "tp": pos.tp,
+            "sl": target_sl,
+            "tp": target_tp,
         }
 
-    result = mt5.order_send(request)
-    ok = result and result.retcode == mt5.TRADE_RETCODE_DONE
-    status = "OK" if ok else f"FAIL retcode={result.retcode if result else '?'}"
-    log(f"modify_sl ticket={ticket} new_sl={new_sl_rounded} -> {status}")
+    label = f"modify_sl_tp ticket={ticket} new_sl={new_sl_rounded} new_tp={new_tp_rounded}"
+    ok, result, err = _send_with_retry(mt5, request, label, attempts=3, delay=0.5)
+    status = "OK" if ok else f"FAIL last_err={err}"
+    log(f"{label} -> {status}")
     return ok
 
 
