@@ -551,31 +551,83 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         return []
 
     # Validazione direzione SL: per BUY sl deve essere sotto entry, per SELL sopra.
-    # Se l'SL del segnale è dal lato sbagliato è quasi sempre un typo del trader
-    # (es. "Stoploss: 4719" invece di "4619" per un BUY a 4624). Auto-correggi
-    # sintetizzando un SL specchio rispetto a TP1 (stessa distanza, lato giusto)
-    # invece di bloccare il trade.
+    # Se l'SL del segnale è dal lato sbagliato è un typo del trader. Per evitare
+    # auto-correzioni speculative (vedi #270 dove il typo era distribuito su più
+    # campi e non si poteva indovinare), proviamo l'auto-correzione SOLO se è
+    # spiegabile cambiando una singola cifra dell'SL e il candidato risultante è
+    # univoco. In caso contrario annulliamo e aspettiamo l'edit del trader.
+    #
+    # Algoritmo (single-digit candidate):
+    #   - genera tutti i candidati ottenuti sostituendo UNA cifra dell'SL
+    #   - filtra: lato giusto rispetto all'entry e SL_dist in [0.3x, 3x] di TP1_dist
+    #   - se esattamente 1 candidato passa → auto-correzione (ambiguità nulla)
+    #   - se ≥2 o 0 → cancel + aspetta edit (ambiguità reale)
     if sl:
         sl_side_wrong = (is_buy and sl >= entry) or (not is_buy and sl <= entry)
         if sl_side_wrong:
-            tp1_for_synth = sig.tp1
-            if tp1_for_synth and entry:
-                tp_distance = abs(float(tp1_for_synth) - float(entry))
-                if is_buy:
-                    sl_synthetic = round(float(entry) - tp_distance, digits)
-                else:
-                    sl_synthetic = round(float(entry) + tp_distance, digits)
+            tp1_for_check = sig.tp1
+            tp1_dist = abs(float(tp1_for_check) - float(entry)) if tp1_for_check else 0
+            candidates = []
+            if tp1_for_check and tp1_dist > 0:
+                # Genera candidati: per ogni cifra di sl_str (escluso il punto
+                # decimale), sostituiscila con 0..9 e valuta.
+                sl_str = f"{sl:.{digits}f}".rstrip("0").rstrip(".") if digits else f"{int(sl)}"
+                # Lavoriamo sulla rappresentazione intera/decimale completa
+                sl_str_full = f"{sl:.{digits}f}" if digits else f"{int(sl)}"
+                seen = set()
+                for i, ch in enumerate(sl_str_full):
+                    if not ch.isdigit():
+                        continue
+                    for d in "0123456789":
+                        if d == ch:
+                            continue
+                        cand_str = sl_str_full[:i] + d + sl_str_full[i+1:]
+                        try:
+                            cand = float(cand_str)
+                        except ValueError:
+                            continue
+                        if cand in seen or cand <= 0:
+                            continue
+                        seen.add(cand)
+                        # Lato giusto?
+                        side_ok = (is_buy and cand < float(entry)) or (not is_buy and cand > float(entry))
+                        if not side_ok:
+                            continue
+                        # Distanza plausibile? R/R fra 0.3 e 3 rispetto a TP1
+                        cand_dist = abs(cand - float(entry))
+                        if cand_dist < tp1_dist * 0.3 or cand_dist > tp1_dist * 3:
+                            continue
+                        candidates.append(cand)
+
+            if len(candidates) == 1:
+                sl_corrected = round(candidates[0], digits)
                 msg = (f"SL={sl} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} "
-                       f"entry={entry} (probabile typo): auto-correzione → SL={sl_synthetic} "
-                       f"(specchio di TP1={tp1_for_synth}, distanza {tp_distance})")
+                       f"entry={entry}: typo isolato a singola cifra, candidato univoco → "
+                       f"SL={sl_corrected} (TP1={tp1_for_check})")
                 log(f"#{sig.id} {msg}")
                 _append_trade_log_mt5(sig, "mt5_sl_autocorrect", msg)
-                sig.notes = (sig.notes or "") + f" [SL auto-corretto: {sl} → {sl_synthetic}]"
-                sl = sl_synthetic
+                sig.notes = (sig.notes or "") + f" [SL auto-corretto: {sl} → {sl_corrected}]"
+                sl = sl_corrected
             else:
-                # Niente TP1 → non possiamo sintetizzare, blocchiamo come prima
-                log(f"#{sig.id} SL={sl} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} entry={entry} e niente TP1, skip")
-                _append_trade_log_mt5(sig, "mt5_skip", f"SL={sl} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} con entry={entry}, ordini non inviati")
+                # Ambiguo (≥2 candidati) o nessun candidato plausibile (0):
+                # tipicamente errore distribuito su più campi → cancel + aspetta edit.
+                from database import SessionLocal as _SL
+                if len(candidates) == 0:
+                    detail = "nessun candidato single-digit plausibile"
+                else:
+                    detail = f"{len(candidates)} candidati ambigui ({sorted(candidates)[:5]})"
+                msg = (f"SL={sl} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} "
+                       f"entry={entry}: {detail}, in attesa di edit del trader")
+                log(f"#{sig.id} {msg}")
+                sig.status = "cancelled"
+                sig.notes = (sig.notes or "") + f" [Sospeso SL: {msg}]"
+                _append_trade_log_mt5(sig, "sl_suspect", msg)
+                _db = _SL()
+                try:
+                    _db.merge(sig)
+                    _db.commit()
+                finally:
+                    _db.close()
                 return []
 
     is_market = order_type in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL)
