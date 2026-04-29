@@ -420,32 +420,37 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         log(f"#{sig.id} nessun TP definito, skip")
         return []
 
-    # Sanity check R/R: se TP1 è 5x più lontano dello SL dall'entry il segnale è
-    # probabilmente sbagliato (typo grave del trader, es. "Sell Near 4734-36 SL
-    # 4742 TP1 4624" — voleva 4634-36 e SL 4642). NON tentare auto-correzione
-    # speculativa: annulla e aspetta l'edit del messaggio.
+    # Sanity check R/R: se TP1 e SL sono sproporzionati di oltre 5x in qualunque
+    # direzione il segnale è probabilmente sbagliato (typo grave del trader).
+    # Caso A (TP1 troppo lontano): "Sell 4734 SL 4742 TP1 4624" — voleva entry
+    # 4634, R/R 14:1.
+    # Caso B (SL troppo largo): "Sell 4567 TP1 4562 SL 4673" — voleva SL 4573,
+    # R/R 0.05:1 (lotto microscopico, $5 di profit dove dovevi farne $100+).
+    # NON tentare auto-correzione speculativa: annulla e aspetta l'edit.
     if sl_raw and tps_raw:
         sl_dist = abs(float(entry) - float(sl_raw))
         tp1_dist = abs(float(entry) - float(tps_raw[0][1]))
-        if sl_dist > 0 and tp1_dist / sl_dist > 5:
-            from database import SessionLocal as _SL
-            ratio = tp1_dist / sl_dist
-            msg = (f"R/R sproporzionato {ratio:.1f}:1 (TP1_dist={tp1_dist:.1f}, "
-                   f"SL_dist={sl_dist:.1f}) — segnale probabilmente sbagliato, "
-                   f"in attesa di edit del trader")
-            log(f"#{sig.id} {msg}")
-            sig.status = "cancelled"
-            sig.notes = (sig.notes or "") + f" [Sospeso R/R: {msg}]"
-            _append_trade_log_mt5(sig, "rr_suspect", msg)
-            # Persisti subito la cancellazione: il chiamante (telegram_client)
-            # potrebbe non riavere sig se passa di mano fra sessioni.
-            _db = _SL()
-            try:
-                _db.merge(sig)
-                _db.commit()
-            finally:
-                _db.close()
-            return []
+        if sl_dist > 0 and tp1_dist > 0:
+            ratio = max(tp1_dist / sl_dist, sl_dist / tp1_dist)
+            if ratio > 5:
+                from database import SessionLocal as _SL
+                if tp1_dist > sl_dist:
+                    direction = f"TP1 {tp1_dist:.1f}pt ≫ SL {sl_dist:.1f}pt"
+                else:
+                    direction = f"SL {sl_dist:.1f}pt ≫ TP1 {tp1_dist:.1f}pt"
+                msg = (f"R/R sproporzionato {ratio:.1f}:1 ({direction}) — "
+                       f"segnale probabilmente sbagliato, in attesa di edit del trader")
+                log(f"#{sig.id} {msg}")
+                sig.status = "cancelled"
+                sig.notes = (sig.notes or "") + f" [Sospeso R/R: {msg}]"
+                _append_trade_log_mt5(sig, "rr_suspect", msg)
+                _db = _SL()
+                try:
+                    _db.merge(sig)
+                    _db.commit()
+                finally:
+                    _db.close()
+                return []
 
     # Position size totale
     from risk import get_risk_settings, calc_risk_amount, calc_position_size, get_spec
