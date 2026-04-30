@@ -768,6 +768,7 @@ def backfill_position_size() -> list:
         for sig in sigs:
             tickets = jsonlib.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
             total_vol = 0.0
+            first_entry_ts = None  # earliest DEAL_ENTRY_IN time fra i ticket
             for t in tickets:
                 deals = mt5.history_deals_get(position=t)
                 if not deals:
@@ -775,14 +776,22 @@ def backfill_position_size() -> list:
                 for d in deals:
                     if d.entry == mt5.DEAL_ENTRY_IN:
                         total_vol += d.volume
+                        if first_entry_ts is None or d.time < first_entry_ts:
+                            first_entry_ts = d.time
                         break
+            changes = []
             if total_vol > 0:
                 new_size = round(total_vol, 2)
                 if sig.position_size != new_size:
-                    log(f"#{sig.id} backfill position_size: {sig.position_size} -> {new_size}")
                     sig.position_size = new_size
-                    db.add(sig)
-                    updated.append({"id": sig.id, "old": None, "new": new_size, "tickets": tickets})
+                    changes.append(f"position_size->{new_size}")
+            if first_entry_ts is not None and not sig.entered_at:
+                sig.entered_at = _get_mt5_utc(first_entry_ts)
+                changes.append(f"entered_at->{sig.entered_at}")
+            if changes:
+                log(f"#{sig.id} backfill: {', '.join(changes)}")
+                db.add(sig)
+                updated.append({"id": sig.id, "changes": changes, "tickets": tickets})
         db.commit()
         return updated
     finally:
@@ -1222,10 +1231,15 @@ def sync_positions() -> list:
                     total_volume += pos.volume
                     open_count += 1
                     positions_count += 1
-                    # Cattura actual_entry_price quando un BUY/SELL LIMIT viene riempito
+                    # Cattura actual_entry_price + entered_at quando un
+                    # BUY/SELL LIMIT viene riempito. pos.time è l'epoch
+                    # (server time) di apertura della posizione.
                     if not sig.actual_entry_price and pos.price_open:
                         sig.actual_entry_price = pos.price_open
                         log(f"#{sig.id} actual_entry_price={pos.price_open} (da posizione aperta)")
+                    if not sig.entered_at and getattr(pos, 'time', None):
+                        sig.entered_at = _get_mt5_utc(pos.time)
+                        log(f"#{sig.id} entered_at={sig.entered_at} (da posizione aperta)")
                     continue
 
                 if ticket in pending_orders:
@@ -1242,7 +1256,11 @@ def sync_positions() -> list:
                     close_ts    = _get_mt5_utc(close_deal.time)
                     total_profit += profit
                     closed_tickets.append((ticket, close_price, profit, close_ts))
-                    # Recupera deal di entrata: serve sia per actual_entry_price sia per volume iniziale
+                    # Recupera deal di entrata: serve per actual_entry_price,
+                    # entered_at e volume iniziale. Popola entered_at e
+                    # actual_entry_price indipendentemente, perche' uno dei
+                    # due puo' essere stato gia' settato dal branch
+                    # 'posizione aperta' senza l'altro.
                     entry_deals = mt5.history_deals_get(position=ticket)
                     if entry_deals:
                         for ed in entry_deals:
@@ -1250,8 +1268,10 @@ def sync_positions() -> list:
                                 total_volume += ed.volume
                                 if not sig.actual_entry_price:
                                     sig.actual_entry_price = ed.price
+                                    log(f"#{sig.id} actual_entry_price={ed.price} (da deal di entrata)")
+                                if not sig.entered_at:
                                     sig.entered_at = _get_mt5_utc(ed.time)
-                                    log(f"#{sig.id} actual_entry_price={ed.price} entered_at={sig.entered_at} (da deal)")
+                                    log(f"#{sig.id} entered_at={sig.entered_at} (da deal di entrata)")
                                 break
 
                     # Determina se è TP1
