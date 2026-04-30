@@ -334,6 +334,14 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
         sig = db.query(Signal).filter(Signal.telegram_msg_id == reply_to_msg_id).first()
         if sig and sig.status in ("open", "pending", "tp1", "tp2"):
             targets = [sig]
+        elif sig:
+            # Il reply punta a un segnale ESISTENTE ma già chiuso (SL hit, TP3,
+            # cancelled, closed). Il messaggio era diretto a quel trade
+            # specifico, e quello è gia' a buon fine: NON fare fallback su
+            # altri trade (come e' successo il 30/04 con #284 AUDUSD chiuso
+            # erroneamente perche' #287 XAUUSD era andato in SL 34s prima).
+            log(f"[Close] reply a msg={reply_to_msg_id} -> #{sig.id} {sig.symbol} status={sig.status} (gia' chiuso) -> skip")
+            return
 
     if not targets and parsed.symbol:
         sigs = db.query(Signal).filter(
