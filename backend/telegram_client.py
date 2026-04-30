@@ -641,18 +641,34 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 import mt5_trader
                 import json as _json
                 if mt5_trader.is_enabled():
-                    # Trova segnali aperti (con ticket MT5) per il simbolo.
-                    # closed_at IS NULL esclude segnali completamente chiusi
-                    # (es. TP1 con tutti i ticket già usciti) — evita di provare
-                    # a modificare ticket che non esistono più su MT5.
-                    q = db.query(Signal).filter(
-                        Signal.status.in_(["open", "tp1", "tp2"]),
-                        Signal.mt5_ticket.isnot(None),
-                        Signal.closed_at.is_(None),
-                    )
-                    if parsed.symbol:
-                        q = q.filter(Signal.symbol == parsed.symbol)
-                    open_sigs = q.all()
+                    # Routing: prima prova via reply (se il messaggio è reply al
+                    # segnale originale → applica SOLO a quel trade, anche se
+                    # parsed.symbol è None). Se il segnale puntato è già chiuso,
+                    # skip senza fallback. Se non è reply, fallback al simbolo
+                    # (richiede parsed.symbol valorizzato per evitare di toccare
+                    # trade di simboli diversi — vedi bug #284 del 30/04).
+                    open_sigs = []
+                    skip = False
+                    if reply_to_msg_id:
+                        target_sig = db.query(Signal).filter(
+                            Signal.telegram_msg_id == reply_to_msg_id
+                        ).first()
+                        if target_sig and target_sig.status in ("open", "tp1", "tp2") \
+                                and target_sig.mt5_ticket and target_sig.closed_at is None:
+                            open_sigs = [target_sig]
+                        elif target_sig:
+                            log(f"[SLMove] reply a #{target_sig.id} {target_sig.symbol} status={target_sig.status} (gia' chiuso) -> skip")
+                            skip = True
+                    if not skip and not open_sigs:
+                        if not parsed.symbol:
+                            log(f"[SLMove] msg={msg_id} senza simbolo e senza reply utile -> skip per evitare di toccare trade sbagliati")
+                        else:
+                            open_sigs = db.query(Signal).filter(
+                                Signal.status.in_(["open", "tp1", "tp2"]),
+                                Signal.mt5_ticket.isnot(None),
+                                Signal.closed_at.is_(None),
+                                Signal.symbol == parsed.symbol,
+                            ).all()
 
                     for sig in open_sigs:
                         new_sl = parsed.new_sl
@@ -678,16 +694,30 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
             try:
                 import mt5_trader
                 import json as _json
-                # Trova l'ultimo segnale chiuso tradabile (escludi cancelled/non-MT5)
+                # Routing: se il messaggio è reply al segnale originale, usa
+                # ESATTAMENTE quel segnale come template per il reenter, anche
+                # se non è il "più recente". Senza reply, fallback al simbolo;
+                # se manca pure quello, skip (non scegliere a caso fra simboli
+                # diversi — stesso bug visto sul Close di #284 il 30/04).
                 from mt5_trader import MT5_SYMBOL_MAP
                 tradeable_syms = list(MT5_SYMBOL_MAP.keys())
-                q = db.query(Signal).filter(
-                    Signal.status.in_(["sl_hit", "closed", "tp1", "tp2", "tp3"]),
-                    Signal.symbol.in_(tradeable_syms),
-                ).order_by(Signal.created_at.desc())
-                if parsed.symbol:
-                    q = q.filter(Signal.symbol == parsed.symbol)
-                last_sig = q.first()
+                last_sig = None
+                if reply_to_msg_id:
+                    candidate = db.query(Signal).filter(
+                        Signal.telegram_msg_id == reply_to_msg_id,
+                        Signal.symbol.in_(tradeable_syms),
+                    ).first()
+                    if candidate:
+                        last_sig = candidate
+                if last_sig is None:
+                    if not parsed.symbol:
+                        log(f"[Reenter] msg={msg_id} senza simbolo e senza reply utile -> skip per evitare di clonare il trade sbagliato")
+                    else:
+                        last_sig = db.query(Signal).filter(
+                            Signal.status.in_(["sl_hit", "closed", "tp1", "tp2", "tp3"]),
+                            Signal.symbol.in_(tradeable_syms),
+                            Signal.symbol == parsed.symbol,
+                        ).order_by(Signal.created_at.desc()).first()
 
                 if last_sig:
                     # Clona come nuovo segnale
