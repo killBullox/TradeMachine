@@ -526,28 +526,45 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     if getattr(sig, 'is_risky', False):
         risk_usd *= 0.5
         log(f"#{sig.id} segnale RISKY → rischio dimezzato a ${risk_usd:.2f}")
-    # Calcola lotti totali sull'intero rischio, poi dividi per n ordini
+    # Calcola lotti totali sull'intero rischio, poi dividi per n ordini.
+    # Per il dimensionamento usiamo il bordo del range PIÙ LONTANO dallo SL
+    # come prezzo di riferimento, perché un BUY LIMIT/STOP nel range puo'
+    # riempirsi a quel bordo e in quel caso la SL distance reale e' la
+    # massima possibile. Usare il bordo piu' vicino allo SL (entry_price
+    # per un BUY) sottostima la distance e produce lotti troppo grandi
+    # (caso #284: entry_low 0.713, entry_high 0.7135, SL 0.712 -> il bot
+    # calcolava su 10 pip ma il LIMIT si e' riempito a 0.7135 dove la
+    # distance reale era 15 pip → risk reale 49% sopra target).
+    ep_low_f  = float(sig.entry_price)      if sig.entry_price      else None
+    ep_high_f = float(sig.entry_price_high) if sig.entry_price_high else None
+    if ep_low_f and ep_high_f:
+        size_entry = max(ep_low_f, ep_high_f) if is_buy else min(ep_low_f, ep_high_f)
+    else:
+        size_entry = ep_low_f or ep_high_f or float(entry)
     n = len(tps_raw)
-    lots_total_raw = calc_position_size(sig.symbol, entry, sl_raw, risk_usd) if sl_raw else min_vol
+    lots_total_raw = calc_position_size(sig.symbol, size_entry, sl_raw, risk_usd) if sl_raw else min_vol
     lots_total = _round_volume(lots_total_raw or min_vol, vol_step, min_vol, max_vol)
-    # Arrotonda per eccesso al vol_step per minimizzare la perdita
+    # Arrotonda al vol_step (mai per eccesso oltre il target di rischio)
     lots_each_raw = lots_total / n
     lots_each_floor = _round_volume(lots_each_raw, vol_step, min_vol, max_vol)
     lots_each_ceil = round(lots_each_floor + vol_step, 10)
+    spec = get_spec(sig.symbol)
+    sl_pips = abs(float(size_entry) - float(sl_raw)) / spec["pip"] if sl_raw else 0
     if lots_each_ceil <= max_vol:
-        # Scegli ceil se il rischio effettivo non supera il target di troppo (max +10%)
-        spec = get_spec(sig.symbol)
-        sl_pips = abs(float(entry) - float(sl_raw)) / spec["pip"] if sl_raw else 0
         risk_floor = sl_pips * spec["pv"] * lots_each_floor * n
         risk_ceil = sl_pips * spec["pv"] * lots_each_ceil * n
-        lots_each = lots_each_ceil if abs(risk_ceil - risk_usd) < abs(risk_floor - risk_usd) else lots_each_floor
+        # Scegli ceil SOLO se non sfora il target di rischio (era +10% prima:
+        # ma con SL stretti puo' diventare +30/+50%, vedi #284). Ora ceil
+        # consentito solo se risk_ceil <= risk_usd.
+        if risk_ceil <= risk_usd and abs(risk_ceil - risk_usd) < abs(risk_floor - risk_usd):
+            lots_each = lots_each_ceil
+        else:
+            lots_each = lots_each_floor
     else:
         lots_each = lots_each_floor
     lots_total = _round_volume(lots_each * n, vol_step, min_vol, max_vol)
-    spec = get_spec(sig.symbol)
-    sl_pips = abs(float(entry) - float(sl_raw)) / spec["pip"] if sl_raw else 0
     effective_risk = sl_pips * spec["pv"] * lots_total
-    log(f"#{sig.id} risk=${risk_usd:.0f} lots={lots_each}x{n}={lots_total} sl_pips={sl_pips:.0f} eff_risk=${effective_risk:.2f}")
+    log(f"#{sig.id} risk=${risk_usd:.0f} lots={lots_each}x{n}={lots_total} size_entry={size_entry} sl_pips={sl_pips:.0f} eff_risk=${effective_risk:.2f}")
 
     # Determina tipo ordine
     current_bid = tick.bid
