@@ -54,6 +54,15 @@ function RiskPanel() {
             onChange={e => setSettings(s => ({...s, risk_per_trade_usd: +e.target.value}))}
             className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white disabled:opacity-40 focus:outline-none focus:border-brand-500" />
         </div>
+        <div className="space-y-1">
+          <label className="text-xs text-slate-400" title="Pip di tolleranza per entrare a mercato quando il prezzo è di poco fuori dal range del segnale (Buy Near è approssimativo). Default 3 pip = 0.30 su gold, 0.0003 su forex.">
+            Tolleranza entry (pip)
+          </label>
+          <input type="number" step="0.5" min="0" value={settings.entry_tolerance_pips ?? 3}
+            onChange={e => setSettings(s => ({...s, entry_tolerance_pips: +e.target.value}))}
+            className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500" />
+          <p className="text-xs text-slate-500">≈ ${((settings.entry_tolerance_pips ?? 3) * 0.10).toFixed(2)} su gold</p>
+        </div>
         <div className="flex items-end">
           <div className="w-full">
             <div className="text-xs text-slate-500 mb-2">

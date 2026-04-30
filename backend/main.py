@@ -547,6 +547,7 @@ def get_performance(
         "risk_per_trade_pct": rs.risk_per_trade_pct if rs else 1.0,
         "risk_per_trade_usd": rs.risk_per_trade_usd if rs else None,
         "use_fixed_usd": rs.use_fixed_usd if rs else False,
+        "entry_tolerance_pips": (getattr(rs, "entry_tolerance_pips", None) or 3.0) if rs else 3.0,
     }
 
     return {
@@ -594,6 +595,7 @@ class RiskSettingsIn(BaseModel):
     risk_per_trade_pct: float = 1.0
     risk_per_trade_usd: Optional[float] = None
     use_fixed_usd: bool = False
+    entry_tolerance_pips: float = 3.0
 
 
 @app.get("/api/performance/calendar")
@@ -638,12 +640,14 @@ def get_risk_settings_api(db: Session = Depends(get_db)):
     rs = db.query(RiskSettings).first()
     if not rs:
         return {"account_size": 10000, "risk_per_trade_pct": 1.0,
-                "risk_per_trade_usd": None, "use_fixed_usd": False}
+                "risk_per_trade_usd": None, "use_fixed_usd": False,
+                "entry_tolerance_pips": 3.0}
     return {
         "account_size": rs.account_size,
         "risk_per_trade_pct": rs.risk_per_trade_pct,
         "risk_per_trade_usd": rs.risk_per_trade_usd,
         "use_fixed_usd": rs.use_fixed_usd,
+        "entry_tolerance_pips": getattr(rs, "entry_tolerance_pips", None) or 3.0,
     }
 
 
@@ -657,6 +661,7 @@ async def update_risk_settings(body: RiskSettingsIn, db: Session = Depends(get_d
     rs.risk_per_trade_pct = body.risk_per_trade_pct
     rs.risk_per_trade_usd = body.risk_per_trade_usd
     rs.use_fixed_usd = body.use_fixed_usd
+    rs.entry_tolerance_pips = body.entry_tolerance_pips
     rs.updated_at = datetime.utcnow()
     db.commit()
     async def _run(): await asyncio.get_event_loop().run_in_executor(None, risk_module.recalculate_all)

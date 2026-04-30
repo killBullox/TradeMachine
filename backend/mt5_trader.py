@@ -567,15 +567,19 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     max_entry = entry_upper + sl_distance
     min_entry = entry_lower - sl_distance
 
-    # Soglia MARKET: per i catch realtime niente tolleranza dal lato sfavorevole
-    # (BUY sopra range / SELL sotto range) → in quel caso sempre LIMIT al bordo
-    # del range, aspettando il pullback. Per i late-catch (delayed/edited/replay)
-    # restiamo invece sulla tolleranza simmetrica originale, perché il pre-check
-    # _analyze_late_catch_ticks ha già validato che il prezzo non ha attraversato
-    # il range durante il ritardo.
+    # Soglia MARKET: per i catch realtime applichiamo una piccola tolleranza
+    # configurabile (default 3 pip) sopra/sotto il bordo del range. Il segnale
+    # è un "Near", quindi se il prezzo è di poco fuori range vogliamo comunque
+    # entrare a mercato invece di mettere un LIMIT esatto che potrebbe non
+    # riempirsi mai (caso #282: ask 4562.26 vs entry_high 4562 → mancato per
+    # 26 cent). Per i late-catch (delayed/edited/replay) manteniamo la
+    # tolleranza simmetrica grande (sl_distance), perché il pre-check
+    # _analyze_late_catch_ticks ha già validato che il prezzo non ha
+    # attraversato il range durante il ritardo.
     is_realtime = (catch_origin == "realtime")
-    upper_threshold = entry_upper if is_realtime else max_entry
-    lower_threshold = entry_lower if is_realtime else min_entry
+    realtime_tol = settings.get("entry_tolerance_pips", 3.0) * pip_size
+    upper_threshold = (entry_upper + realtime_tol) if is_realtime else max_entry
+    lower_threshold = (entry_lower - realtime_tol) if is_realtime else min_entry
 
     if is_buy:
         # BUY: favorevole = prezzo SOTTO range, sfavorevole = prezzo SOPRA.

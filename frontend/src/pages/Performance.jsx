@@ -67,7 +67,7 @@ function RiskPanel({ settings, onSaved }) {
       </div>
 
       {open && (
-        <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4 border-t border-slate-700 pt-4">
+        <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-4 border-t border-slate-700 pt-4">
           {/* Account size */}
           <div>
             <label className="text-xs text-slate-400 block mb-1">Capital ($)</label>
@@ -114,6 +114,20 @@ function RiskPanel({ settings, onSaved }) {
               />
             </div>
           )}
+
+          {/* Tolleranza entry */}
+          <div>
+            <label className="text-xs text-slate-400 block mb-1" title="Pip di tolleranza per entrare a mercato quando il prezzo è fuori dal range del segnale">
+              Tolleranza entry (pip)
+            </label>
+            <input
+              type="number" min="0" step="0.5"
+              className="w-full bg-slate-800 border border-slate-600 rounded px-3 py-1.5 text-white text-sm"
+              value={form.entry_tolerance_pips ?? 3}
+              onChange={e => setForm(f => ({ ...f, entry_tolerance_pips: +e.target.value }))}
+            />
+            <p className="text-xs text-slate-500 mt-1">≈ ${((form.entry_tolerance_pips ?? 3) * 0.10).toFixed(2)} su gold</p>
+          </div>
 
           {/* Rischio calcolato + salva */}
           <div className="flex flex-col justify-end gap-2">

@@ -104,6 +104,7 @@ class RiskSettings(Base):
     risk_per_trade_usd = Column(Float, nullable=True) # rischio fisso $ (se usato)
     use_fixed_usd = Column(Boolean, default=False)    # usa $ fisso invece di %
     auto_trade = Column(Boolean, default=False)       # MT5 auto-trading attivo
+    entry_tolerance_pips = Column(Float, default=3.0)  # tolleranza pip per entry MARKET vicino al range
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -197,6 +198,9 @@ def init_db():
         rs_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(risk_settings)")).fetchall()]
         if "auto_trade" not in rs_existing:
             conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN auto_trade BOOLEAN DEFAULT 0"))
+            conn.commit()
+        if "entry_tolerance_pips" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN entry_tolerance_pips FLOAT DEFAULT 3.0"))
             conn.commit()
         # Inserisce settings di default se non esistono
         count = conn.execute(sa.text("SELECT COUNT(*) FROM risk_settings")).scalar()
