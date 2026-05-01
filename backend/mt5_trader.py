@@ -338,6 +338,26 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     entry_high = sig.entry_price_high or sig.entry_price
     sl_raw = sig.stoploss
 
+    # Sicurezza: niente SL = niente trade. Senza SL la position si dimensiona a
+    # min_vol e resta esposta a perdita illimitata. Caso #297: il parser ha
+    # estratto un signal da un reminder TG senza SL nel testo e il bot l'ha
+    # piazzato comunque con sl=0. Meglio cancellare in attesa di un edit del
+    # trader o di un segnale completo.
+    if not sl_raw:
+        from database import SessionLocal as _SL
+        msg = "Segnale senza SL definito - skip per sicurezza, in attesa di edit"
+        log(f"#{sig.id} {msg}")
+        sig.status = "cancelled"
+        sig.notes = (sig.notes or "") + f" [Skip: {msg}]"
+        _append_trade_log_mt5(sig, "mt5_skip_no_sl", msg)
+        _db = _SL()
+        try:
+            _db.merge(sig)
+            _db.commit()
+        finally:
+            _db.close()
+        return []
+
     # Auto-correzione entry: se SL e TP1 sono coerenti tra loro ma l'entry è dall'altra parte,
     # l'admin ha fatto un typo sull'entry → usa il prezzo corrente come entry
     tp1 = sig.tp1

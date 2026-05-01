@@ -186,16 +186,19 @@ def _save_signal(db, parsed: ParsedSignal, msg_id: int):
     if existing:
         return
 
-    # Regola: non possiamo avere due segnali sullo stesso simbolo+direzione aperti.
-    # Se arriva un secondo segnale, è un duplicato (scartato) o una modifica (aggiornato).
+    # Dedup: due segnali sullo stesso simbolo+direzione entro 15 min sono
+    # tipicamente un reinoltro/reminder dello stesso trade, NON un nuovo trade.
+    # NON filtrare per status: il caso #297 era un reminder arrivato 45s dopo
+    # che #296 era andato in SL — col vecchio filtro status=pending/open non
+    # matchava #296 e veniva creato un duplicato senza SL. Includi tutti i
+    # segnali recenti, poi distingui per cambi nei parametri.
     from datetime import timedelta
     cutoff = datetime.utcnow() - timedelta(minutes=15)
     existing_sig = db.query(Signal).filter(
         Signal.symbol == parsed.symbol,
         Signal.direction == parsed.direction,
         Signal.created_at >= cutoff,
-        Signal.status.in_(["pending", "open"]),
-    ).first()
+    ).order_by(Signal.created_at.desc()).first()
     if existing_sig:
         # Confronta valori: se qualcosa è diverso, è una modifica
         changes = {}
@@ -213,9 +216,19 @@ def _save_signal(db, parsed: ParsedSignal, msg_id: int):
             changes["tp3"] = (existing_sig.tp3, parsed.tp3)
 
         if not changes:
-            log(f"[Dedup] Segnale {parsed.symbol} {parsed.direction} identico a #{existing_sig.id} — scartato")
+            log(f"[Dedup] Segnale {parsed.symbol} {parsed.direction} identico a #{existing_sig.id} (status={existing_sig.status}) - reinoltro scartato")
             return None
 
+        # Cambiamenti: applica modifica solo se il precedente e' ancora attivo.
+        # Se gia' chiuso (sl_hit/tp/closed/cancelled), un set di valori diversi
+        # significa che e' un nuovo trade legittimo -> cade fuori al codice di
+        # creazione signal sotto.
+        if existing_sig.status not in ("pending", "open"):
+            log(f"[Nuovo] Segnale {parsed.symbol} {parsed.direction} con parametri diversi da #{existing_sig.id} (status={existing_sig.status}) - tratto come nuovo trade")
+            # Forza la creazione di un signal nuovo (skip blocco modifica)
+            existing_sig = None
+
+    if existing_sig and changes:
         # È una modifica: aggiorna il segnale esistente nel DB
         log(f"[Modifica] Segnale {parsed.symbol} {parsed.direction} modifica #{existing_sig.id}: {changes}")
         for field, (old_val, new_val) in changes.items():
