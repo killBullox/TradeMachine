@@ -396,13 +396,55 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
                         tp_f = fix
                         break
 
-    # Auto-correzione TP single-digit (typo di una sola cifra). Caso #280:
-    # "Buy 4534-36 TP1 4542 TP2 4645 TP3 4650" — voleva 4545/4550 (5->6 typo).
-    # Algoritmo: per ogni TP che è ben fuori scala rispetto a TP1, genera tutti
-    # i candidati ottenuti sostituendo UNA cifra; tieni solo quelli dal lato
-    # giusto, ordinati progressivamente (TP_i > TP_{i-1} per BUY, viceversa per
-    # SELL) e con distanza plausibile (entro 1.5x..6x di TP1_dist per TP2,
-    # 2x..10x per TP3). Se uno solo passa -> applica.
+    # Auto-correzione TP1 dal lato sbagliato (single-digit).
+    # Caso #295: SELL 4573-75, TP1=4669 (typo: voleva 4569). Senza correggere
+    # TP1, anche la scala usata per validare TP2/TP3 viene calcolata su un
+    # valore sbagliato e tutto il resto della logica TP fallisce a cascata.
+    # Vincoli: lato giusto rispetto a entry + sandwich con TP2 (deve stare
+    # TRA entry e TP2 in direzione del trade).
+    tp1_val = getattr(sig, 'tp1', None)
+    tp2_val = getattr(sig, 'tp2', None)
+    if tp1_val is not None and tp2_val is not None:
+        tp1_f = float(tp1_val)
+        tp2_f = float(tp2_val)
+        side_wrong_tp1 = (is_buy and tp1_f <= e_f) or (not is_buy and tp1_f >= e_f)
+        if side_wrong_tp1:
+            tp_str_full = f"{tp1_f:.{digits}f}" if digits else f"{int(tp1_f)}"
+            seen = set()
+            candidates = []
+            for pos_idx, ch in enumerate(tp_str_full):
+                if not ch.isdigit():
+                    continue
+                for d in "0123456789":
+                    if d == ch:
+                        continue
+                    cand_str = tp_str_full[:pos_idx] + d + tp_str_full[pos_idx+1:]
+                    try:
+                        cand = float(cand_str)
+                    except ValueError:
+                        continue
+                    if cand in seen or cand <= 0:
+                        continue
+                    seen.add(cand)
+                    # Lato giusto rispetto a entry
+                    side_ok = (is_buy and cand > e_f) or (not is_buy and cand < e_f)
+                    if not side_ok:
+                        continue
+                    # Sandwich: TP1 deve stare TRA entry e TP2
+                    sandwich_ok = (is_buy and cand < tp2_f) or (not is_buy and cand > tp2_f)
+                    if not sandwich_ok:
+                        continue
+                    candidates.append(cand)
+            if len(candidates) == 1:
+                fix = round(candidates[0], digits)
+                log(f"#{sig.id} TP1={tp1_f} lato sbagliato - corretto single-digit a {fix}")
+                _append_trade_log_mt5(sig, "mt5_tp_fix", f"TP1 corretto da {tp1_f} a {fix} (typo single-digit, lato sbagliato)")
+                sig.tp1 = fix
+                sig.notes = (sig.notes or "") + f" [TP1 auto-corretto: {tp1_f} -> {fix}]"
+            elif len(candidates) > 1:
+                log(f"#{sig.id} TP1={tp1_f} lato sbagliato ma {len(candidates)} candidati ambigui - lascio com'e'")
+
+    # Auto-correzione TP2/TP3 single-digit fuori scala (caso #280, #292).
     tp1_val = getattr(sig, 'tp1', None)
     if tp1_val is not None:
         tp1_f = float(tp1_val)
