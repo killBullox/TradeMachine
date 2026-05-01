@@ -420,8 +420,14 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
                 # Skippa se il TP è già nella scala plausibile
                 if lo * tp1_dist <= dist <= hi * tp1_dist:
                     continue
-                # Prev TP (per garantire l'ordine progressivo)
+                # Prev TP (per ordine progressivo); per i TP "interni" (es. TP2)
+                # serve anche il vincolo del TP successivo: TP2 deve stare TRA
+                # TP1 e TP3 (caso #292: TP2=4501 -> candidati 4601 e 4591;
+                # 4591 < TP3=4595 viola la progressione, va escluso, lasciando
+                # 4601 come unico candidato corretto).
                 prev_tp = float(getattr(sig, f'tp{i-1}'))
+                next_tp_val = getattr(sig, f'tp{i+1}', None) if i < 3 else None
+                next_tp = float(next_tp_val) if next_tp_val is not None else None
                 # Genera candidati single-digit del valore originale
                 tp_str_full = f"{tp_f:.{digits}f}" if digits else f"{int(tp_f)}"
                 seen = set()
@@ -444,10 +450,18 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
                         side_ok = (is_buy and cand > e_f) or (not is_buy and cand < e_f)
                         if not side_ok:
                             continue
-                        # Ordine progressivo rispetto al TP precedente
+                        # Ordine progressivo rispetto al TP precedente:
+                        # BUY: cand > prev_tp; SELL: cand < prev_tp
                         order_ok = (is_buy and cand > prev_tp) or (not is_buy and cand < prev_tp)
                         if not order_ok:
                             continue
+                        # Se esiste anche un TP successivo, il candidato deve
+                        # rispettare la progressione anche da quel lato:
+                        # BUY: cand < next_tp; SELL: cand > next_tp
+                        if next_tp is not None:
+                            sandwich_ok = (is_buy and cand < next_tp) or (not is_buy and cand > next_tp)
+                            if not sandwich_ok:
+                                continue
                         # Distanza plausibile in scala con TP1
                         cand_dist = abs(cand - e_f)
                         if not (lo * tp1_dist <= cand_dist <= hi * tp1_dist):
