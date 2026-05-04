@@ -1018,6 +1018,21 @@ async def mt5_close_signal(signal_id: int, db: Session = Depends(get_db)):
             if not sig.status.startswith("tp"):
                 sig.status = "closed"
         sig.closed_at = datetime.utcnow()
+        # Log evento "manual_close" nel trade_log
+        try:
+            import json as _jsonlib
+            log_list = _jsonlib.loads(sig.trade_log) if sig.trade_log else []
+            log_list.append({
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "event": "manual_close",
+                "detail": f"Chiusura manuale via UI: {len(tickets)} ticket processati ({already_closed} gia' chiusi). Status finale: {sig.status}",
+                "tickets": tickets,
+                "status": sig.status,
+                "pnl": sig.pnl_usd,
+            })
+            sig.trade_log = _jsonlib.dumps(log_list)
+        except Exception:
+            pass
         db.add(sig)
         db.commit()
     return {"ok": all_ok, "results": results}

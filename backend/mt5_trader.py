@@ -1349,6 +1349,34 @@ def sync_positions() -> list:
                     close_ts    = _get_mt5_utc(close_deal.time)
                     total_profit += profit
                     closed_tickets.append((ticket, close_price, profit, close_ts))
+                    # Log evento di chiusura nel trade_log (idempotente: skip se gia' loggato per quel ticket)
+                    existing_log = sig.trade_log or "[]"
+                    if f'"ticket": {ticket}' not in existing_log or '"event": "ticket_closed"' not in existing_log or f'{{"ticket": {ticket}' not in existing_log.replace('"event": "ticket_closed"', ''):
+                        # Determina motivo dal commento del deal (es. '[tp 4530.00]', '[sl 4525.40]', 'IC-close')
+                        comment = (close_deal.comment or "").lower()
+                        if 'tp' in comment:
+                            reason = "TP"
+                        elif 'sl' in comment:
+                            # Distingui SL originale vs SL @ BE
+                            if sig.actual_entry_price and abs(close_price - sig.actual_entry_price) < abs(close_price) * 0.001:
+                                reason = "SL@BE"
+                            else:
+                                reason = "SL"
+                        elif 'close' in comment or 'ic-close' in comment:
+                            reason = "manuale/Close"
+                        else:
+                            reason = "?"
+                        # Idempotenza: cerca evento gia' presente per questo ticket
+                        import json as _jsonlib
+                        try:
+                            log_list = _jsonlib.loads(sig.trade_log) if sig.trade_log else []
+                        except Exception:
+                            log_list = []
+                        already = any(e.get("event") == "ticket_closed" and e.get("ticket") == ticket for e in log_list)
+                        if not already:
+                            _append_trade_log_mt5(sig, "ticket_closed",
+                                f"ticket={ticket} chiuso a {close_price} (motivo: {reason}, profit {profit:+.2f} $)",
+                                {"ticket": ticket, "price": close_price, "profit": round(profit, 2), "reason": reason})
                     # Recupera deal di entrata: serve per actual_entry_price,
                     # entered_at e volume iniziale. Popola entered_at e
                     # actual_entry_price indipendentemente, perche' uno dei
@@ -1387,12 +1415,26 @@ def sync_positions() -> list:
             # Se TP1 è stato raggiunto → sposta SL a breakeven sugli ordini ancora aperti
             if tp1_hit and open_count > 0 and sig.actual_entry_price:
                 be_price = round(sig.actual_entry_price, 5)
+                # Idempotenza: log "be_applied" una sola volta nel trade_log
+                import json as _jsonlib
+                try:
+                    log_list = _jsonlib.loads(sig.trade_log) if sig.trade_log else []
+                except Exception:
+                    log_list = []
+                be_already_logged = any(e.get("event") == "be_applied" for e in log_list)
+                affected_tickets = []
                 for ticket in tickets:
                     if ticket in open_positions:
                         modify_sl(ticket, be_price, sig.symbol)
                         log(f"#{sig.id} TP1 hit → breakeven SL={be_price} su ticket={ticket}")
+                        affected_tickets.append(ticket)
                     elif ticket in pending_orders:
                         modify_sl(ticket, be_price, sig.symbol)
+                        affected_tickets.append(ticket)
+                if affected_tickets and not be_already_logged:
+                    _append_trade_log_mt5(sig, "be_applied",
+                        f"TP1 raggiunto: SL spostato a breakeven {be_price} sui {len(affected_tickets)} ticket residui",
+                        {"price": be_price, "tickets": affected_tickets})
 
             # Aggiorna P&L live (somma profit aperte + chiuse parziali)
             sig.pnl_usd = round(total_profit, 2)
@@ -1444,11 +1486,22 @@ def sync_positions() -> list:
                         new_status = f"tp{tp_num}"
                         break
 
+                # Log dell'evento "completato" nel trade_log (idempotente)
+                import json as _jsonlib
+                try:
+                    log_list = _jsonlib.loads(sig.trade_log) if sig.trade_log else []
+                except Exception:
+                    log_list = []
+                if not any(e.get("event") == "completed" for e in log_list):
+                    _append_trade_log_mt5(sig, "completed",
+                        f"Trade chiuso: status={new_status}, P&L totale {total_profit:+.2f}$",
+                        {"status": new_status, "exit_price": close_price, "pnl": round(total_profit, 2)})
+
                 sig.status     = new_status
                 sig.exit_price = close_price
                 sig.closed_at  = close_time
                 sig.updated_at = datetime.utcnow()
-                # Scrivi trade_log MT5 (per la freccia dettaglio in frontend)
+                # Build_mt5_trade_log solo se trade_log proprio vuoto (legacy)
                 if not sig.trade_log:
                     sig.trade_log = _build_mt5_trade_log(sig, closed_tickets, is_buy, new_status)
                 db.add(sig)

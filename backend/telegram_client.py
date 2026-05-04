@@ -430,11 +430,15 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                             pending_cancelled_any = True
                             log(f"[Close] #{sig.id} {sig.symbol} pending ticket={ticket} cancellato")
 
+            reason_txt = parsed.reason or "Close da TG"
             if position_closed_any:
                 # Almeno una posizione era effettivamente aperta → trade chiuso
                 sig.status = "closed"
                 sig.closed_at = now
                 sig.updated_at = now
+                _append_trade_log(sig, "tg_close",
+                    f"Close da Telegram applicato: posizioni chiuse (motivo: {reason_txt})",
+                    {"reason": reason_txt})
                 db.add(sig)
             elif pending_cancelled_any:
                 # Solo pending mai riempiti: il trade non si è mai aperto.
@@ -444,11 +448,17 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                     sig.notes = (sig.notes or "") + " [Close ricevuto: pending mai eseguiti]"
                     sig.closed_at = now
                     sig.updated_at = now
+                    _append_trade_log(sig, "tg_cancel",
+                        f"Close da Telegram applicato: pending mai eseguiti, segnale annullato (motivo: {reason_txt})",
+                        {"reason": reason_txt})
                     db.add(sig)
                 else:
                     sig.status = "closed"
                     sig.closed_at = now
                     sig.updated_at = now
+                    _append_trade_log(sig, "tg_close",
+                        f"Close da Telegram applicato (motivo: {reason_txt})",
+                        {"reason": reason_txt})
                     db.add(sig)
 
     db.commit()
@@ -693,6 +703,10 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 mt5_trader.modify_sl(ticket, new_sl, sig.symbol)
                             # NON sovrascrivere sig.stoploss (serve per dedup).
                             # Lo SL effettivo è su MT5, il DB tiene l'originale.
+                            label = "BE" if parsed.is_breakeven else f"SL→{new_sl}"
+                            _append_trade_log(sig, "sl_move",
+                                f"SL Move da TG ({label}) applicato su {len(tickets)} ticket (DB stoploss invariato={sig.stoploss})",
+                                {"new_sl": new_sl, "is_breakeven": parsed.is_breakeven, "tickets": tickets})
                             db.add(sig)
                             log(f"[SLMove] #{sig.id} {sig.symbol} SL→{new_sl} su {len(tickets)} ticket (DB stoploss invariato={sig.stoploss})")
                     db.commit()
