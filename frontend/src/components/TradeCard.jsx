@@ -19,11 +19,16 @@ function fmtPnl(v) {
   return (v >= 0 ? '+' : '') + v.toFixed(2) + '$'
 }
 
-function Row({ label, value, mono, cls, extra }) {
+function Row({ label, value, mono, cls, extra, hit }) {
+  // hit=true: TP gia' raggiunto -> sfondo verde + check
+  const wrapClass = hit
+    ? 'flex justify-between items-baseline bg-emerald-900/40 border border-emerald-700/40 rounded px-2 py-0.5'
+    : 'flex justify-between items-baseline'
+  const labelExtra = hit ? <span className="text-emerald-300 ml-1">✓</span> : null
   return (
-    <div className="flex justify-between items-baseline">
-      <span className="text-[15px] text-slate-500">{label}</span>
-      <span className={`text-[15px] ${mono ? 'font-mono' : ''} ${cls || 'text-slate-200'}`}>
+    <div className={wrapClass}>
+      <span className="text-[15px] text-slate-400">{label}{labelExtra}</span>
+      <span className={`text-[15px] ${mono ? 'font-mono' : ''} ${hit ? 'text-emerald-200' : (cls || 'text-slate-200')}`}>
         {value}{extra && <span className="text-[15px] text-slate-500 ml-1">{extra}</span>}
       </span>
     </div>
@@ -58,6 +63,10 @@ export default function TradeCard({ sig, positions, currentPrice, onClose }) {
 
   const decimals = sig.symbol?.includes('BTC') ? 0 : sig.symbol?.includes('JPY') ? 3 : 5
   const fmtPrice = (v) => v != null ? Number(v).toFixed(decimals) : '—'
+
+  // TP raggiunti (dal status del segnale: il bot lo aggiorna a tp1/tp2/tp3
+  // quando il rispettivo livello viene effettivamente colpito su MT5).
+  const tpHitCount = sig.status === 'tp3' ? 3 : sig.status === 'tp2' ? 2 : sig.status === 'tp1' ? 1 : 0
 
   const handleClose = async () => {
     if (!confirm(`Chiudere tutte le posizioni del trade #${sig.id} ${sig.symbol}?`)) return
@@ -127,9 +136,9 @@ export default function TradeCard({ sig, positions, currentPrice, onClose }) {
         </div>
         <div className="space-y-3">
           <Row label="Stop Loss"  value={fmtPrice(sig.stoploss)} mono cls="text-rose-400" extra={slDist ? `(${slDist} pts)` : ''} />
-          <Row label="TP1" value={fmtPrice(sig.tp1)} mono cls="text-emerald-400" />
-          <Row label="TP2" value={fmtPrice(sig.tp2)} mono cls="text-emerald-300" />
-          <Row label="TP3" value={fmtPrice(sig.tp3)} mono cls="text-emerald-200" />
+          <Row label="TP1" value={fmtPrice(sig.tp1)} mono cls="text-emerald-400" hit={tpHitCount >= 1} />
+          <Row label="TP2" value={fmtPrice(sig.tp2)} mono cls="text-emerald-300" hit={tpHitCount >= 2} />
+          <Row label="TP3" value={fmtPrice(sig.tp3)} mono cls="text-emerald-200" hit={tpHitCount >= 3} />
         </div>
       </div>
 
