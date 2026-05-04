@@ -1,27 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
-import { formatDistanceToNow } from 'date-fns'
-import { it } from 'date-fns/locale'
 import { TrendingUp, TrendingDown, Target, ShieldAlert, Activity, DollarSign, Calendar, BarChart3 } from 'lucide-react'
-import toast from 'react-hot-toast'
-import TradeProgress from '../components/TradeProgress'
-
-const STATUS_COLORS = {
-  pending:   'bg-yellow-900/40 text-yellow-400 border-yellow-700',
-  open:      'bg-blue-900/40 text-blue-400 border-blue-700',
-  tp1:       'bg-emerald-900/40 text-emerald-400 border-emerald-700',
-  tp2:       'bg-emerald-900/60 text-emerald-300 border-emerald-600',
-  tp3:       'bg-emerald-800/60 text-emerald-200 border-emerald-500',
-  closed:    'bg-slate-700/40 text-slate-400 border-slate-600',
-  sl_hit:    'bg-rose-900/40 text-rose-400 border-rose-700',
-  cancelled: 'bg-slate-800/40 text-slate-500 border-slate-700',
-  cancelled_timing: 'bg-amber-900/20 text-amber-600 border-amber-800',
-}
-
-const STATUS_LABELS = {
-  pending: 'In attesa', open: 'Aperto', tp1: 'TP1 ✓', tp2: 'TP2 ✓',
-  tp3: 'TP3 ✓', closed: 'Chiuso', sl_hit: 'SL Hit', cancelled: 'Annullato', cancelled_timing: 'Timing mancato',
-}
+import TradeCard from '../components/TradeCard'
 
 function StatCard({ label, value, icon: Icon, color }) {
   return (
@@ -33,206 +13,6 @@ function StatCard({ label, value, icon: Icon, color }) {
         <p className="text-slate-400 text-xs">{label}</p>
         <p className="text-2xl font-bold">{value ?? '—'}</p>
       </div>
-    </div>
-  )
-}
-
-function SignalCard({ signal, onStatusChange }) {
-  const [updating, setUpdating] = useState(false)
-  const [closing, setClosing] = useState(false)
-  const [notes, setNotes] = useState(signal.notes || '')
-  const [price, setPrice] = useState(null)
-
-  // Polling prezzo attuale ogni 10s
-  useEffect(() => {
-    const fetchPrice = () =>
-      fetch(`/api/price/${signal.symbol}`).then(r => r.json()).then(d => setPrice(d.price)).catch(() => {})
-    fetchPrice()
-    const t = setInterval(fetchPrice, 10000)
-    return () => clearInterval(t)
-  }, [signal.symbol])
-
-  const handleStatus = async (status) => {
-    setUpdating(true)
-    try {
-      await api.updateSignal(signal.id, { status })
-      onStatusChange()
-    } finally {
-      setUpdating(false)
-    }
-  }
-
-  const handleCancel = async () => {
-    if (!confirm(`Annullare il segnale #${signal.id} ${signal.symbol}?`)) return
-    await handleStatus('cancelled')
-  }
-
-  const handleCloseTrade = async () => {
-    if (!confirm(`Chiudere il trade MT5 #${signal.id} ${signal.symbol}?`)) return
-    setClosing(true)
-    try {
-      const r = await fetch(`/api/mt5/close_signal/${signal.id}`, { method: 'POST' }).then(r => r.json())
-      if (r.ok) {
-        toast.success(`Trade #${signal.id} chiuso`)
-        onStatusChange()
-      } else {
-        // Prova a sincronizzare con MT5 — le posizioni potrebbero essere già chiuse
-        await fetch('/api/mt5/sync', { method: 'POST' })
-        const updated = await fetch(`/api/signals/${signal.id}`).then(r => r.json())
-        if (!['open','pending','tp1','tp2'].includes(updated.status)) {
-          toast.success(`Trade #${signal.id} già chiuso su MT5 — stato aggiornato`)
-          onStatusChange()
-        } else {
-          toast.error('Errore nella chiusura MT5')
-        }
-      }
-    } catch {
-      toast.error('Errore di rete')
-    } finally {
-      setClosing(false)
-    }
-  }
-
-  const saveNotes = async () => {
-    await api.updateSignal(signal.id, { notes })
-    onStatusChange()
-  }
-
-  const isBuy = signal.direction === 'buy'
-  const hasMt5 = signal.mt5_ticket || signal.mt5_tickets
-
-  return (
-    <div className="card space-y-3">
-      <div className="flex items-start justify-between">
-        <div className="flex items-center gap-2">
-          <span className={isBuy ? 'badge-buy' : 'badge-sell'}>
-            {isBuy ? '▲ BUY' : '▼ SELL'}
-          </span>
-          <span className="font-bold text-white">{signal.symbol}</span>
-        </div>
-        <span className={`badge-status border ${STATUS_COLORS[signal.status] || ''}`}>
-          {STATUS_LABELS[signal.status] || signal.status}
-        </span>
-      </div>
-
-      {/* Prezzo attuale + P&L */}
-      {price != null && (() => {
-        const entry = signal.actual_entry_price || signal.entry_price
-        const inProfit = entry
-          ? (isBuy ? price > entry : price < entry)
-          : null
-        const digits = price > 1000 ? 2 : 5
-        // P&L: usa pnl_usd dal backend (MT5 reale) oppure stima dal prezzo
-        const pnl = signal.pnl_usd
-        return (
-          <div className="flex items-center justify-between bg-slate-800/50 rounded px-3 py-1.5">
-            <div>
-              <span className="text-xs text-slate-500">Prezzo attuale</span>
-              <span className={`ml-2 font-mono font-bold text-lg ${
-                inProfit === null ? 'text-slate-300' : inProfit ? 'text-emerald-400' : 'text-rose-400'
-              }`}>
-                {price.toFixed(digits)}
-              </span>
-            </div>
-            {pnl != null && (
-              <div className="text-right">
-                <span className="text-xs text-slate-500">P&L</span>
-                <p className={`font-mono font-bold text-lg ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}$
-                </p>
-              </div>
-            )}
-          </div>
-        )
-      })()}
-
-      <div className="grid grid-cols-2 gap-2 text-sm">
-        <div>
-          <span className="text-slate-500">Entry</span>
-          <p className="font-mono text-slate-200">
-            {signal.entry_price ?? '?'}
-            {signal.entry_price_high ? ` – ${signal.entry_price_high}` : ''}
-          </p>
-        </div>
-        <div>
-          <span className="text-slate-500">Stop Loss</span>
-          <p className="font-mono text-rose-400">{signal.stoploss ?? '—'}</p>
-        </div>
-        <div>
-          <span className="text-slate-500">TP1</span>
-          <p className="font-mono text-emerald-400">{signal.tp1 ?? '—'}</p>
-        </div>
-        <div>
-          <span className="text-slate-500">TP2 / TP3</span>
-          <p className="font-mono text-emerald-300">
-            {signal.tp2 ?? '—'} / {signal.tp3 ?? '—'}
-          </p>
-        </div>
-      </div>
-
-      {/* Barra di progressione (SL/BE/Entry/TP1/TP2/TP3 + price) */}
-      {price != null && <TradeProgress sig={signal} price={price} />}
-
-      {/* Aggiorna stato */}
-      <div className="flex flex-wrap gap-1">
-        {['open', 'tp1', 'tp2', 'tp3', 'closed', 'sl_hit'].map(s => (
-          <button
-            key={s}
-            onClick={() => handleStatus(s)}
-            disabled={updating || signal.status === s}
-            className={`text-xs px-2 py-1 rounded border transition-colors ${
-              signal.status === s
-                ? 'opacity-50 cursor-default border-slate-700 text-slate-500'
-                : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:text-white'
-            }`}
-          >
-            {STATUS_LABELS[s]}
-          </button>
-        ))}
-      </div>
-
-      {/* Azioni MT5 / Annulla */}
-      <div className="flex gap-2">
-        {hasMt5 ? (
-          <button
-            onClick={handleCloseTrade}
-            disabled={closing}
-            className="flex-1 text-xs px-2 py-1.5 rounded bg-rose-900/40 text-rose-400 hover:bg-rose-900/60 hover:text-rose-300 transition-colors disabled:opacity-50"
-          >
-            {closing ? 'Chiusura...' : 'Chiudi trade MT5'}
-          </button>
-        ) : (
-          <button
-            onClick={handleCancel}
-            disabled={updating}
-            className="flex-1 text-xs px-2 py-1.5 rounded bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors disabled:opacity-50"
-          >
-            Annulla segnale
-          </button>
-        )}
-      </div>
-
-      {/* Note */}
-      <div className="flex gap-2">
-        <input
-          value={notes}
-          onChange={e => setNotes(e.target.value)}
-          placeholder="Note rapide..."
-          className="flex-1 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-brand-500"
-        />
-        <button
-          onClick={saveNotes}
-          className="text-xs px-2 py-1 bg-brand-700 hover:bg-brand-600 rounded transition-colors"
-        >
-          Salva
-        </button>
-      </div>
-
-      <p className="text-xs text-slate-600">
-        {signal.created_at
-          ? formatDistanceToNow(new Date(signal.created_at), { addSuffix: true, locale: it })
-          : ''}
-      </p>
     </div>
   )
 }
@@ -314,19 +94,40 @@ function MT5Panel() {
 export default function Dashboard({ wsEvents }) {
   const [signals, setSignals] = useState([])
   const [perf, setPerf] = useState(null)
+  const [positions, setPositions] = useState([])
+  const [prices, setPrices] = useState({})
   const [loading, setLoading] = useState(true)
 
   const load = async () => {
-    const [sigs, p] = await Promise.all([
+    const [sigs, p, mt5] = await Promise.all([
       api.getSignals({ limit: 20 }),
       api.getPerformance(),
+      fetch('/api/mt5/status').then(r => r.json()).catch(() => ({})),
     ])
     setSignals(sigs)
     setPerf(p)
+    setPositions(mt5.open_positions ?? [])
     setLoading(false)
+
+    // Polling prezzi per i simboli con segnali attivi
+    const active = sigs.filter(s => ['pending', 'open', 'tp1', 'tp2'].includes(s.status) && !s.closed_at)
+    const syms = [...new Set(active.map(s => s.symbol))]
+    const priceMap = {}
+    await Promise.all(syms.map(async sym => {
+      try {
+        const r = await fetch(`/api/price/${sym}`).then(r => r.json())
+        if (r.price) priceMap[sym] = r.price
+      } catch {}
+    }))
+    setPrices(priceMap)
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => {
+    load()
+    // Auto-refresh ogni 15s per tenere sincronizzati prezzi e P&L live
+    const t = setInterval(load, 15000)
+    return () => clearInterval(t)
+  }, [])
 
   // Ricarica quando arriva un evento WS
   useEffect(() => {
@@ -385,7 +186,13 @@ export default function Dashboard({ wsEvents }) {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {active.map(s => (
-              <SignalCard key={s.id} signal={s} onStatusChange={load} />
+              <TradeCard
+                key={s.id}
+                sig={s}
+                positions={positions}
+                currentPrice={prices[s.symbol]}
+                onClose={load}
+              />
             ))}
           </div>
         )}
