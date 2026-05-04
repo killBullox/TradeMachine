@@ -4,6 +4,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { it } from 'date-fns/locale'
 import { TrendingUp, TrendingDown, Target, ShieldAlert, Activity, DollarSign, Calendar, BarChart3 } from 'lucide-react'
 import toast from 'react-hot-toast'
+import TradeProgress from '../components/TradeProgress'
 
 const STATUS_COLORS = {
   pending:   'bg-yellow-900/40 text-yellow-400 border-yellow-700',
@@ -168,6 +169,9 @@ function SignalCard({ signal, onStatusChange }) {
           </p>
         </div>
       </div>
+
+      {/* Barra di progressione (SL/BE/Entry/TP1/TP2/TP3 + price) */}
+      {price != null && <TradeProgress sig={signal} price={price} />}
 
       {/* Aggiorna stato */}
       <div className="flex flex-wrap gap-1">

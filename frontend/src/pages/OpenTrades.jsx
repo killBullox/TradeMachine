@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { format } from 'date-fns'
 import { it } from 'date-fns/locale'
 import toast from 'react-hot-toast'
+import TradeProgress from '../components/TradeProgress'
 
 function fmtTs(ts) {
   if (!ts) return '—'
@@ -114,29 +115,9 @@ function TradeCard({ sig, positions, prices, onClose }) {
         </div>
       </div>
 
-      {/* Barra progressione verso TP */}
-      {currentPrice && entry && nextTp && (
-        <div className="space-y-1">
-          <div className="flex justify-between text-xs text-slate-500">
-            <span>Entry {fmtPrice(entry)}</span>
-            <span className="text-emerald-400">TP {fmtPrice(nextTp)}</span>
-          </div>
-          <div className="w-full h-1.5 bg-slate-700 rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full ${isBuy ? 'bg-emerald-500' : 'bg-rose-500'}`}
-              style={{
-                width: `${Math.min(100, Math.max(0,
-                  isBuy
-                    ? ((currentPrice - entry) / (nextTp - entry)) * 100
-                    : ((entry - currentPrice) / (entry - nextTp)) * 100
-                ))}%`
-              }}
-            />
-          </div>
-          <div className="text-xs text-slate-500 text-right">
-            {Math.abs(nextTp - currentPrice).toFixed(decimals)} pts al prossimo TP
-          </div>
-        </div>
+      {/* Barra di progressione completa (SL/BE/Entry/TP1/TP2/TP3 + price) */}
+      {currentPrice != null && (
+        <TradeProgress sig={sig} price={currentPrice} />
       )}
 
       {/* Ticket MT5 */}
