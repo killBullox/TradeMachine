@@ -93,9 +93,9 @@ export default function TradeProgress({ sig, price }) {
       </div>
 
       {/* Barra */}
-      <div className="relative h-8 mt-3">
+      <div className="relative h-12 mt-4">
         {/* Linea base */}
-        <div className="absolute top-1/2 left-0 right-0 h-0.5 bg-slate-700 -translate-y-1/2" />
+        <div className="absolute top-1/2 left-0 right-0 h-1 bg-slate-700 rounded -translate-y-1/2" />
 
         {/* Marker delle barriere */}
         {barriers.map((b, i) => {
@@ -106,9 +106,9 @@ export default function TradeProgress({ sig, price }) {
               className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2"
               style={{ left: `${pct}%` }}
             >
-              <div className={`w-1 h-3 ${colorOfKind(b.kind)}`} />
+              <div className={`w-1.5 h-5 ${colorOfKind(b.kind)} rounded-sm`} />
               {b.kind === 'tp_hit' && (
-                <span className="absolute -top-3 left-1/2 -translate-x-1/2 text-emerald-400 text-xs">✓</span>
+                <span className="absolute -top-4 left-1/2 -translate-x-1/2 text-emerald-400 text-sm">✓</span>
               )}
             </div>
           )
@@ -121,23 +121,23 @@ export default function TradeProgress({ sig, price }) {
             style={{ left: `${Math.min(100, Math.max(0, toPct(price)))}%` }}
             title={`Prezzo attuale: ${fmt(price)}`}
           >
-            <div className="w-3 h-3 rounded-full bg-white border border-slate-900 shadow-md" />
+            <div className="w-4 h-4 rounded-full bg-white border-2 border-slate-900 shadow-md" />
           </div>
         )}
       </div>
 
       {/* Etichette delle barriere sotto */}
-      <div className="relative h-5">
+      <div className="relative h-9">
         {barriers.map((b, i) => {
           const pct = toPct(b.value)
           return (
             <div
               key={`label-${b.label}-${i}`}
-              className={`absolute -translate-x-1/2 text-[10px] font-mono ${labelColor(b.kind)}`}
+              className={`absolute -translate-x-1/2 text-[15px] font-mono font-semibold ${labelColor(b.kind)}`}
               style={{ left: `${pct}%` }}
             >
-              <div className="text-center leading-none">{b.label}</div>
-              <div className="text-center text-slate-500 text-[9px] leading-tight">{fmt(b.value)}</div>
+              <div className="text-center leading-tight">{b.label}</div>
+              <div className="text-center text-slate-400 text-[14px] leading-tight font-normal">{fmt(b.value)}</div>
             </div>
           )
         })}
