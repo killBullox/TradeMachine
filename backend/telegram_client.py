@@ -699,16 +699,39 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             new_sl = sig.actual_entry_price
                         if new_sl:
                             tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
+                            failed_invalid_sl = False
                             for ticket in tickets:
-                                mt5_trader.modify_sl(ticket, new_sl, sig.symbol)
-                            # NON sovrascrivere sig.stoploss (serve per dedup).
-                            # Lo SL effettivo è su MT5, il DB tiene l'originale.
-                            label = "BE" if parsed.is_breakeven else f"SL→{new_sl}"
-                            _append_trade_log(sig, "sl_move",
-                                f"SL Move da TG ({label}) applicato su {len(tickets)} ticket (DB stoploss invariato={sig.stoploss})",
-                                {"new_sl": new_sl, "is_breakeven": parsed.is_breakeven, "tickets": tickets})
+                                ok = mt5_trader.modify_sl(ticket, new_sl, sig.symbol)
+                                if not ok:
+                                    err = mt5_trader._last_modify_error
+                                    if err and isinstance(err, tuple) and len(err) >= 2:
+                                        msg_err = str(err[1] or "").lower()
+                                        if 'invalid' in msg_err and 'sl' in msg_err:
+                                            failed_invalid_sl = True
+                            label = "BE" if parsed.is_breakeven else f"SL->{new_sl}"
+                            if failed_invalid_sl:
+                                # Modify rifiutato perche' SL troppo vicino al prezzo:
+                                # registra in pending queue per riprovare a ogni sync (30s).
+                                mt5_trader.register_pending_sl(sig.id, new_sl, tickets, sig.symbol, sig.direction)
+                                _append_trade_log(sig, "sl_pending",
+                                    f"SL Move da TG ({label}) RIFIUTATO da MT5 (SL troppo vicino al prezzo): "
+                                    f"messo in pending, ritentero' ogni 30s. "
+                                    f"Se il prezzo tocca lo SL forzero' la chiusura.",
+                                    {"new_sl": new_sl, "is_breakeven": parsed.is_breakeven, "tickets": tickets})
+                                # Aggiorna nota visibile nello storico
+                                import re as _re
+                                if sig.notes:
+                                    sig.notes = _re.sub(r'\s*\[SL pending[^\]]*\]', '', sig.notes).strip() or None
+                                sig.notes = (sig.notes or "") + f" [SL pending: {new_sl}]"
+                                log(f"[SLMove] #{sig.id} {sig.symbol} SL->{new_sl} RIFIUTATO (Invalid sl) -> pending queue")
+                            else:
+                                _append_trade_log(sig, "sl_move",
+                                    f"SL Move da TG ({label}) applicato su {len(tickets)} ticket (DB stoploss invariato={sig.stoploss})",
+                                    {"new_sl": new_sl, "is_breakeven": parsed.is_breakeven, "tickets": tickets})
+                                # Se c'era una pending precedente, viene sostituita: pulisci
+                                mt5_trader.clear_pending_sl(sig.id)
+                                log(f"[SLMove] #{sig.id} {sig.symbol} SL->{new_sl} su {len(tickets)} ticket (DB stoploss invariato={sig.stoploss})")
                             db.add(sig)
-                            log(f"[SLMove] #{sig.id} {sig.symbol} SL→{new_sl} su {len(tickets)} ticket (DB stoploss invariato={sig.stoploss})")
                     db.commit()
             except Exception as e:
                 log(f"[AutoTrade] Errore modify_sl: {str(e)[:100]}")

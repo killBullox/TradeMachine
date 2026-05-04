@@ -33,6 +33,15 @@ MT5_SYMBOL_MAP = {
 
 _auto_trade_enabled = False   # toggle globale
 
+# Ultimo errore di modify_sl_tp (tuple (code, message) o None se ok).
+# Esposto per i chiamanti che vogliono distinguere "Invalid sl" da altri fail.
+_last_modify_error = None
+
+# Pending SL requests: signal_id -> dict.
+# Registrate quando modify_sl_tp fallisce con 'Invalid sl' (SL troppo vicino al
+# prezzo per il broker). sync_positions le riprocessa ogni 30s.
+_pending_sl_requests = {}
+
 import logging
 _logger = logging.getLogger("trademachine")
 
@@ -1033,9 +1042,13 @@ def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
 
 def modify_sl_tp(ticket: int, new_sl: Optional[float], new_tp: Optional[float], symbol: str) -> bool:
     """Modifica SL e/o TP di una posizione aperta o un ordine pendente.
-    Passa None per lasciare invariato uno dei due. Retry su errore transitorio."""
+    Passa None per lasciare invariato uno dei due. Retry su errore transitorio.
+    Espone l'ultimo errore in _last_modify_error per i chiamanti."""
+    global _last_modify_error
+    _last_modify_error = None
     mt5 = _get_mt5()
     if mt5 is None:
+        _last_modify_error = (None, "MT5 not initialized")
         return False
 
     mt5_sym = MT5_SYMBOL_MAP.get(symbol.upper(), symbol)
@@ -1081,9 +1094,116 @@ def modify_sl_tp(ticket: int, new_sl: Optional[float], new_tp: Optional[float], 
 
     label = f"modify_sl_tp ticket={ticket} new_sl={new_sl_rounded} new_tp={new_tp_rounded}"
     ok, result, err = _send_with_retry(mt5, request, label, attempts=3, delay=0.5)
+    if not ok:
+        _last_modify_error = err
     status = "OK" if ok else f"FAIL last_err={err}"
     log(f"{label} -> {status}")
     return ok
+
+
+def register_pending_sl(sig_id: int, sl: float, tickets: list, symbol: str, direction: str):
+    """Registra una pending SL request (modify rifiutato per 'Invalid sl').
+    Sostituisce eventuale richiesta precedente sullo stesso signal."""
+    from datetime import datetime as _dt
+    _pending_sl_requests[sig_id] = {
+        "sl": sl,
+        "tickets": tickets,
+        "symbol": symbol,
+        "direction": direction,
+        "requested_at": _dt.utcnow(),
+    }
+    log(f"#{sig_id} pending SL queued: SL={sl} su {len(tickets)} ticket")
+
+
+def clear_pending_sl(sig_id: int):
+    _pending_sl_requests.pop(sig_id, None)
+
+
+def process_pending_sl_requests():
+    """Riprocessa tutte le pending SL requests:
+    - Se il prezzo ha toccato/superato lo SL nella direzione sfavorevole -> chiusura forzata.
+    - Altrimenti tenta di nuovo modify_sl. Se va a buon fine -> rimuove dalla queue.
+    Chiamata all'inizio di sync_positions ogni 30s.
+    """
+    if not _pending_sl_requests:
+        return
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return
+    from database import SessionLocal, Signal
+    db = SessionLocal()
+    try:
+        for sig_id, req in list(_pending_sl_requests.items()):
+            sig = db.query(Signal).filter(Signal.id == sig_id).first()
+            if sig is None:
+                _pending_sl_requests.pop(sig_id, None)
+                continue
+            # Se il segnale e' chiuso/cancelled -> pulisci
+            if sig.status not in ("open", "tp1", "tp2"):
+                log(f"#{sig_id} pending SL: signal status={sig.status}, scarto pending")
+                _pending_sl_requests.pop(sig_id, None)
+                continue
+
+            mt5_sym = MT5_SYMBOL_MAP.get(req["symbol"].upper(), req["symbol"])
+            mt5.symbol_select(mt5_sym, True)
+            tick = mt5.symbol_info_tick(mt5_sym)
+            if tick is None or tick.bid <= 0 or tick.ask <= 0:
+                continue
+
+            sl = req["sl"]
+            is_buy = req["direction"].lower() == "buy"
+            # Per BUY chiusura su bid; per SELL su ask. SL "toccato" se prezzo
+            # chiusura ha superato lo SL nella direzione sfavorevole.
+            sl_touched = (is_buy and tick.bid <= sl) or (not is_buy and tick.ask >= sl)
+            if sl_touched:
+                log(f"#{sig_id} pending SL {sl} TOCCATO (bid={tick.bid} ask={tick.ask}) - chiusura forzata")
+                # Filtra ticket ancora aperti
+                still_open = []
+                for t in req["tickets"]:
+                    if mt5.positions_get(ticket=t) or mt5.orders_get(ticket=t):
+                        still_open.append(t)
+                closed_count = 0
+                for t in still_open:
+                    if close_position(t, req["symbol"]):
+                        closed_count += 1
+                _append_trade_log_mt5(sig, "sl_force_close",
+                    f"SL pending {sl} toccato dal prezzo (bid={tick.bid} ask={tick.ask}) - "
+                    f"chiusura forzata di {closed_count}/{len(still_open)} ticket")
+                # Aggiorna nota
+                _strip_pending_note(sig)
+                sig.notes = (sig.notes or "") + f" [SL pending {sl}: chiusura forzata a {tick.bid if is_buy else tick.ask}]"
+                db.merge(sig)
+                db.commit()
+                _pending_sl_requests.pop(sig_id, None)
+                continue
+
+            # Retry modify_sl_tp su ogni ticket
+            all_ok = True
+            for t in req["tickets"]:
+                # Verifica che il ticket esista ancora
+                if not (mt5.positions_get(ticket=t) or mt5.orders_get(ticket=t)):
+                    continue
+                if not modify_sl_tp(t, sl, None, req["symbol"]):
+                    all_ok = False
+                    break
+            if all_ok:
+                log(f"#{sig_id} pending SL {sl} APPLICATO (prezzo si e' allontanato: bid={tick.bid} ask={tick.ask})")
+                _append_trade_log_mt5(sig, "sl_applied_delayed",
+                    f"SL pending {sl} applicato (bid={tick.bid} ask={tick.ask})")
+                _strip_pending_note(sig)
+                sig.notes = (sig.notes or "") + f" [SL pending {sl} applicato]"
+                db.merge(sig)
+                db.commit()
+                _pending_sl_requests.pop(sig_id, None)
+    finally:
+        db.close()
+
+
+def _strip_pending_note(sig):
+    """Rimuove dalla nota la stringa '[SL pending: X]' precedente per evitare ridondanza."""
+    import re as _re
+    if sig.notes:
+        sig.notes = _re.sub(r'\s*\[SL pending[^\]]*\]', '', sig.notes).strip() or None
 
 
 def modify_order(ticket: int, symbol: str, new_entry: float = None, new_sl: float = None, new_tp: float = None) -> bool:
@@ -1390,6 +1510,9 @@ def sync_positions() -> list:
     from database import SessionLocal, Signal
     import json as jsonlib
     from datetime import timedelta
+
+    # Riprocessa eventuali pending SL requests (modify rifiutati per 'Invalid sl')
+    process_pending_sl_requests()
 
     mt5 = _get_mt5()
     if mt5 is None:
