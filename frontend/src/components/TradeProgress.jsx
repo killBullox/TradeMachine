@@ -126,18 +126,22 @@ export default function TradeProgress({ sig, price }) {
         )}
       </div>
 
-      {/* Etichette delle barriere sotto */}
+      {/* Etichette delle barriere sotto. Le etichette agli estremi (sinistra
+          o destra) verrebbero tagliate dalla card se centrate sopra il marker:
+          adjusto translateX in base alla posizione percentuale. */}
       <div className="relative h-9">
         {barriers.map((b, i) => {
           const pct = toPct(b.value)
+          const tx = pct < 8 ? '0%' : pct > 92 ? '-100%' : '-50%'
+          const align = pct < 8 ? 'text-left' : pct > 92 ? 'text-right' : 'text-center'
           return (
             <div
               key={`label-${b.label}-${i}`}
-              className={`absolute -translate-x-1/2 text-[15px] font-mono font-semibold ${labelColor(b.kind)}`}
-              style={{ left: `${pct}%` }}
+              className={`absolute text-[15px] font-mono font-semibold ${labelColor(b.kind)}`}
+              style={{ left: `${pct}%`, transform: `translateX(${tx})` }}
             >
-              <div className="text-center leading-tight">{b.label}</div>
-              <div className="text-center text-slate-400 text-[14px] leading-tight font-normal">{fmt(b.value)}</div>
+              <div className={`${align} leading-tight`}>{b.label}</div>
+              <div className={`${align} text-slate-400 text-[14px] leading-tight font-normal`}>{fmt(b.value)}</div>
             </div>
           )
         })}
