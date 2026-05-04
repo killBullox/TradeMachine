@@ -931,6 +931,16 @@ async def mt5_backfill_position_size():
     return {"ok": True, "count": len(updated), "updated": updated}
 
 
+@app.post("/api/mt5/backfill-trade-log")
+async def mt5_backfill_trade_log(only_today: bool = True):
+    """One-shot: ricostruisce gli eventi mancanti nel trade_log dai deal MT5
+    (ticket_closed, be_applied, completed). Default: solo trade di oggi."""
+    def _do():
+        return mt5_trader.backfill_trade_log(only_today=only_today)
+    updated = await asyncio.get_event_loop().run_in_executor(None, _do)
+    return {"ok": True, "count": len(updated), "updated": updated}
+
+
 class ModifyTicketIn(BaseModel):
     sl: Optional[float] = None
     tp: Optional[float] = None

@@ -837,6 +837,119 @@ def place_order(sig) -> Optional[int]:
     return tickets[0] if tickets else None
 
 
+def backfill_trade_log(only_today: bool = False) -> list:
+    """
+    One-shot: ricostruisce gli eventi mancanti nel trade_log dei segnali gia'
+    chiusi a partire dai deal MT5. Utile per i trade chiusi PRIMA del fix che
+    ha aggiunto ticket_closed/be_applied/completed in sync_positions.
+    """
+    from database import SessionLocal, Signal
+    from datetime import datetime as _dt, timedelta as _td
+    import json as jsonlib
+
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return []
+
+    db = SessionLocal()
+    try:
+        q = db.query(Signal).filter(
+            (Signal.mt5_ticket.isnot(None)) | (Signal.mt5_tickets.isnot(None)),
+            Signal.status != "cancelled",
+        )
+        if only_today:
+            today_start = _dt.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            q = q.filter(Signal.created_at >= today_start)
+        sigs = q.all()
+
+        updated = []
+        for sig in sigs:
+            tickets = jsonlib.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
+            try:
+                log_list = jsonlib.loads(sig.trade_log) if sig.trade_log else []
+            except Exception:
+                log_list = []
+
+            existing_closed_tickets = {e.get("ticket") for e in log_list if e.get("event") == "ticket_closed"}
+            has_be      = any(e.get("event") == "be_applied" for e in log_list)
+            has_completed = any(e.get("event") == "completed" for e in log_list)
+
+            is_buy = (sig.direction or "buy").lower() == "buy"
+            added_events = []
+            close_deals = []  # (ticket, price, profit, time, reason)
+            for t in tickets:
+                deals = mt5.history_deals_get(position=t) or []
+                for d in deals:
+                    if d.entry != mt5.DEAL_ENTRY_OUT:
+                        continue
+                    profit, price, ts = d.profit, d.price, _get_mt5_utc(d.time)
+                    comment = (d.comment or "").lower()
+                    if 'tp' in comment:
+                        reason = "TP"
+                    elif 'sl' in comment:
+                        if sig.actual_entry_price and abs(price - sig.actual_entry_price) < abs(price) * 0.001:
+                            reason = "SL@BE"
+                        else:
+                            reason = "SL"
+                    elif 'close' in comment or 'ic-close' in comment:
+                        reason = "manuale/Close"
+                    else:
+                        reason = "?"
+                    close_deals.append((t, price, profit, ts, reason))
+                    if t not in existing_closed_tickets:
+                        ev = {
+                            "ts": (ts or _dt.utcnow()).isoformat() + "Z",
+                            "event": "ticket_closed",
+                            "detail": f"ticket={t} chiuso a {price} (motivo: {reason}, profit {profit:+.2f}$)",
+                            "ticket": t, "price": price, "profit": round(profit, 2), "reason": reason,
+                        }
+                        log_list.append(ev)
+                        added_events.append("ticket_closed")
+                        existing_closed_tickets.add(t)
+
+            # be_applied: se status >= tp1 e c'e' actual_entry_price + non era gia' loggato
+            tp_levels_hit = sig.status in ("tp1", "tp2", "tp3", "closed")
+            if tp_levels_hit and sig.actual_entry_price and not has_be:
+                # Stima ts: subito dopo il primo close di tipo TP
+                tp_close = next((cd for cd in close_deals if cd[4] == "TP"), None)
+                ts_be = (tp_close[3] + _td(seconds=1)) if tp_close and tp_close[3] else _dt.utcnow()
+                ev = {
+                    "ts": ts_be.isoformat() + "Z",
+                    "event": "be_applied",
+                    "detail": f"TP1 raggiunto: SL spostato a breakeven {round(sig.actual_entry_price, 5)} (backfill)",
+                    "price": round(sig.actual_entry_price, 5),
+                    "tickets": tickets[1:] if len(tickets) > 1 else [],
+                }
+                log_list.append(ev)
+                added_events.append("be_applied")
+
+            # completed: se status finale chiuso e non gia' loggato
+            if sig.status in ("tp1", "tp2", "tp3", "closed", "sl_hit") and not has_completed:
+                last_close = max(close_deals, key=lambda x: x[3]) if close_deals else None
+                ts_done = (last_close[3] if last_close and last_close[3] else (sig.closed_at or _dt.utcnow()))
+                ev = {
+                    "ts": ts_done.isoformat() + "Z",
+                    "event": "completed",
+                    "detail": f"Trade chiuso: status={sig.status}, P&L totale {(sig.pnl_usd or 0):+.2f}$ (backfill)",
+                    "status": sig.status,
+                    "pnl": sig.pnl_usd,
+                }
+                log_list.append(ev)
+                added_events.append("completed")
+
+            if added_events:
+                # Riordina per timestamp
+                log_list.sort(key=lambda e: e.get("ts", ""))
+                sig.trade_log = jsonlib.dumps(log_list)
+                db.add(sig)
+                updated.append({"id": sig.id, "added": added_events})
+
+        db.commit()
+        return updated
+    finally:
+        db.close()
+
+
 def backfill_position_size() -> list:
     """
     One-shot: per ogni segnale con MT5 ticket attivo (non cancelled), ricalcola
