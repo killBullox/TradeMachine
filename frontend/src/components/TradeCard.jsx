@@ -75,9 +75,16 @@ export default function TradeCard({ sig, positions, currentPrice, onClose }) {
   const displayPnl = livePnl ?? sig.pnl_usd
   const lots = openPos.reduce((s, p) => s + (p.volume ?? 0), 0)
 
+  // SL effettivo: se ci sono posizioni aperte, prende lo SL dal primo ticket
+  // attivo con SL valorizzato (riflette BE / lock profit / SL move da TG).
+  // Fallback: stoploss originale del segnale (DB).
+  const liveSl = openPos.find(p => p.sl && p.sl > 0)?.sl ?? null
+  const displaySl = liveSl ?? sig.stoploss
+  const slIsLive = liveSl != null && Math.abs(liveSl - (sig.stoploss ?? 0)) > 1e-6
+
   const entry = sig.actual_entry_price ?? sig.entry_price
-  const slDist = currentPrice && sig.stoploss
-    ? Math.abs(currentPrice - sig.stoploss).toFixed(isBuy ? 0 : 5)
+  const slDist = currentPrice && displaySl
+    ? Math.abs(currentPrice - displaySl).toFixed(isBuy ? 0 : 5)
     : null
 
   const decimals = sig.symbol?.includes('BTC') ? 0 : sig.symbol?.includes('JPY') ? 3 : 5
@@ -155,7 +162,13 @@ export default function TradeCard({ sig, positions, currentPrice, onClose }) {
           <Row label="Lotti aperti" value={lots > 0 ? `${lots.toFixed(2)} lot` : '—'} />
         </div>
         <div className="space-y-3">
-          <Row label="Stop Loss"  value={fmtPrice(sig.stoploss)} mono cls="text-rose-400" extra={slDist ? `(${slDist} pts)` : ''} />
+          <Row
+            label={slIsLive ? 'Stop Loss (live)' : 'Stop Loss'}
+            value={fmtPrice(displaySl)}
+            mono
+            cls={slIsLive ? 'text-amber-300' : 'text-rose-400'}
+            extra={slDist ? `(${slDist} pts)` : ''}
+          />
           <Row label="TP1" value={fmtPrice(sig.tp1)} mono cls="text-emerald-400" hit={tpHitCount >= 1} />
           <Row label="TP2" value={fmtPrice(sig.tp2)} mono cls="text-emerald-300" hit={tpHitCount >= 2} />
           <Row label="TP3" value={fmtPrice(sig.tp3)} mono cls="text-emerald-200" hit={tpHitCount >= 3} />
@@ -163,7 +176,7 @@ export default function TradeCard({ sig, positions, currentPrice, onClose }) {
       </div>
 
       {/* Barra di progressione (SL/BE/Entry/TP1/TP2/TP3 + price) */}
-      {currentPrice != null && <TradeProgress sig={sig} price={currentPrice} />}
+      {currentPrice != null && <TradeProgress sig={sig} price={currentPrice} currentSl={liveSl} />}
 
       {/* Ticket MT5 */}
       {openPos.length > 0 && (

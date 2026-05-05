@@ -31,10 +31,12 @@ export function getTpHitCount(sig) {
  *   - TP1 raggiunto, price tra entry e TP1 (retrace) → "BE → TP1"
  *   - TP2 raggiunto, price > TP2 → "TP2 → TP3"
  */
-export default function TradeProgress({ sig, price }) {
+export default function TradeProgress({ sig, price, currentSl }) {
   const isBuy = (sig.direction || 'buy').toLowerCase() === 'buy'
   const entry = sig.actual_entry_price ?? sig.entry_price ?? sig.entry_price_high
-  const sl = sig.stoploss
+  // Usa lo SL effettivo MT5 se passato (riflette BE / lock profit / SL move),
+  // altrimenti fallback all'SL originale del segnale dal DB.
+  const sl = currentSl ?? sig.stoploss
   const tp1 = sig.tp1
   const tp2 = sig.tp2
   const tp3 = sig.tp3
@@ -42,11 +44,16 @@ export default function TradeProgress({ sig, price }) {
   const tpHit = getTpHitCount(sig)
   const beActive = tpHit >= 1 && entry != null
 
-  // Costruisci elenco barriere con label e valore
+  // Costruisci elenco barriere con label e valore.
+  // BE e Entry coincidono numericamente (BE = entry); quando BE e' attivo
+  // mostriamo solo BE (label e marker giallo) per evitare sovrapposizioni.
   const barriers = []
   if (sl != null) barriers.push({ label: 'SL', value: sl, kind: 'sl' })
-  if (beActive) barriers.push({ label: 'BE', value: entry, kind: 'be' })
-  if (entry != null) barriers.push({ label: 'Entry', value: entry, kind: 'entry' })
+  if (beActive) {
+    barriers.push({ label: 'BE', value: entry, kind: 'be' })
+  } else if (entry != null) {
+    barriers.push({ label: 'Entry', value: entry, kind: 'entry' })
+  }
   if (tp1 != null) barriers.push({ label: 'TP1', value: tp1, kind: tpHit >= 1 ? 'tp_hit' : 'tp' })
   if (tp2 != null) barriers.push({ label: 'TP2', value: tp2, kind: tpHit >= 2 ? 'tp_hit' : 'tp' })
   if (tp3 != null) barriers.push({ label: 'TP3', value: tp3, kind: tpHit >= 3 ? 'tp_hit' : 'tp' })
