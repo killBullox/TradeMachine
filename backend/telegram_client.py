@@ -670,6 +670,53 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     # skip senza fallback. Se non è reply, fallback al simbolo
                     # (richiede parsed.symbol valorizzato per evitare di toccare
                     # trade di simboli diversi — vedi bug #284 del 30/04).
+                    # Identifica i pending in attesa che il messaggio coinvolge:
+                    # uno SLMove (incluso BE) su un signal ancora pending = il
+                    # nostro LIMIT/STOP non si e' mai filled mentre il TG ha
+                    # gia' "incassato" virtualmente -> trade perso, cancellalo.
+                    pending_sigs_to_drop = []
+                    if reply_to_msg_id:
+                        cand = db.query(Signal).filter(
+                            Signal.telegram_msg_id == reply_to_msg_id,
+                            Signal.status == "pending",
+                            Signal.mt5_ticket.isnot(None),
+                        ).first()
+                        if cand:
+                            pending_sigs_to_drop.append(cand)
+                    if not pending_sigs_to_drop and parsed.symbol:
+                        # Fallback per simbolo solo se ho il simbolo nel messaggio
+                        pending_sigs_to_drop = db.query(Signal).filter(
+                            Signal.status == "pending",
+                            Signal.mt5_ticket.isnot(None),
+                            Signal.symbol == parsed.symbol,
+                        ).all()
+                    for sig in pending_sigs_to_drop:
+                        tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
+                        cancelled_count = 0
+                        mt5_inst = mt5_trader._get_mt5()
+                        if mt5_inst:
+                            for t in tickets:
+                                orders = mt5_inst.orders_get(ticket=t)
+                                if orders:
+                                    mt5_inst.order_send({"action": mt5_inst.TRADE_ACTION_REMOVE, "order": t})
+                                    cancelled_count += 1
+                        sig.status = "cancelled"
+                        sig.notes = (sig.notes or "") + (
+                            f" [Trade non partito: prezzo fuori dal range alla ricezione del segnale "
+                            f"(LIMIT/STOP mai filled). TG ha segnalato BE/TP -> trade perso]"
+                        )
+                        sig.updated_at = datetime.utcnow()
+                        sig.closed_at = datetime.utcnow()
+                        _append_trade_log(sig, "pending_dropped",
+                            f"SLMove ricevuto su trade ancora pending: TG ha continuato come se fosse "
+                            f"entrato, ma il LIMIT/STOP non si e' mai filled. {cancelled_count} pending order "
+                            f"cancellati, segnale annullato.",
+                            {"tickets": tickets, "cancelled": cancelled_count})
+                        db.add(sig)
+                        log(f"[SLMove] #{sig.id} {sig.symbol} pending dropped: {cancelled_count} ordini cancellati")
+                    if pending_sigs_to_drop:
+                        db.commit()
+
                     open_sigs = []
                     skip = False
                     if reply_to_msg_id:
@@ -680,7 +727,7 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 and target_sig.mt5_ticket and target_sig.closed_at is None:
                             open_sigs = [target_sig]
                         elif target_sig:
-                            log(f"[SLMove] reply a #{target_sig.id} {target_sig.symbol} status={target_sig.status} (gia' chiuso) -> skip")
+                            log(f"[SLMove] reply a #{target_sig.id} {target_sig.symbol} status={target_sig.status} (gia' chiuso/cancellato) -> skip")
                             skip = True
                     if not skip and not open_sigs:
                         if not parsed.symbol:
