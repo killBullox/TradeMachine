@@ -670,19 +670,13 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     # skip senza fallback. Se non è reply, fallback al simbolo
                     # (richiede parsed.symbol valorizzato per evitare di toccare
                     # trade di simboli diversi — vedi bug #284 del 30/04).
-                    # Stati su cui lo SL move ha senso applicarlo:
-                    # - 'open'   : posizioni aperte
-                    # - 'pending': ordine LIMIT/STOP in attesa di fill (modify_sl_tp
-                    #              gestisce anche quelli via TRADE_ACTION_MODIFY)
-                    # - 'tp1'/'tp2': trade parzialmente chiuso, ticket residui aperti
-                    SL_TARGETABLE_STATUSES = ("open", "pending", "tp1", "tp2")
                     open_sigs = []
                     skip = False
                     if reply_to_msg_id:
                         target_sig = db.query(Signal).filter(
                             Signal.telegram_msg_id == reply_to_msg_id
                         ).first()
-                        if target_sig and target_sig.status in SL_TARGETABLE_STATUSES \
+                        if target_sig and target_sig.status in ("open", "tp1", "tp2") \
                                 and target_sig.mt5_ticket and target_sig.closed_at is None:
                             open_sigs = [target_sig]
                         elif target_sig:
@@ -693,7 +687,7 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             log(f"[SLMove] msg={msg_id} senza simbolo e senza reply utile -> skip per evitare di toccare trade sbagliati")
                         else:
                             open_sigs = db.query(Signal).filter(
-                                Signal.status.in_(SL_TARGETABLE_STATUSES),
+                                Signal.status.in_(["open", "tp1", "tp2"]),
                                 Signal.mt5_ticket.isnot(None),
                                 Signal.closed_at.is_(None),
                                 Signal.symbol == parsed.symbol,
