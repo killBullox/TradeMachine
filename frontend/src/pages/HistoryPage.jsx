@@ -345,6 +345,57 @@ export default function HistoryPage() {
   const closedWithPnl = signals.filter(s => s.pnl_usd != null)
   const totalPnl = closedWithPnl.reduce((acc, s) => acc + s.pnl_usd, 0)
 
+  // Export CSV dei trade attualmente visibili (post-filtro, niente paginazione)
+  const exportCsv = () => {
+    if (signals.length === 0) return
+    const cols = [
+      ['ID', s => s.id],
+      ['Symbol', s => s.symbol],
+      ['Direction', s => s.direction],
+      ['Status', s => s.status],
+      ['Entry low', s => s.entry_price],
+      ['Entry high', s => s.entry_price_high],
+      ['Entry actual', s => s.actual_entry_price],
+      ['Stop Loss', s => s.stoploss],
+      ['TP1', s => s.tp1],
+      ['TP2', s => s.tp2],
+      ['TP3', s => s.tp3],
+      ['Exit price', s => s.exit_price],
+      ['Position size (lot)', s => s.position_size],
+      ['Risk USD', s => s.risk_usd],
+      ['P&L USD', s => s.pnl_usd],
+      ['Risky', s => s.is_risky ? 'yes' : ''],
+      ['Trail stop', s => s.trail_stop_enabled == null ? '' : (s.trail_stop_enabled ? 'on' : 'off')],
+      ['Created at', s => s.created_at],
+      ['Entered at', s => s.entered_at],
+      ['Closed at', s => s.closed_at],
+      ['MT5 tickets', s => s.mt5_tickets],
+      ['Notes', s => s.notes],
+    ]
+    const escape = v => {
+      if (v == null) return ''
+      const str = String(v)
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return '"' + str.replace(/"/g, '""') + '"'
+      }
+      return str
+    }
+    const header = cols.map(c => c[0]).join(',')
+    const rows = signals.map(s => cols.map(([_, fn]) => escape(fn(s))).join(','))
+    const csv = '﻿' + header + '\n' + rows.join('\n')  // BOM per Excel UTF-8
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const today = new Date().toISOString().slice(0, 10)
+    const filterTag = managedFilter !== 'all' ? `_${managedFilter}` : ''
+    a.download = `trademachine_storico${filterTag}_${today}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div className="p-6 space-y-4">
       <h1 className="text-xl font-bold text-white">Storico</h1>
@@ -393,8 +444,19 @@ export default function HistoryPage() {
           </div>
         )}
 
+        {tab === 'signals' && (
+          <button
+            onClick={exportCsv}
+            disabled={signals.length === 0}
+            className="ml-auto text-xs px-3 py-1 rounded border border-slate-700 text-slate-300 hover:text-white hover:border-slate-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            title={`Esporta CSV dei ${signals.length} segnali filtrati`}
+          >
+            ⬇ Export CSV ({signals.length})
+          </button>
+        )}
+
         {tab === 'signals' && closedWithPnl.length > 0 && (
-          <span className={`ml-auto text-sm font-mono font-semibold self-center ${pnlColor(totalPnl)}`}>
+          <span className={`text-sm font-mono font-semibold self-center ${pnlColor(totalPnl)}`}>
             P&L filtro: {fmtPnl(totalPnl)}
           </span>
         )}
