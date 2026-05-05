@@ -56,29 +56,36 @@ export default function TradeProgress({ sig, price, currentSl }) {
   if (tp2 != null) rawBarriers.push({ label: 'TP2', value: tp2, kind: tpHit >= 2 ? 'tp_hit' : 'tp' })
   if (tp3 != null) rawBarriers.push({ label: 'TP3', value: tp3, kind: tpHit >= 3 ? 'tp_hit' : 'tp' })
 
-  // Fondi barriere con stesso valore (es. quando il live SL coincide col BE
-  // dopo TP1 hit). Priorita' di rendering: tp_hit > be > tp > entry > sl.
-  // Per la label visibile teniamo la combinata 'SL/BE' tipo, ma per il
-  // colore/marker usiamo la priorita' piu' visibile.
+  // Merge barriere "vicine" (entro 2 pip = tolleranza). Quando il live SL e'
+  // a 1 pip dal BE per via di un lock profit, si vedrebbero due marker
+  // sovrapposti. Con la tolleranza diventano un solo marker con label
+  // combinata 'SL/BE'. Priorita' kind: tp_hit > be > tp > entry > sl. Il
+  // valore mostrato e' quello dello SL se presente fra le label fuse
+  // (e' il livello attivo MT5), altrimenti quello con priorita' piu' alta.
+  const sym = (sig.symbol || '').toUpperCase()
+  const pipSize = sym.includes('XAU') ? 0.10
+                 : sym.includes('XAG') ? 0.01
+                 : sym.includes('JPY') ? 0.01
+                 : sym.includes('BTC') ? 1.0
+                 : sym.includes('ETH') ? 0.1
+                 : 0.0001
+  const MERGE_TOLERANCE = 2 * pipSize
   const kindPriority = { sl: 0, entry: 1, tp: 2, be: 3, tp_hit: 4 }
-  const merged = new Map()
-  for (const b of rawBarriers) {
-    // arrotonda a 8 decimali per evitare problemi di float
-    const k = Number(b.value).toFixed(8)
-    const ex = merged.get(k)
-    if (!ex) {
-      merged.set(k, { ...b, labels: [b.label] })
+  const sortedRaw = [...rawBarriers].sort((a, b) => a.value - b.value)
+  const mergedList = []
+  for (const b of sortedRaw) {
+    const last = mergedList[mergedList.length - 1]
+    if (last && Math.abs(b.value - last.value) <= MERGE_TOLERANCE) {
+      last.labels.push(b.label)
+      // Se uno dei due e' SL, usa il valore di SL (live MT5) come riferimento.
+      if (b.label === 'SL') last.value = b.value
+      // Kind con priorita' piu' alta vince per colore/marker.
+      if (kindPriority[b.kind] > kindPriority[last.kind]) last.kind = b.kind
     } else {
-      ex.labels.push(b.label)
-      if (kindPriority[b.kind] > kindPriority[ex.kind]) {
-        ex.kind = b.kind
-      }
+      mergedList.push({ ...b, labels: [b.label] })
     }
   }
-  const barriers = Array.from(merged.values()).map(b => ({
-    ...b,
-    label: b.labels.length > 1 ? b.labels.join('/') : b.labels[0],
-  }))
+  const barriers = mergedList.map(b => ({ ...b, label: b.labels.join('/') }))
 
   // Ordina per valore lungo la direzione favorevole
   barriers.sort((a, b) => (isBuy ? a.value - b.value : b.value - a.value))
@@ -173,9 +180,9 @@ export default function TradeProgress({ sig, price, currentSl }) {
         )}
       </div>
 
-      {/* Etichette delle barriere sotto. Le etichette agli estremi (sinistra
-          o destra) verrebbero tagliate dalla card se centrate sopra il marker:
-          adjusto translateX in base alla posizione percentuale. */}
+      {/* Etichette delle barriere sotto. Le etichette agli estremi
+          (sinistra/destra) verrebbero tagliate dalla card se centrate sopra
+          il marker: adjusto translateX in base alla posizione percentuale. */}
       <div className="relative h-9">
         {barriers.map((b, i) => {
           const pct = toPct(b.value)
