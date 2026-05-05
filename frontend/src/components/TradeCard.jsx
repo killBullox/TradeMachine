@@ -50,19 +50,15 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
   const [locking, setLocking] = useState(false)
   const [trailBusy, setTrailBusy] = useState(false)
 
-  // Override per-trade: se sig.trail_stop_enabled e' valorizzato usa quello,
-  // altrimenti segue il default globale (ricevuto come prop).
+  // Trail stop effettivo: override per-trade se valorizzato, altrimenti
+  // segue il default globale dalle Impostazioni.
   const trailEffective = sig.trail_stop_enabled != null
     ? sig.trail_stop_enabled
     : !!globalTrailDefault
-  const trailIsOverride = sig.trail_stop_enabled != null
 
   const handleTrailToggle = async () => {
     setTrailBusy(true)
     try {
-      // Toggle l'override esplicito (non torna mai a "segui globale" da qui:
-      // un click setta True/False esplicito; per resettare a global serve
-      // l'opzione 'reset' nel menu).
       const newVal = !trailEffective
       const r = await fetch(`/api/signals/${sig.id}/trail`, {
         method: 'POST',
@@ -74,25 +70,6 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
         onClose?.()
       } else {
         toast.error('Errore toggle trail')
-      }
-    } catch {
-      toast.error('Errore di rete')
-    } finally {
-      setTrailBusy(false)
-    }
-  }
-
-  const handleTrailReset = async () => {
-    setTrailBusy(true)
-    try {
-      const r = await fetch(`/api/signals/${sig.id}/trail`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: null }),
-      }).then(r => r.json())
-      if (r.ok) {
-        toast.success(`Trail #${sig.id}: segue default RM`)
-        onClose?.()
       }
     } catch {
       toast.error('Errore di rete')
@@ -245,40 +222,25 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
       {/* Trail toggle + Lock profit + Close buttons */}
       {tickets.length > 0 && (
         <div className="space-y-2 mt-1">
-          {/* Trail stop toggle (per-trade override) */}
-          <div className="flex items-center justify-between bg-slate-800/40 border border-slate-700/50 rounded-lg px-3 py-2">
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleTrailToggle}
-                disabled={trailBusy}
-                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                  trailEffective ? 'bg-emerald-600' : 'bg-slate-600'
-                } disabled:opacity-50`}
-                title={trailEffective
-                  ? 'Trail ON: TP1 → SL=BE+1pip; TP2 → SL=TP1+1pip'
-                  : 'Trail OFF: nessun movimento auto SL, gestione manuale'}
-              >
-                <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                  trailEffective ? 'translate-x-5' : 'translate-x-1'
-                }`} />
-              </button>
-              <span className="text-xs text-slate-300">
-                Trail stop {trailEffective ? 'ON' : 'OFF'}
-                {trailIsOverride && (
-                  <span className="ml-1 text-amber-400" title="Override: forzato per questo trade">●</span>
-                )}
-              </span>
-            </div>
-            {trailIsOverride && (
-              <button
-                onClick={handleTrailReset}
-                disabled={trailBusy}
-                className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
-                title="Rimuovi override, segui il default Risk Management"
-              >
-                reset
-              </button>
-            )}
+          {/* Trail stop toggle */}
+          <div className="flex items-center gap-2 bg-slate-800/40 border border-slate-700/50 rounded-lg px-3 py-2">
+            <button
+              onClick={handleTrailToggle}
+              disabled={trailBusy}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                trailEffective ? 'bg-emerald-600' : 'bg-slate-600'
+              } disabled:opacity-50`}
+              title={trailEffective
+                ? 'Trail ON: TP1 → SL=BE+1pip; TP2 → SL=TP1+1pip'
+                : 'Trail OFF: nessun movimento auto SL, gestione manuale'}
+            >
+              <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                trailEffective ? 'translate-x-5' : 'translate-x-1'
+              }`} />
+            </button>
+            <span className="text-xs text-slate-300">
+              Trail stop {trailEffective ? 'ON' : 'OFF'}
+            </span>
           </div>
 
           <button
