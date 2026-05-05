@@ -836,6 +836,11 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     # così il frontend mostra il valore reale e non un ricalcolo teorico.
     if tickets:
         sig.position_size = round(lots_each * len(tickets), 2)
+        # Popola il broker su cui e' stato eseguito il trade. Per ora
+        # hardcoded 'xm' (al momento il bot gira solo su account XM).
+        # Quando attiveremo il selector multi-broker, leggere da settings.
+        if not sig.broker:
+            sig.broker = "xm"
 
     return tickets
 

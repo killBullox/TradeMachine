@@ -196,6 +196,7 @@ class SignalOut(_UTCModel):
     pnl_usd: Optional[float] = None
     running_balance: Optional[float] = None
     trail_stop_enabled: Optional[bool] = None  # override per-trade del default globale
+    broker: Optional[str] = None  # broker su cui e' stato eseguito il trade
     created_at: datetime
     updated_at: datetime
 

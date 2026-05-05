@@ -70,6 +70,9 @@ class Signal(Base):
     # Override per-trade del default globale risk_settings.trail_stop_enabled.
     # NULL = segui il default globale; True/False = override esplicito utente.
     trail_stop_enabled = Column(Boolean, nullable=True)
+    # Broker su cui e' stato eseguito il trade (es. 'xm', 'avatrade').
+    # Popolato all'apertura. NULL = legacy o broker non specificato.
+    broker = Column(String(20), nullable=True)
 
 
 class TradeUpdate(Base):
@@ -199,6 +202,8 @@ def init_db():
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN is_risky BOOLEAN DEFAULT 0"))
         if "trail_stop_enabled" not in existing:
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN trail_stop_enabled BOOLEAN"))
+        if "broker" not in existing:
+            conn.execute(sa.text("ALTER TABLE signals ADD COLUMN broker VARCHAR(20)"))
         conn.commit()
         # Migrazione risk_settings
         rs_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(risk_settings)")).fetchall()]
