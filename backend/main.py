@@ -195,6 +195,7 @@ class SignalOut(_UTCModel):
     position_size: Optional[float] = None
     pnl_usd: Optional[float] = None
     running_balance: Optional[float] = None
+    trail_stop_enabled: Optional[bool] = None  # override per-trade del default globale
     created_at: datetime
     updated_at: datetime
 
