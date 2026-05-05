@@ -63,6 +63,22 @@ function RiskPanel() {
             className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500" />
           <p className="text-xs text-slate-500">≈ ${((settings.entry_tolerance_pips ?? 3) * 0.10).toFixed(2)} su gold</p>
         </div>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 mb-1">
+            <input type="checkbox"
+              checked={!!settings.trail_stop_enabled}
+              onChange={e => setSettings(s => ({...s, trail_stop_enabled: e.target.checked}))}
+              className="w-4 h-4 rounded" id="trail-stop-toggle" />
+            <label htmlFor="trail-stop-toggle" className="text-xs text-slate-400" title="Quando ON: TP1 hit -> SL su residui = BE +1 pip; TP2 hit -> SL su residui = TP1 +1 pip. Quando OFF: TP1 hit -> SL = BE (comportamento classico).">
+              Trail the stop (auto)
+            </label>
+          </div>
+          <p className="text-xs text-slate-500">
+            {settings.trail_stop_enabled
+              ? 'TP1 → SL = BE+1pip · TP2 → SL = TP1+1pip'
+              : 'OFF: TP1 → SL = BE (default)'}
+          </p>
+        </div>
         <div className="flex items-end">
           <div className="w-full">
             <div className="text-xs text-slate-500 mb-2">

@@ -596,6 +596,7 @@ class RiskSettingsIn(BaseModel):
     risk_per_trade_usd: Optional[float] = None
     use_fixed_usd: bool = False
     entry_tolerance_pips: float = 3.0
+    trail_stop_enabled: bool = False
 
 
 @app.get("/api/performance/calendar")
@@ -641,13 +642,14 @@ def get_risk_settings_api(db: Session = Depends(get_db)):
     if not rs:
         return {"account_size": 10000, "risk_per_trade_pct": 1.0,
                 "risk_per_trade_usd": None, "use_fixed_usd": False,
-                "entry_tolerance_pips": 3.0}
+                "entry_tolerance_pips": 3.0, "trail_stop_enabled": False}
     return {
         "account_size": rs.account_size,
         "risk_per_trade_pct": rs.risk_per_trade_pct,
         "risk_per_trade_usd": rs.risk_per_trade_usd,
         "use_fixed_usd": rs.use_fixed_usd,
         "entry_tolerance_pips": getattr(rs, "entry_tolerance_pips", None) or 3.0,
+        "trail_stop_enabled": bool(getattr(rs, "trail_stop_enabled", False)),
     }
 
 
@@ -662,6 +664,7 @@ async def update_risk_settings(body: RiskSettingsIn, db: Session = Depends(get_d
     rs.risk_per_trade_usd = body.risk_per_trade_usd
     rs.use_fixed_usd = body.use_fixed_usd
     rs.entry_tolerance_pips = body.entry_tolerance_pips
+    rs.trail_stop_enabled = body.trail_stop_enabled
     rs.updated_at = datetime.utcnow()
     db.commit()
     async def _run(): await asyncio.get_event_loop().run_in_executor(None, risk_module.recalculate_all)
