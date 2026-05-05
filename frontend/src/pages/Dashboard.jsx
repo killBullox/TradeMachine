@@ -97,16 +97,19 @@ export default function Dashboard({ wsEvents }) {
   const [positions, setPositions] = useState([])
   const [prices, setPrices] = useState({})
   const [loading, setLoading] = useState(true)
+  const [globalTrail, setGlobalTrail] = useState(false)
 
   const load = async () => {
-    const [sigs, p, mt5] = await Promise.all([
+    const [sigs, p, mt5, riskSettings] = await Promise.all([
       api.getSignals({ limit: 20 }),
       api.getPerformance(),
       fetch('/api/mt5/status').then(r => r.json()).catch(() => ({})),
+      fetch('/api/risk-settings').then(r => r.json()).catch(() => ({})),
     ])
     setSignals(sigs)
     setPerf(p)
     setPositions(mt5.open_positions ?? [])
+    setGlobalTrail(!!riskSettings.trail_stop_enabled)
     setLoading(false)
 
     // Polling prezzi per i simboli con segnali attivi
@@ -192,6 +195,7 @@ export default function Dashboard({ wsEvents }) {
                 positions={positions}
                 currentPrice={prices[s.symbol]}
                 onClose={load}
+                globalTrailDefault={globalTrail}
               />
             ))}
           </div>

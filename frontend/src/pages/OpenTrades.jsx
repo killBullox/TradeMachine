@@ -19,13 +19,16 @@ export default function OpenTrades() {
   const [prices, setPrices] = useState({})
   const [lastUpdate, setLastUpdate] = useState(null)
   const [closingAll, setClosingAll] = useState(false)
+  const [globalTrail, setGlobalTrail] = useState(false)
 
   const load = async () => {
     try {
-      const [sigs, mt5] = await Promise.all([
+      const [sigs, mt5, riskSettings] = await Promise.all([
         fetch('/api/signals?limit=200').then(r => r.json()),
         fetch('/api/mt5/status').then(r => r.json()),
+        fetch('/api/risk-settings').then(r => r.json()).catch(() => ({})),
       ])
+      setGlobalTrail(!!riskSettings.trail_stop_enabled)
 
       // Solo segnali con ticket MT5 effettivo (trade realmente aperti su MT5)
       const open = sigs.filter(s =>
@@ -119,6 +122,7 @@ export default function OpenTrades() {
               positions={positions}
               currentPrice={prices[s.symbol]}
               onClose={load}
+              globalTrailDefault={globalTrail}
             />
           ))}
         </div>

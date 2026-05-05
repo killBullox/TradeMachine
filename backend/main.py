@@ -967,6 +967,40 @@ def _signal_tp_hit_count(sig) -> int:
     return 0
 
 
+class TrailToggleIn(BaseModel):
+    enabled: Optional[bool] = None  # None = follow global default
+
+
+@app.post("/api/signals/{signal_id}/trail")
+async def set_signal_trail(signal_id: int, body: TrailToggleIn, db: Session = Depends(get_db)):
+    """Override per-trade del trail-stop. enabled=True/False sovrascrive il
+    default globale; enabled=null/None ripristina il follow global."""
+    sig = db.query(Signal).filter(Signal.id == signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Segnale non trovato")
+    sig.trail_stop_enabled = body.enabled
+    sig.updated_at = datetime.utcnow()
+    # Log evento nel trade_log
+    try:
+        log_list = json.loads(sig.trade_log) if sig.trade_log else []
+        if body.enabled is None:
+            detail = "Trail stop: ripristinato default globale"
+        else:
+            detail = f"Trail stop {'attivato' if body.enabled else 'disattivato'} per questo trade"
+        log_list.append({
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "event": "trail_toggle",
+            "detail": detail,
+            "enabled": body.enabled,
+        })
+        sig.trade_log = json.dumps(log_list)
+    except Exception:
+        pass
+    db.add(sig)
+    db.commit()
+    return {"ok": True, "trail_stop_enabled": sig.trail_stop_enabled}
+
+
 @app.post("/api/mt5/lock-profit/{signal_id}")
 async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
     """Lock profit progressivo in base ai TP raggiunti:

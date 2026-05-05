@@ -67,6 +67,9 @@ class Signal(Base):
     mt5_ticket = Column(Integer, nullable=True)    # ticket principale (primo ordine)
     mt5_tickets = Column(Text, nullable=True)      # JSON: [ticket1, ticket2, ticket3]
     is_risky = Column(Boolean, default=False)      # segnale "risky" → lotto dimezzato
+    # Override per-trade del default globale risk_settings.trail_stop_enabled.
+    # NULL = segui il default globale; True/False = override esplicito utente.
+    trail_stop_enabled = Column(Boolean, nullable=True)
 
 
 class TradeUpdate(Base):
@@ -194,6 +197,8 @@ def init_db():
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN mt5_tickets TEXT"))
         if "is_risky" not in existing:
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN is_risky BOOLEAN DEFAULT 0"))
+        if "trail_stop_enabled" not in existing:
+            conn.execute(sa.text("ALTER TABLE signals ADD COLUMN trail_stop_enabled BOOLEAN"))
         conn.commit()
         # Migrazione risk_settings
         rs_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(risk_settings)")).fetchall()]

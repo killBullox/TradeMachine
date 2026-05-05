@@ -1649,90 +1649,91 @@ def sync_positions() -> list:
                             log(f"#{sig.id} ticket={ticket} non trovato in MT5 dopo {int(sig_age/60)}min — orfano")
 
             # ─── SL trail logic ─────────────────────────────────────────────────
-            # Se TP1 e' stato raggiunto sposta SL sui ticket residui:
-            #   - default: BE = entry (vecchio comportamento)
-            #   - se trail_stop_enabled: BE + 1 pip
-            # Se trail_stop_enabled e TP2 e' stato raggiunto: SL = TP1 + 1 pip.
-            # Skip per ogni ticket se il SL corrente e' gia' uguale o piu'
-            # favorevole del target (preserva un lock profit manuale).
+            # Se trail_stop_enabled e' attivo (per-trade override o default
+            # globale), il bot muove auto lo SL al raggiungimento dei TP:
+            #   - TP1 hit → SL su residui = BE +/- 1 pip
+            #   - TP2 hit → SL su residui = TP1 +/- 1 pip
+            # Se trail_stop_enabled e' OFF, sync_positions NON muove lo SL
+            # automaticamente: la gestione e' lasciata all'utente (lock
+            # profit manuale via UI o SLMove dal trader TG).
             if tp1_hit and open_count > 0 and sig.actual_entry_price:
-                # Determina il TP raggiunto piu' alto fra i ticket gia' chiusi
-                tp_levels_hit = 0
-                for tp_num, tp_price in [(1, sig.tp1), (2, sig.tp2), (3, sig.tp3)]:
-                    if tp_price is None:
-                        continue
-                    if any((is_buy and cp >= tp_price) or (not is_buy and cp <= tp_price)
-                           for _, cp, _, _ in closed_tickets):
-                        tp_levels_hit = max(tp_levels_hit, tp_num)
-
-                # Carica settings per trail
-                try:
-                    from risk import get_risk_settings as _grs
-                    _settings = _grs()
-                    trail_enabled = bool(_settings.get("trail_stop_enabled", False))
-                except Exception:
-                    trail_enabled = False
-
-                # Calcola pip_size del simbolo per i trail "+1 pip"
-                pip_size = 0.0
-                try:
-                    sym_info_local = mt5.symbol_info(MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol))
-                    if sym_info_local:
-                        pip_size = sym_info_local.point * 10
-                except Exception:
-                    pass
-
-                # Determina target SL
-                trail_label = "BE"
-                if trail_enabled and tp_levels_hit >= 2 and sig.tp1 and pip_size > 0:
-                    target_sl = round(float(sig.tp1) + pip_size, 5) if is_buy else round(float(sig.tp1) - pip_size, 5)
-                    trail_label = "TP1+1pip"
-                elif trail_enabled and pip_size > 0:
-                    target_sl = round(sig.actual_entry_price + pip_size, 5) if is_buy else round(sig.actual_entry_price - pip_size, 5)
-                    trail_label = "BE+1pip"
+                # Trail stop: override per-trade se valorizzato, altrimenti
+                # default globale da risk_settings.
+                if sig.trail_stop_enabled is not None:
+                    trail_enabled = bool(sig.trail_stop_enabled)
                 else:
-                    target_sl = round(sig.actual_entry_price, 5)
-                    trail_label = "BE"
+                    try:
+                        from risk import get_risk_settings as _grs
+                        _settings = _grs()
+                        trail_enabled = bool(_settings.get("trail_stop_enabled", False))
+                    except Exception:
+                        trail_enabled = False
 
-                import json as _jsonlib
-                try:
-                    log_list = _jsonlib.loads(sig.trade_log) if sig.trade_log else []
-                except Exception:
-                    log_list = []
-                last_be_event = None
-                for ev in log_list:
-                    if ev.get("event") in ("be_applied", "trail_applied"):
-                        last_be_event = ev
-                already_at_target = (
-                    last_be_event is not None
-                    and last_be_event.get("rule") == trail_label
-                    and abs(last_be_event.get("price", 0) - target_sl) < 1e-9
-                )
+                if trail_enabled:
+                    # Determina il TP raggiunto piu' alto fra i ticket gia' chiusi
+                    tp_levels_hit = 0
+                    for tp_num, tp_price in [(1, sig.tp1), (2, sig.tp2), (3, sig.tp3)]:
+                        if tp_price is None:
+                            continue
+                        if any((is_buy and cp >= tp_price) or (not is_buy and cp <= tp_price)
+                               for _, cp, _, _ in closed_tickets):
+                            tp_levels_hit = max(tp_levels_hit, tp_num)
 
-                affected_tickets = []
-                for ticket in tickets:
-                    pos_or_ord = None
-                    if ticket in open_positions:
-                        pos_or_ord = open_positions[ticket]
-                    elif ticket in pending_orders:
-                        pos_or_ord = pending_orders[ticket]
-                    if pos_or_ord is None:
-                        continue
-                    current_sl = getattr(pos_or_ord, 'sl', None)
-                    # Skip se SL corrente e' gia' uguale o piu' favorevole del target
-                    if current_sl is not None and current_sl > 0:
-                        if is_buy and current_sl >= target_sl:
-                            continue
-                        if not is_buy and current_sl <= target_sl:
-                            continue
-                    modify_sl(ticket, target_sl, sig.symbol)
-                    log(f"#{sig.id} trail SL={target_sl} ({trail_label}) su ticket={ticket}")
-                    affected_tickets.append(ticket)
-                if affected_tickets and not already_at_target:
-                    event_name = "be_applied" if trail_label == "BE" else "trail_applied"
-                    _append_trade_log_mt5(sig, event_name,
-                        f"TP{tp_levels_hit} raggiunto: SL spostato a {target_sl} ({trail_label}) sui {len(affected_tickets)} ticket residui",
-                        {"price": target_sl, "rule": trail_label, "tp_hit": tp_levels_hit, "tickets": affected_tickets})
+                    # Calcola pip_size del simbolo
+                    pip_size = 0.0
+                    try:
+                        sym_info_local = mt5.symbol_info(MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol))
+                        if sym_info_local:
+                            pip_size = sym_info_local.point * 10
+                    except Exception:
+                        pass
+
+                    if pip_size > 0:
+                        if tp_levels_hit >= 2 and sig.tp1:
+                            target_sl = round(float(sig.tp1) + pip_size, 5) if is_buy else round(float(sig.tp1) - pip_size, 5)
+                            trail_label = "TP1+1pip"
+                        else:
+                            target_sl = round(sig.actual_entry_price + pip_size, 5) if is_buy else round(sig.actual_entry_price - pip_size, 5)
+                            trail_label = "BE+1pip"
+
+                        import json as _jsonlib
+                        try:
+                            log_list = _jsonlib.loads(sig.trade_log) if sig.trade_log else []
+                        except Exception:
+                            log_list = []
+                        last_trail_event = None
+                        for ev in log_list:
+                            if ev.get("event") == "trail_applied":
+                                last_trail_event = ev
+                        already_at_target = (
+                            last_trail_event is not None
+                            and last_trail_event.get("rule") == trail_label
+                            and abs(last_trail_event.get("price", 0) - target_sl) < 1e-9
+                        )
+
+                        affected_tickets = []
+                        for ticket in tickets:
+                            pos_or_ord = None
+                            if ticket in open_positions:
+                                pos_or_ord = open_positions[ticket]
+                            elif ticket in pending_orders:
+                                pos_or_ord = pending_orders[ticket]
+                            if pos_or_ord is None:
+                                continue
+                            current_sl = getattr(pos_or_ord, 'sl', None)
+                            # Skip se SL corrente e' gia' uguale o piu' favorevole del target
+                            if current_sl is not None and current_sl > 0:
+                                if is_buy and current_sl >= target_sl:
+                                    continue
+                                if not is_buy and current_sl <= target_sl:
+                                    continue
+                            modify_sl(ticket, target_sl, sig.symbol)
+                            log(f"#{sig.id} trail SL={target_sl} ({trail_label}) su ticket={ticket}")
+                            affected_tickets.append(ticket)
+                        if affected_tickets and not already_at_target:
+                            _append_trade_log_mt5(sig, "trail_applied",
+                                f"TP{tp_levels_hit} raggiunto: SL spostato a {target_sl} ({trail_label}) sui {len(affected_tickets)} ticket residui",
+                                {"price": target_sl, "rule": trail_label, "tp_hit": tp_levels_hit, "tickets": affected_tickets})
 
             # Aggiorna P&L live (somma profit aperte + chiuse parziali)
             sig.pnl_usd = round(total_profit, 2)

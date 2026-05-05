@@ -69,14 +69,15 @@ function RiskPanel() {
               checked={!!settings.trail_stop_enabled}
               onChange={e => setSettings(s => ({...s, trail_stop_enabled: e.target.checked}))}
               className="w-4 h-4 rounded" id="trail-stop-toggle" />
-            <label htmlFor="trail-stop-toggle" className="text-xs text-slate-400" title="Quando ON: TP1 hit -> SL su residui = BE +1 pip; TP2 hit -> SL su residui = TP1 +1 pip. Quando OFF: TP1 hit -> SL = BE (comportamento classico).">
-              Trail the stop (auto)
+            <label htmlFor="trail-stop-toggle" className="text-xs text-slate-400"
+              title="Default per i nuovi trade. ON: il bot sposta auto lo SL ai TP raggiunti (BE+1pip su TP1, TP1+1pip su TP2). OFF: il bot non muove lo SL in automatico, gestione manuale via Lock profit. Override per-trade dalla card.">
+              Trail the stop (default)
             </label>
           </div>
           <p className="text-xs text-slate-500">
             {settings.trail_stop_enabled
-              ? 'TP1 → SL = BE+1pip · TP2 → SL = TP1+1pip'
-              : 'OFF: TP1 → SL = BE (default)'}
+              ? 'ON: TP1 hit → SL = BE+1pip · TP2 hit → SL = TP1+1pip (auto)'
+              : 'OFF: il bot non muove lo SL in automatico, solo manuale'}
           </p>
         </div>
         <div className="flex items-end">
