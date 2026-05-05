@@ -1648,10 +1648,13 @@ def sync_positions() -> list:
                         else:
                             log(f"#{sig.id} ticket={ticket} non trovato in MT5 dopo {int(sig_age/60)}min — orfano")
 
-            # Se TP1 è stato raggiunto → sposta SL a breakeven sugli ordini ancora aperti
+            # Se TP1 è stato raggiunto → sposta SL a breakeven sugli ordini ancora aperti.
+            # Skip se SL corrente del ticket e' GIA' uguale o piu' favorevole del BE
+            # (es. lock profit applicato manualmente dall'utente: per BUY pos.sl > BE,
+            # per SELL pos.sl < BE). Senza questo check, sync_positions sovrascriveva
+            # ogni 30s il lock profit dell'utente riportandolo a BE.
             if tp1_hit and open_count > 0 and sig.actual_entry_price:
                 be_price = round(sig.actual_entry_price, 5)
-                # Idempotenza: log "be_applied" una sola volta nel trade_log
                 import json as _jsonlib
                 try:
                     log_list = _jsonlib.loads(sig.trade_log) if sig.trade_log else []
@@ -1660,13 +1663,23 @@ def sync_positions() -> list:
                 be_already_logged = any(e.get("event") == "be_applied" for e in log_list)
                 affected_tickets = []
                 for ticket in tickets:
+                    pos_or_ord = None
                     if ticket in open_positions:
-                        modify_sl(ticket, be_price, sig.symbol)
-                        log(f"#{sig.id} TP1 hit → breakeven SL={be_price} su ticket={ticket}")
-                        affected_tickets.append(ticket)
+                        pos_or_ord = open_positions[ticket]
                     elif ticket in pending_orders:
-                        modify_sl(ticket, be_price, sig.symbol)
-                        affected_tickets.append(ticket)
+                        pos_or_ord = pending_orders[ticket]
+                    if pos_or_ord is None:
+                        continue
+                    current_sl = getattr(pos_or_ord, 'sl', None)
+                    # Skip se SL corrente e' gia' uguale o piu' favorevole del BE
+                    if current_sl is not None and current_sl > 0:
+                        if is_buy and current_sl >= be_price:
+                            continue
+                        if not is_buy and current_sl <= be_price:
+                            continue
+                    modify_sl(ticket, be_price, sig.symbol)
+                    log(f"#{sig.id} TP1 hit → breakeven SL={be_price} su ticket={ticket}")
+                    affected_tickets.append(ticket)
                 if affected_tickets and not be_already_logged:
                     _append_trade_log_mt5(sig, "be_applied",
                         f"TP1 raggiunto: SL spostato a breakeven {be_price} sui {len(affected_tickets)} ticket residui",
