@@ -45,18 +45,40 @@ export default function TradeProgress({ sig, price, currentSl }) {
   const beActive = tpHit >= 1 && entry != null
 
   // Costruisci elenco barriere con label e valore.
-  // BE e Entry coincidono numericamente (BE = entry); quando BE e' attivo
-  // mostriamo solo BE (label e marker giallo) per evitare sovrapposizioni.
-  const barriers = []
-  if (sl != null) barriers.push({ label: 'SL', value: sl, kind: 'sl' })
+  const rawBarriers = []
+  if (sl != null) rawBarriers.push({ label: 'SL', value: sl, kind: 'sl' })
   if (beActive) {
-    barriers.push({ label: 'BE', value: entry, kind: 'be' })
+    rawBarriers.push({ label: 'BE', value: entry, kind: 'be' })
   } else if (entry != null) {
-    barriers.push({ label: 'Entry', value: entry, kind: 'entry' })
+    rawBarriers.push({ label: 'Entry', value: entry, kind: 'entry' })
   }
-  if (tp1 != null) barriers.push({ label: 'TP1', value: tp1, kind: tpHit >= 1 ? 'tp_hit' : 'tp' })
-  if (tp2 != null) barriers.push({ label: 'TP2', value: tp2, kind: tpHit >= 2 ? 'tp_hit' : 'tp' })
-  if (tp3 != null) barriers.push({ label: 'TP3', value: tp3, kind: tpHit >= 3 ? 'tp_hit' : 'tp' })
+  if (tp1 != null) rawBarriers.push({ label: 'TP1', value: tp1, kind: tpHit >= 1 ? 'tp_hit' : 'tp' })
+  if (tp2 != null) rawBarriers.push({ label: 'TP2', value: tp2, kind: tpHit >= 2 ? 'tp_hit' : 'tp' })
+  if (tp3 != null) rawBarriers.push({ label: 'TP3', value: tp3, kind: tpHit >= 3 ? 'tp_hit' : 'tp' })
+
+  // Fondi barriere con stesso valore (es. quando il live SL coincide col BE
+  // dopo TP1 hit). Priorita' di rendering: tp_hit > be > tp > entry > sl.
+  // Per la label visibile teniamo la combinata 'SL/BE' tipo, ma per il
+  // colore/marker usiamo la priorita' piu' visibile.
+  const kindPriority = { sl: 0, entry: 1, tp: 2, be: 3, tp_hit: 4 }
+  const merged = new Map()
+  for (const b of rawBarriers) {
+    // arrotonda a 8 decimali per evitare problemi di float
+    const k = Number(b.value).toFixed(8)
+    const ex = merged.get(k)
+    if (!ex) {
+      merged.set(k, { ...b, labels: [b.label] })
+    } else {
+      ex.labels.push(b.label)
+      if (kindPriority[b.kind] > kindPriority[ex.kind]) {
+        ex.kind = b.kind
+      }
+    }
+  }
+  const barriers = Array.from(merged.values()).map(b => ({
+    ...b,
+    label: b.labels.length > 1 ? b.labels.join('/') : b.labels[0],
+  }))
 
   // Ordina per valore lungo la direzione favorevole
   barriers.sort((a, b) => (isBuy ? a.value - b.value : b.value - a.value))
