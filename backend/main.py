@@ -947,6 +947,61 @@ class ModifyTicketIn(BaseModel):
     symbol: str = "XAUUSD"
 
 
+@app.post("/api/mt5/lock-profit/{signal_id}")
+async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
+    """Sposta lo SL a BE+1 pip (entry +/- 1 pip nella direzione favorevole)
+    su tutti i ticket attivi del segnale. Pip = symbol_info.point * 10."""
+    sig = db.query(Signal).filter(Signal.id == signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Segnale non trovato")
+    entry = sig.actual_entry_price or sig.entry_price
+    if not entry:
+        return {"ok": False, "error": "Entry non disponibile"}
+    is_buy = (sig.direction or "buy").lower() == "buy"
+
+    def _do():
+        mt5 = mt5_trader._get_mt5()
+        if not mt5:
+            return {"ok": False, "error": "MT5 non disponibile"}
+        mt5_sym = mt5_trader.MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol)
+        sym_info = mt5.symbol_info(mt5_sym)
+        if not sym_info:
+            return {"ok": False, "error": f"Symbol info non disponibile per {mt5_sym}"}
+        pip_size = sym_info.point * 10
+        new_sl = round(entry + pip_size, sym_info.digits) if is_buy else round(entry - pip_size, sym_info.digits)
+
+        tickets_list = json.loads(sig.mt5_tickets) if sig.mt5_tickets else ([sig.mt5_ticket] if sig.mt5_ticket else [])
+        if not tickets_list:
+            return {"ok": False, "error": "Nessun ticket associato"}
+
+        results = []
+        all_ok = True
+        for t in tickets_list:
+            ok = mt5_trader.modify_sl_tp(t, new_sl, None, sig.symbol)
+            results.append({"ticket": t, "ok": ok})
+            if not ok:
+                all_ok = False
+        return {"ok": all_ok, "new_sl": new_sl, "pip_size": pip_size, "results": results}
+
+    out = await asyncio.get_event_loop().run_in_executor(None, _do)
+    # Log nel trade_log (idempotente: solo se ok)
+    if out.get("ok"):
+        try:
+            log_list = json.loads(sig.trade_log) if sig.trade_log else []
+            log_list.append({
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "event": "lock_profit",
+                "detail": f"Lock profit via UI: SL spostato a BE+1 pip = {out['new_sl']} su {len(out.get('results', []))} ticket",
+                "new_sl": out["new_sl"],
+            })
+            sig.trade_log = json.dumps(log_list)
+            db.add(sig)
+            db.commit()
+        except Exception:
+            pass
+    return out
+
+
 @app.post("/api/mt5/modify-ticket/{ticket}")
 async def mt5_modify_ticket(ticket: int, body: ModifyTicketIn):
     """Modifica SL e/o TP di un ticket MT5 (posizione aperta o ordine pendente).

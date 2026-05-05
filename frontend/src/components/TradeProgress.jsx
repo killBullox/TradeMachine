@@ -1,17 +1,35 @@
 /**
+ * Numero di TP raggiunti dal trade. Lo status del signal diventa 'tp1/tp2/tp3'
+ * solo quando TUTTI i ticket sono chiusi: per i trade ancora aperti con TP1
+ * gia' colpito (e ticket TP2/TP3 ancora attivi) lo status resta 'open'. Per
+ * essere accurati anche in quel caso leggiamo il trade_log e contiamo gli
+ * eventi 'ticket_closed' con reason 'TP'. Fallback al signal status quando
+ * il trade_log e' vuoto o non popolato (es. record legacy).
+ */
+export function getTpHitCount(sig) {
+  if (!sig) return 0
+  try {
+    const log = sig.trade_log ? JSON.parse(sig.trade_log) : []
+    const tpClosed = log.filter(e => e.event === 'ticket_closed' && e.reason === 'TP')
+    if (tpClosed.length > 0) return Math.min(3, tpClosed.length)
+  } catch {}
+  return sig.status === 'tp3' ? 3 : sig.status === 'tp2' ? 2 : sig.status === 'tp1' ? 1 : 0
+}
+
+/**
  * Barra di progressione di un trade aperto.
  * Mostra SL, BE (se applicato), Entry, TP1, TP2, TP3 + posizione del prezzo
  * corrente, e calcola lo stato testuale "<floor> → <target>" in base a:
  *   - direzione (BUY/SELL)
- *   - max TP raggiunto (dal sig.status)
- *   - BE applicato (vero se status >= tp1, perché il bot lo sposta in automatico)
+ *   - max TP raggiunto (da getTpHitCount: trade_log -> status come fallback)
+ *   - BE applicato (vero se TP1 raggiunto, perche' il bot lo sposta in automatico)
  *   - posizione del prezzo rispetto alle barriere
  *
  * Esempi BUY:
- *   - status=open, price tra entry e TP1 → "SL → TP1"
- *   - status=tp1, price tra TP1 e TP2 → "TP1 → TP2"
- *   - status=tp1, price tra entry e TP1 (retrace) → "BE → TP1"
- *   - status=tp2, price > TP2 → "TP2 → TP3"
+ *   - TP1 non raggiunto, price tra entry e TP1 → "SL → TP1"
+ *   - TP1 raggiunto, price tra TP1 e TP2 → "TP1 → TP2"
+ *   - TP1 raggiunto, price tra entry e TP1 (retrace) → "BE → TP1"
+ *   - TP2 raggiunto, price > TP2 → "TP2 → TP3"
  */
 export default function TradeProgress({ sig, price }) {
   const isBuy = (sig.direction || 'buy').toLowerCase() === 'buy'
@@ -21,7 +39,7 @@ export default function TradeProgress({ sig, price }) {
   const tp2 = sig.tp2
   const tp3 = sig.tp3
 
-  const tpHit = sig.status === 'tp3' ? 3 : sig.status === 'tp2' ? 2 : sig.status === 'tp1' ? 1 : 0
+  const tpHit = getTpHitCount(sig)
   const beActive = tpHit >= 1 && entry != null
 
   // Costruisci elenco barriere con label e valore

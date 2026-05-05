@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { format } from 'date-fns'
 import { it } from 'date-fns/locale'
 import toast from 'react-hot-toast'
-import TradeProgress from './TradeProgress'
+import TradeProgress, { getTpHitCount } from './TradeProgress'
 
 function fmtTs(ts) {
   if (!ts) return '—'
@@ -47,6 +47,25 @@ function Row({ label, value, mono, cls, extra, hit }) {
 export default function TradeCard({ sig, positions, currentPrice, onClose }) {
   const isBuy = sig.direction === 'buy'
   const [closing, setClosing] = useState(false)
+  const [locking, setLocking] = useState(false)
+
+  const handleLockProfit = async () => {
+    if (!confirm(`Spostare SL a BE+1 pip per #${sig.id} ${sig.symbol}?`)) return
+    setLocking(true)
+    try {
+      const r = await fetch(`/api/mt5/lock-profit/${sig.id}`, { method: 'POST' }).then(r => r.json())
+      if (r.ok) {
+        toast.success(`#${sig.id}: SL spostato a ${r.new_sl}`)
+        onClose?.()
+      } else {
+        toast.error(`Errore: ${r.error || 'lock profit fallito'}`)
+      }
+    } catch {
+      toast.error('Errore di rete')
+    } finally {
+      setLocking(false)
+    }
+  }
 
   let tickets = []
   try { tickets = sig.mt5_tickets ? JSON.parse(sig.mt5_tickets) : (sig.mt5_ticket ? [sig.mt5_ticket] : []) } catch {}
@@ -64,9 +83,10 @@ export default function TradeCard({ sig, positions, currentPrice, onClose }) {
   const decimals = sig.symbol?.includes('BTC') ? 0 : sig.symbol?.includes('JPY') ? 3 : 5
   const fmtPrice = (v) => v != null ? Number(v).toFixed(decimals) : '—'
 
-  // TP raggiunti (dal status del segnale: il bot lo aggiorna a tp1/tp2/tp3
-  // quando il rispettivo livello viene effettivamente colpito su MT5).
-  const tpHitCount = sig.status === 'tp3' ? 3 : sig.status === 'tp2' ? 2 : sig.status === 'tp1' ? 1 : 0
+  // TP raggiunti: legge dal trade_log gli eventi ticket_closed con reason TP
+  // (lo status del signal resta 'open' finche' tutti i ticket non sono chiusi,
+  // quindi non e' affidabile per evidenziare TP1 gia' colpito su trade aperti)
+  const tpHitCount = getTpHitCount(sig)
 
   const handleClose = async () => {
     if (!confirm(`Chiudere tutte le posizioni del trade #${sig.id} ${sig.symbol}?`)) return
@@ -157,15 +177,25 @@ export default function TradeCard({ sig, positions, currentPrice, onClose }) {
         </div>
       )}
 
-      {/* Close button */}
+      {/* Lock profit + Close buttons */}
       {tickets.length > 0 && (
-        <button
-          onClick={handleClose}
-          disabled={closing}
-          className="w-full mt-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-900/40 text-rose-400 hover:bg-rose-900/70 hover:text-rose-300 transition-colors disabled:opacity-50"
-        >
-          {closing ? 'Chiusura...' : 'Chiudi trade'}
-        </button>
+        <div className="space-y-2 mt-1">
+          <button
+            onClick={handleLockProfit}
+            disabled={locking || closing || !sig.actual_entry_price}
+            className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/70 hover:text-emerald-200 transition-colors disabled:opacity-50"
+            title="Sposta lo SL a BE +1 pip su tutti i ticket residui"
+          >
+            {locking ? 'Lock profit...' : '🔒 Lock profit (SL → BE +1 pip)'}
+          </button>
+          <button
+            onClick={handleClose}
+            disabled={closing || locking}
+            className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-900/40 text-rose-400 hover:bg-rose-900/70 hover:text-rose-300 transition-colors disabled:opacity-50"
+          >
+            {closing ? 'Chiusura...' : 'Chiudi trade'}
+          </button>
+        </div>
       )}
     </div>
   )
