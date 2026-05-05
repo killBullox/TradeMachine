@@ -974,14 +974,28 @@ async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
         if not tickets_list:
             return {"ok": False, "error": "Nessun ticket associato"}
 
+        # Filtra solo i ticket ancora attivi su MT5 (posizione aperta o pending).
+        # I ticket gia' chiusi (es. TP1 hit) vanno ignorati: non sono un errore.
+        active_tickets = []
+        skipped_tickets = []
+        for t in tickets_list:
+            if mt5.positions_get(ticket=t) or mt5.orders_get(ticket=t):
+                active_tickets.append(t)
+            else:
+                skipped_tickets.append(t)
+
+        if not active_tickets:
+            return {"ok": False, "error": "Tutti i ticket sono gia' chiusi", "skipped": skipped_tickets}
+
         results = []
         all_ok = True
-        for t in tickets_list:
+        for t in active_tickets:
             ok = mt5_trader.modify_sl_tp(t, new_sl, None, sig.symbol)
             results.append({"ticket": t, "ok": ok})
             if not ok:
                 all_ok = False
-        return {"ok": all_ok, "new_sl": new_sl, "pip_size": pip_size, "results": results}
+        return {"ok": all_ok, "new_sl": new_sl, "pip_size": pip_size,
+                "results": results, "skipped": skipped_tickets}
 
     out = await asyncio.get_event_loop().run_in_executor(None, _do)
     # Log nel trade_log (idempotente: solo se ok)
