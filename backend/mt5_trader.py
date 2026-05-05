@@ -836,11 +836,19 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     # così il frontend mostra il valore reale e non un ricalcolo teorico.
     if tickets:
         sig.position_size = round(lots_each * len(tickets), 2)
-        # Popola il broker su cui e' stato eseguito il trade. Per ora
-        # hardcoded 'xm' (al momento il bot gira solo su account XM).
-        # Quando attiveremo il selector multi-broker, leggere da settings.
+        # Popola broker e mt5_account effettivi al momento dell'apertura.
+        # Il broker e' hardcoded 'xm' per ora; quando attiveremo il selector
+        # multi-broker leggera' da risk_settings. mt5_account viene letto
+        # direttamente dall'account info del terminale loggato.
         if not sig.broker:
             sig.broker = "xm"
+        if not sig.mt5_account:
+            try:
+                acc_info = mt5.account_info()
+                if acc_info and acc_info.login:
+                    sig.mt5_account = int(acc_info.login)
+            except Exception:
+                pass
 
     return tickets
 

@@ -73,6 +73,10 @@ class Signal(Base):
     # Broker su cui e' stato eseguito il trade (es. 'xm', 'avatrade').
     # Popolato all'apertura. NULL = legacy o broker non specificato.
     broker = Column(String(20), nullable=True)
+    # Numero account MT5 al momento dell'apertura (es. 27640489 per XM demo).
+    # Popolato all'apertura. Permette di distinguere trade fra conti diversi
+    # dello stesso broker (es. demo vs reale).
+    mt5_account = Column(Integer, nullable=True)
 
 
 class TradeUpdate(Base):
@@ -204,6 +208,8 @@ def init_db():
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN trail_stop_enabled BOOLEAN"))
         if "broker" not in existing:
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN broker VARCHAR(20)"))
+        if "mt5_account" not in existing:
+            conn.execute(sa.text("ALTER TABLE signals ADD COLUMN mt5_account INTEGER"))
         conn.commit()
         # Migrazione risk_settings
         rs_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(risk_settings)")).fetchall()]

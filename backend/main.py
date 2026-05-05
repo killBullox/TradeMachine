@@ -197,6 +197,7 @@ class SignalOut(_UTCModel):
     running_balance: Optional[float] = None
     trail_stop_enabled: Optional[bool] = None  # override per-trade del default globale
     broker: Optional[str] = None  # broker su cui e' stato eseguito il trade
+    mt5_account: Optional[int] = None  # numero account MT5 al momento dell'apertura
     created_at: datetime
     updated_at: datetime
 
