@@ -50,12 +50,12 @@ export default function TradeCard({ sig, positions, currentPrice, onClose }) {
   const [locking, setLocking] = useState(false)
 
   const handleLockProfit = async () => {
-    if (!confirm(`Spostare SL a BE+1 pip per #${sig.id} ${sig.symbol}?`)) return
+    if (!confirm(`Lock profit per #${sig.id} ${sig.symbol}? Il bot sceglie SL = BE+1 pip oppure TP1 in base ai TP raggiunti.`)) return
     setLocking(true)
     try {
       const r = await fetch(`/api/mt5/lock-profit/${sig.id}`, { method: 'POST' }).then(r => r.json())
       if (r.ok) {
-        toast.success(`#${sig.id}: SL spostato a ${r.new_sl}`)
+        toast.success(`#${sig.id}: SL -> ${r.new_sl} (${r.rule})`)
         onClose?.()
       } else {
         toast.error(`Errore: ${r.error || 'lock profit fallito'}`)
@@ -197,9 +197,9 @@ export default function TradeCard({ sig, positions, currentPrice, onClose }) {
             onClick={handleLockProfit}
             disabled={locking || closing || !sig.actual_entry_price}
             className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/70 hover:text-emerald-200 transition-colors disabled:opacity-50"
-            title="Sposta lo SL a BE +1 pip su tutti i ticket residui"
+            title="TP0/TP1: SL = BE +1 pip — TP2 con prezzo oltre TP1: SL = TP1"
           >
-            {locking ? 'Lock profit...' : '🔒 Lock profit (SL → BE +1 pip)'}
+            {locking ? 'Lock profit...' : '🔒 Lock profit'}
           </button>
           <button
             onClick={handleClose}

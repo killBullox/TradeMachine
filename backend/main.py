@@ -947,10 +947,30 @@ class ModifyTicketIn(BaseModel):
     symbol: str = "XAUUSD"
 
 
+def _signal_tp_hit_count(sig) -> int:
+    """Numero di TP raggiunti (0..3). Lo status del signal resta 'open' finche'
+    tutti i ticket non sono chiusi, quindi lo deriviamo dal trade_log contando
+    gli eventi ticket_closed con reason=TP. Fallback al sig.status."""
+    try:
+        log_list = json.loads(sig.trade_log) if sig.trade_log else []
+        tp_closed = [e for e in log_list if e.get("event") == "ticket_closed" and e.get("reason") == "TP"]
+        if tp_closed:
+            return min(3, len(tp_closed))
+    except Exception:
+        pass
+    if sig.status == "tp3": return 3
+    if sig.status == "tp2": return 2
+    if sig.status == "tp1": return 1
+    return 0
+
+
 @app.post("/api/mt5/lock-profit/{signal_id}")
 async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
-    """Sposta lo SL a BE+1 pip (entry +/- 1 pip nella direzione favorevole)
-    su tutti i ticket attivi del segnale. Pip = symbol_info.point * 10."""
+    """Lock profit progressivo in base ai TP raggiunti:
+      - 0 o 1 TP raggiunti → SL = BE +/- 1 pip
+      - 2 TP raggiunti, prezzo oltre TP1 nella direzione del trade → SL = TP1
+      - 2 TP raggiunti, prezzo non ancora oltre TP1 → SL = BE +/- 1 pip (fallback)
+      - 3 TP raggiunti → trade gia' chiuso, errore"""
     sig = db.query(Signal).filter(Signal.id == signal_id).first()
     if not sig:
         raise HTTPException(status_code=404, detail="Segnale non trovato")
@@ -958,6 +978,10 @@ async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
     if not entry:
         return {"ok": False, "error": "Entry non disponibile"}
     is_buy = (sig.direction or "buy").lower() == "buy"
+    tp_hit = _signal_tp_hit_count(sig)
+
+    if tp_hit >= 3:
+        return {"ok": False, "error": "Trade gia' chiuso a TP3"}
 
     def _do():
         mt5 = mt5_trader._get_mt5()
@@ -968,14 +992,32 @@ async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
         if not sym_info:
             return {"ok": False, "error": f"Symbol info non disponibile per {mt5_sym}"}
         pip_size = sym_info.point * 10
-        new_sl = round(entry + pip_size, sym_info.digits) if is_buy else round(entry - pip_size, sym_info.digits)
+
+        # Determina target SL in base ai TP raggiunti.
+        # be_plus1 = entry + 1 pip (BUY) o entry - 1 pip (SELL).
+        be_plus1 = round(entry + pip_size, sym_info.digits) if is_buy else round(entry - pip_size, sym_info.digits)
+        new_sl = be_plus1
+        rule = "BE+1pip"
+
+        if tp_hit == 2 and sig.tp1:
+            # Per spostare SL a TP1 il prezzo deve essere oltre TP1 nella
+            # direzione favorevole (altrimenti l'SL=TP1 sarebbe oltre il
+            # prezzo corrente -> trigger immediato / Invalid sl).
+            tick = mt5.symbol_info_tick(mt5_sym)
+            if tick and tick.bid > 0 and tick.ask > 0:
+                # BUY: bid (chiusura su BID) deve essere > TP1
+                # SELL: ask (chiusura su ASK) deve essere < TP1
+                close_price = tick.bid if is_buy else tick.ask
+                past_tp1 = (is_buy and close_price > float(sig.tp1)) or (not is_buy and close_price < float(sig.tp1))
+                if past_tp1:
+                    new_sl = round(float(sig.tp1), sym_info.digits)
+                    rule = "TP1"
 
         tickets_list = json.loads(sig.mt5_tickets) if sig.mt5_tickets else ([sig.mt5_ticket] if sig.mt5_ticket else [])
         if not tickets_list:
             return {"ok": False, "error": "Nessun ticket associato"}
 
-        # Filtra solo i ticket ancora attivi su MT5 (posizione aperta o pending).
-        # I ticket gia' chiusi (es. TP1 hit) vanno ignorati: non sono un errore.
+        # Filtra solo i ticket ancora attivi su MT5
         active_tickets = []
         skipped_tickets = []
         for t in tickets_list:
@@ -983,7 +1025,6 @@ async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
                 active_tickets.append(t)
             else:
                 skipped_tickets.append(t)
-
         if not active_tickets:
             return {"ok": False, "error": "Tutti i ticket sono gia' chiusi", "skipped": skipped_tickets}
 
@@ -994,19 +1035,22 @@ async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
             results.append({"ticket": t, "ok": ok})
             if not ok:
                 all_ok = False
-        return {"ok": all_ok, "new_sl": new_sl, "pip_size": pip_size,
-                "results": results, "skipped": skipped_tickets}
+        return {"ok": all_ok, "new_sl": new_sl, "rule": rule, "tp_hit": tp_hit,
+                "pip_size": pip_size, "results": results, "skipped": skipped_tickets}
 
     out = await asyncio.get_event_loop().run_in_executor(None, _do)
-    # Log nel trade_log (idempotente: solo se ok)
+    # Log nel trade_log
     if out.get("ok"):
         try:
             log_list = json.loads(sig.trade_log) if sig.trade_log else []
             log_list.append({
                 "ts": datetime.utcnow().isoformat() + "Z",
                 "event": "lock_profit",
-                "detail": f"Lock profit via UI: SL spostato a BE+1 pip = {out['new_sl']} su {len(out.get('results', []))} ticket",
+                "detail": f"Lock profit via UI ({out['rule']}): SL spostato a {out['new_sl']} "
+                          f"su {len(out.get('results', []))} ticket (TP raggiunti: {out['tp_hit']})",
                 "new_sl": out["new_sl"],
+                "rule": out["rule"],
+                "tp_hit": out["tp_hit"],
             })
             sig.trade_log = json.dumps(log_list)
             db.add(sig)
