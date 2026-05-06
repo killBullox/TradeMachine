@@ -1093,6 +1093,105 @@ async def test_place_order(body: TestPlaceOrderIn, pin: str = Query(...), db: Se
     }
 
 
+@app.post("/api/test/raw-order")
+async def test_raw_order(symbol: str = Query(...), pin: str = Query(...),
+                          direction: str = Query("buy"),
+                          sl_factor: float = Query(8.0)):
+    """Test diretto mt5.order_send con vol_min e filling dinamico — bypassa
+    place_orders/risk. Apre, riporta retcode/ticket, NON chiude."""
+    _verify_pin(pin)
+    def _do():
+        import MetaTrader5 as mt5_mod
+        mt5 = mt5_trader._get_mt5()
+        if mt5 is None:
+            return {"ok": False, "error": "MT5 unavailable"}
+        bsym = mt5_trader.get_mt5_symbol(symbol)
+        mt5.symbol_select(bsym, True)
+        import time as _t
+        _t.sleep(0.4)
+        si = mt5.symbol_info(bsym)
+        if si is None:
+            return {"ok": False, "error": f"symbol_info None for {bsym}"}
+        tk = mt5.symbol_info_tick(bsym)
+        if tk is None or not tk.ask:
+            return {"ok": False, "error": f"no tick for {bsym}"}
+        sl_pts = max(int(si.trade_stops_level * sl_factor), 50)
+        d = si.digits
+        is_buy = direction.lower() == "buy"
+        price = tk.ask if is_buy else tk.bid
+        sl = round(price - sl_pts * si.point, d) if is_buy else round(price + sl_pts * si.point, d)
+        tp = round(price + sl_pts * si.point, d) if is_buy else round(price - sl_pts * si.point, d)
+        fill = mt5_trader._pick_filling_mode(mt5, bsym)
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL, "symbol": bsym, "volume": si.volume_min,
+            "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
+            "price": price, "sl": sl, "tp": tp, "deviation": 50,
+            "magic": 99999998, "comment": f"TEST {symbol}"[:31],
+            "type_time": mt5.ORDER_TIME_GTC, "type_filling": fill,
+        }
+        res = mt5.order_send(req)
+        if res is None:
+            return {"ok": False, "error": "order_send None", "last_error": str(mt5.last_error())}
+        return {
+            "ok": res.retcode == mt5.TRADE_RETCODE_DONE,
+            "retcode": int(res.retcode), "comment": res.comment,
+            "ticket": int(res.order), "deal": int(res.deal) if res.deal else None,
+            "symbol_broker": bsym, "vol_min": si.volume_min, "filling_modes": si.filling_mode,
+            "stops_level": si.trade_stops_level, "price": price, "sl": sl, "tp": tp,
+        }
+    return await asyncio.get_event_loop().run_in_executor(None, _do)
+
+
+@app.post("/api/test/raw-modify")
+async def test_raw_modify(ticket: int = Query(...), pin: str = Query(...),
+                          symbol: str = Query(...), sl: float = Query(...)):
+    _verify_pin(pin)
+    def _do():
+        mt5 = mt5_trader._get_mt5()
+        if mt5 is None:
+            return {"ok": False, "error": "MT5 unavailable"}
+        bsym = mt5_trader.get_mt5_symbol(symbol)
+        pos = mt5.positions_get(ticket=ticket)
+        if not pos:
+            return {"ok": False, "error": f"position {ticket} not found"}
+        p = pos[0]
+        req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": bsym,
+               "sl": sl, "tp": p.tp, "magic": p.magic}
+        res = mt5.order_send(req)
+        return {"ok": res is not None and res.retcode == mt5.TRADE_RETCODE_DONE,
+                "retcode": int(res.retcode) if res else None,
+                "comment": res.comment if res else "?"}
+    return await asyncio.get_event_loop().run_in_executor(None, _do)
+
+
+@app.post("/api/test/raw-close")
+async def test_raw_close(ticket: int = Query(...), pin: str = Query(...),
+                          symbol: str = Query(...)):
+    _verify_pin(pin)
+    def _do():
+        mt5 = mt5_trader._get_mt5()
+        if mt5 is None:
+            return {"ok": False, "error": "MT5 unavailable"}
+        bsym = mt5_trader.get_mt5_symbol(symbol)
+        pos = mt5.positions_get(ticket=ticket)
+        if not pos:
+            return {"ok": False, "error": f"position {ticket} not found"}
+        p = pos[0]
+        tk = mt5.symbol_info_tick(bsym)
+        is_buy_pos = p.type == 0
+        req = {"action": mt5.TRADE_ACTION_DEAL, "symbol": bsym, "volume": p.volume,
+               "type": mt5.ORDER_TYPE_SELL if is_buy_pos else mt5.ORDER_TYPE_BUY,
+               "price": tk.bid if is_buy_pos else tk.ask, "position": ticket,
+               "deviation": 50, "magic": p.magic, "comment": "TEST CLOSE",
+               "type_time": mt5.ORDER_TIME_GTC,
+               "type_filling": mt5_trader._pick_filling_mode(mt5, bsym)}
+        res = mt5.order_send(req)
+        return {"ok": res is not None and res.retcode == mt5.TRADE_RETCODE_DONE,
+                "retcode": int(res.retcode) if res else None,
+                "comment": res.comment if res else "?"}
+    return await asyncio.get_event_loop().run_in_executor(None, _do)
+
+
 @app.post("/api/mt5/sync")
 async def mt5_sync():
     updated = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.sync_positions)
