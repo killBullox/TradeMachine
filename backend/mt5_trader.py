@@ -576,6 +576,51 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         log(f"#{sig.id} nessun TP definito, skip")
         return []
 
+    # Pre-pass: se SL è dal lato sbagliato, prova l'auto-correzione single-digit
+    # PRIMA della R/R guard (altrimenti la distance calcolata su un SL invalido
+    # è priva di senso e cancella segnali correggibili — caso #310: SELL 4665
+    # SL 4571, candidato univoco 4671).
+    if sl_raw:
+        _sl_check = _round_price(float(sl_raw), digits)
+        sl_side_wrong = (is_buy and _sl_check >= float(entry)) or (not is_buy and _sl_check <= float(entry))
+        if sl_side_wrong and sig.tp1:
+            tp1_dist_pre = abs(float(sig.tp1) - float(entry))
+            candidates_pre = []
+            if tp1_dist_pre > 0:
+                sl_str_full = f"{_sl_check:.{digits}f}" if digits else f"{int(_sl_check)}"
+                seen_pre = set()
+                for i, ch in enumerate(sl_str_full):
+                    if not ch.isdigit():
+                        continue
+                    for d in "0123456789":
+                        if d == ch:
+                            continue
+                        cand_str = sl_str_full[:i] + d + sl_str_full[i+1:]
+                        try:
+                            cand = float(cand_str)
+                        except ValueError:
+                            continue
+                        if cand in seen_pre or cand <= 0:
+                            continue
+                        seen_pre.add(cand)
+                        side_ok = (is_buy and cand < float(entry)) or (not is_buy and cand > float(entry))
+                        if not side_ok:
+                            continue
+                        cand_dist = abs(cand - float(entry))
+                        if cand_dist < tp1_dist_pre * 0.3 or cand_dist > tp1_dist_pre * 3:
+                            continue
+                        candidates_pre.append(cand)
+            if len(candidates_pre) == 1:
+                sl_corrected = round(candidates_pre[0], digits)
+                msg = (f"SL={_sl_check} dal lato sbagliato per {'BUY' if is_buy else 'SELL'} "
+                       f"entry={entry}: typo single-digit, candidato univoco → SL={sl_corrected} "
+                       f"(TP1={sig.tp1})")
+                log(f"#{sig.id} {msg}")
+                _append_trade_log_mt5(sig, "mt5_sl_autocorrect", msg)
+                sig.notes = (sig.notes or "") + f" [SL auto-corretto: {_sl_check} → {sl_corrected}]"
+                sl_raw = sl_corrected
+                sl = sl_corrected
+
     # Sanity check R/R: se TP1 e SL sono sproporzionati di oltre 5x in qualunque
     # direzione il segnale è probabilmente sbagliato (typo grave del trader).
     # Caso A (TP1 troppo lontano): "Sell 4734 SL 4742 TP1 4624" — voleva entry
