@@ -1061,11 +1061,17 @@ async def test_place_order(body: TestPlaceOrderIn, pin: str = Query(...), db: Se
             if not ss:
                 return []
             try:
-                return mt5_trader.place_orders(ss) or []
+                tks = mt5_trader.place_orders(ss) or []
+                # IMPORTANTE: place_orders modifica ss in-memory (trade_log, broker,
+                # mt5_account, position_size). Caller deve committare.
+                s.commit()
+                return tks
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
                 print(f"[test/place-order] place_orders EXCEPTION: {tb}", flush=True)
+                try: s.rollback()
+                except: pass
                 return {"_error": str(e), "_tb": tb[-800:]}
         finally:
             s.close()
