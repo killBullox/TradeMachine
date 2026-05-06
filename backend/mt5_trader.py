@@ -210,6 +210,7 @@ def _detect_server_offset():
 def _get_mt5():
     import os
     if os.getenv("MT5_DISABLED", "").strip() in ("1", "true", "yes"):
+        log(f"_get_mt5: MT5_DISABLED env set")
         return None
     try:
         import MetaTrader5 as mt5
@@ -219,22 +220,23 @@ def _get_mt5():
             init_kwargs["path"] = MT5_PATH
         if not mt5.initialize(**init_kwargs):
             err = mt5.last_error()
-            log(f"MT5 init fallito (account {MT5_ACCOUNT}): {err} — retry in 3s...")
+            log(f"MT5 init fallito (account {MT5_ACCOUNT}@{MT5_SERVER}): {err} — retry in 3s...")
             mt5.shutdown()
             _time.sleep(3)
-            # Secondo tentativo: MT5 potrebbe aver bisogno di più tempo per avviarsi
             if not mt5.initialize(**init_kwargs):
-                log(f"MT5 init fallito al 2° tentativo: {mt5.last_error()}")
+                log(f"MT5 init fallito al 2° tentativo (account {MT5_ACCOUNT}): {mt5.last_error()}")
                 return None
-        # Verifica di sicurezza: assicurati di essere sul conto giusto
         info = mt5.account_info()
         if info and info.login != MT5_ACCOUNT:
             log(f"ATTENZIONE: connesso ad account {info.login} invece di {MT5_ACCOUNT} — blocco operazioni")
             mt5.shutdown()
             return None
+        if info is None:
+            log(f"_get_mt5: account_info() None dopo init — MT5_ACCOUNT={MT5_ACCOUNT}")
+            return None
         return mt5
     except Exception as e:
-        log(f"MT5 non disponibile: {e}")
+        log(f"_get_mt5 EXCEPTION: {e}")
         return None
 
 
@@ -362,21 +364,27 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
       prezzo ha attraversato il range durante il ritardo.
     """
     if not _auto_trade_enabled:
+        log(f"#{sig.id} place_orders: auto_trade DISABLED (_auto_trade_enabled=False)")
+        _append_trade_log_mt5(sig, "mt5_skip", "auto_trade disabled")
         return []
 
     mt5 = _get_mt5()
     if mt5 is None:
+        log(f"#{sig.id} place_orders: _get_mt5() returned None (account={MT5_ACCOUNT}, server={MT5_SERVER}, path={MT5_PATH})")
+        _append_trade_log_mt5(sig, "mt5_unavailable", f"_get_mt5() None — MT5_ACCOUNT={MT5_ACCOUNT} server={MT5_SERVER}")
         return []
 
     mt5_sym = MT5_SYMBOL_MAP.get(sig.symbol.upper())
     if not mt5_sym:
-        log(f"Simbolo non supportato per trading: {sig.symbol}")
+        log(f"#{sig.id} Simbolo non supportato per trading: {sig.symbol} (broker={MT5_BROKER})")
+        _append_trade_log_mt5(sig, "mt5_skip", f"Simbolo {sig.symbol} non in symbol_map (broker={MT5_BROKER})")
         return []
 
     mt5.symbol_select(mt5_sym, True)
     sym_info = mt5.symbol_info(mt5_sym)
     if sym_info is None:
-        log(f"Symbol info non disponibile per {mt5_sym}")
+        log(f"#{sig.id} Symbol info non disponibile per {mt5_sym} (broker={MT5_BROKER})")
+        _append_trade_log_mt5(sig, "mt5_skip", f"symbol_info None per {mt5_sym}")
         return []
 
     # Quando un simbolo viene appena aggiunto al Market Watch, il broker può
