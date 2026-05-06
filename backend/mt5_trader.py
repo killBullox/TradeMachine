@@ -74,6 +74,10 @@ def get_mt5_symbol(symbol: str, default=None):
 
 # Compat alias: alcuni call-site fanno MT5_SYMBOL_MAP.get(...)
 class _BrokerSymbolMap:
+    def _active(self):
+        if MT5_BROKER and MT5_BROKER.lower() == "avatrade":
+            return MT5_SYMBOL_MAP_AVATRADE
+        return MT5_SYMBOL_MAP_XM
     def get(self, symbol, default=None):
         return get_mt5_symbol(symbol, default)
     def __getitem__(self, symbol):
@@ -83,6 +87,16 @@ class _BrokerSymbolMap:
         return v
     def __contains__(self, symbol):
         return get_mt5_symbol(symbol, None) is not None
+    def keys(self):
+        return self._active().keys()
+    def values(self):
+        return self._active().values()
+    def items(self):
+        return self._active().items()
+    def __iter__(self):
+        return iter(self._active())
+    def __len__(self):
+        return len(self._active())
 
 MT5_SYMBOL_MAP = _BrokerSymbolMap()
 
