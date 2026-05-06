@@ -487,17 +487,32 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
     if not text:
         return
 
-    # Gestione reply "Highly Risky" — marca il segnale originale
+    # Gestione "Highly Risky" / "#RiskyTrade" — marca il segnale.
+    # Match anche hashtag attaccati (#RiskyTrade): no word-boundary in coda.
+    # Se reply: marca il segnale referenziato.
+    # Altrimenti: marca il segnale piu' recente entro 120s con status attivo
+    # (caso #312: hashtag standalone arrivato 6s dopo il segnale).
     import re as _re
-    if reply_to_msg_id and _re.search(r'\b(risky|highly.?risky|high.?risk|aggressive)\b', text, _re.IGNORECASE):
+    risky_re = _re.compile(r'(?i)(?:^|[\s#])(?:risky|highly.?risky|high.?risk|aggressive)')
+    if risky_re.search(text or ""):
         db = SessionLocal()
         try:
-            sig = db.query(Signal).filter(Signal.telegram_msg_id == reply_to_msg_id).first()
-            if sig:
+            sig = None
+            if reply_to_msg_id:
+                sig = db.query(Signal).filter(Signal.telegram_msg_id == reply_to_msg_id).first()
+            if sig is None:
+                from datetime import datetime as _dt, timedelta as _td
+                cutoff = _dt.utcnow() - _td(seconds=120)
+                sig = (db.query(Signal)
+                         .filter(Signal.created_at >= cutoff)
+                         .filter(Signal.status.in_(["open", "pending", "tp1", "tp2"]))
+                         .order_by(Signal.created_at.desc())
+                         .first())
+            if sig and not sig.is_risky:
                 sig.is_risky = True
                 db.add(sig)
                 db.commit()
-                log(f"[Risky] Segnale #{sig.id} marcato come RISKY (reply a msg {reply_to_msg_id})")
+                log(f"[Risky] Segnale #{sig.id} marcato RISKY (reply={reply_to_msg_id} text={text[:60]!r})")
         finally:
             db.close()
 
