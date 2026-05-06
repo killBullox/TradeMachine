@@ -56,6 +56,8 @@ async def lifespan(app: FastAPI):
     # Handler globale per eccezioni asyncio non gestite
     asyncio.get_event_loop().set_exception_handler(_handle_asyncio_exception)
     init_db()
+    # Carica account MT5 attivo dal DB (sovrascrive .env se presente)
+    mt5_trader._load_active_account()
     # Ripristina stato auto-trade dal DB
     db = SessionLocal()
     try:
@@ -862,7 +864,11 @@ async def mt5_accounts():
             db.commit()
             accounts = defaults
         available = [
-            {"id": a.id, "login": a.login, "server": a.server, "label": a.label, "demo": a.is_demo, "is_default": a.is_default}
+            {
+                "id": a.id, "login": a.login, "server": a.server, "label": a.label,
+                "demo": a.is_demo, "is_default": a.is_default, "is_active": a.is_active,
+                "mt5_path": a.mt5_path, "broker": a.broker,
+            }
             for a in accounts
         ]
     finally:
@@ -897,6 +903,8 @@ async def mt5_add_account(
     label: str = Query(...),
     is_demo: bool = Query(True),
     pin: str = Query(...),
+    mt5_path: str = Query(""),
+    broker: str = Query(""),
     db: Session = Depends(get_db),
 ):
     """Aggiunge un account MT5. Richiede PIN."""
@@ -904,10 +912,38 @@ async def mt5_add_account(
     existing = db.query(Mt5Account).filter(Mt5Account.login == login).first()
     if existing:
         raise HTTPException(status_code=400, detail=f"Account {login} già presente")
-    acc = Mt5Account(login=login, server=server, label=label, is_demo=is_demo)
+    acc = Mt5Account(
+        login=login, server=server, label=label, is_demo=is_demo,
+        mt5_path=mt5_path or None, broker=broker or None,
+    )
     db.add(acc)
     db.commit()
     return {"ok": True, "login": login}
+
+
+@app.patch("/api/mt5/update-account/{account_id}")
+async def mt5_update_account(
+    account_id: int,
+    pin: str = Query(...),
+    label: str = Query(None),
+    server: str = Query(None),
+    mt5_path: str = Query(None),
+    broker: str = Query(None),
+    is_demo: bool = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Aggiorna campi di un account esistente. Richiede PIN."""
+    _verify_pin(pin)
+    acc = db.query(Mt5Account).filter(Mt5Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(status_code=404, detail="Account non trovato")
+    if label is not None: acc.label = label
+    if server is not None: acc.server = server
+    if mt5_path is not None: acc.mt5_path = mt5_path or None
+    if broker is not None: acc.broker = broker or None
+    if is_demo is not None: acc.is_demo = is_demo
+    db.commit()
+    return {"ok": True}
 
 
 @app.delete("/api/mt5/remove-account/{account_id}")

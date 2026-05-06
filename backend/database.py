@@ -165,6 +165,9 @@ class Mt5Account(Base):
     label = Column(String(200), nullable=False)
     is_demo = Column(Boolean, default=True)
     is_default = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=False)  # account attualmente in uso (uno solo True)
+    mt5_path = Column(String(500), nullable=True)  # path al terminale MT5 dedicato (None = default da .env)
+    broker = Column(String(50), nullable=True)  # tag broker (es. 'xm', 'avatrade'); popolato in signals.broker
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -222,6 +225,19 @@ def init_db():
         if "trail_stop_enabled" not in rs_existing:
             conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN trail_stop_enabled BOOLEAN DEFAULT 0"))
             conn.commit()
+        # Migrazione mt5_accounts
+        try:
+            mt5_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(mt5_accounts)")).fetchall()]
+            if mt5_existing:
+                if "is_active" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN is_active BOOLEAN DEFAULT 0"))
+                if "mt5_path" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN mt5_path VARCHAR(500)"))
+                if "broker" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN broker VARCHAR(50)"))
+                conn.commit()
+        except Exception:
+            pass
         # Inserisce settings di default se non esistono
         count = conn.execute(sa.text("SELECT COUNT(*) FROM risk_settings")).scalar()
         if count == 0:

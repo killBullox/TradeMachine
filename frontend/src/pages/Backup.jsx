@@ -116,7 +116,8 @@ export default function Backup() {
   const [busy, setBusy] = useState(false)
   const [mt5Accounts, setMt5Accounts] = useState(null)
   const [showAddAccount, setShowAddAccount] = useState(false)
-  const [newAcc, setNewAcc] = useState({ login: '', server: 'XM.COM-MT5', label: '', isDemo: true })
+  const [newAcc, setNewAcc] = useState({ login: '', server: 'XM.COM-MT5', label: '', isDemo: true, mt5Path: '', broker: '' })
+  const [editAcc, setEditAcc] = useState(null) // {id, label, server, mt5_path, broker, is_demo}
 
   const load = async () => {
     try {
@@ -165,11 +166,15 @@ export default function Backup() {
         const res = await api.switchMt5Account(login, server, pin)
         toast.success(`Account cambiato: ${res.login} (${res.name})`)
       } else if (pinModal.action === 'add_account') {
-        const { login, server, label, isDemo } = pinModal.extra
-        await api.addMt5Account(login, server, label, isDemo, pin)
+        const { login, server, label, isDemo, mt5Path, broker } = pinModal.extra
+        await api.addMt5Account(login, server, label, isDemo, pin, mt5Path, broker)
         toast.success(`Account ${login} aggiunto!`)
         setShowAddAccount(false)
-        setNewAcc({ login: '', server: 'XM.COM-MT5', label: '', isDemo: true })
+        setNewAcc({ login: '', server: 'XM.COM-MT5', label: '', isDemo: true, mt5Path: '', broker: '' })
+      } else if (pinModal.action === 'update_account') {
+        await api.updateMt5Account(pinModal.id, pin, pinModal.extra)
+        toast.success('Account aggiornato')
+        setEditAcc(null)
       } else if (pinModal.action === 'remove_account') {
         await api.removeMt5Account(pinModal.id, pin)
         toast.success('Account rimosso')
@@ -242,8 +247,14 @@ export default function Backup() {
                     </div>
                     <p className="text-sm text-slate-400 mt-1">
                       Login: {acc.login} &middot; Server: {acc.server}
+                      {acc.broker && ` \u00B7 Broker: ${acc.broker}`}
                       {isActive && mt5Accounts.current && ` \u00B7 Balance: $${mt5Accounts.current.balance?.toLocaleString()}`}
                     </p>
+                    {acc.mt5_path && (
+                      <p className="text-xs text-slate-500 mt-0.5 font-mono truncate" title={acc.mt5_path}>
+                        Path: {acc.mt5_path}
+                      </p>
+                    )}
                   </div>
                   <div className="flex gap-2 ml-4 flex-shrink-0">
                     {!isActive && (
@@ -258,6 +269,12 @@ export default function Backup() {
                         Seleziona
                       </button>
                     )}
+                    <button
+                      onClick={() => setEditAcc({ id: acc.id, label: acc.label, server: acc.server, mt5_path: acc.mt5_path || '', broker: acc.broker || '', is_demo: acc.demo })}
+                      className="px-3 py-2 text-sm rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
+                    >
+                      Modifica
+                    </button>
                     {!acc.is_default && !isActive && (
                       <button
                         onClick={() => openPinModal('remove_account', acc.id, `Rimuovi account ${acc.label} (${acc.login})`)}
@@ -325,6 +342,26 @@ export default function Backup() {
                     <option value="real">Real</option>
                   </select>
                 </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1" title="Tag broker (es. xm, avatrade) — popolato in signals.broker per filtri storico">Broker tag</label>
+                  <input
+                    type="text"
+                    value={newAcc.broker}
+                    onChange={e => setNewAcc({ ...newAcc, broker: e.target.value })}
+                    placeholder="xm / avatrade"
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-white text-sm focus:outline-none focus:border-brand-500"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="text-xs text-slate-400 block mb-1" title="Path completo a terminal64.exe del terminale dedicato a questo account. Vuoto = default da .env (XM TradeMachine).">Path terminale MT5 (opzionale)</label>
+                  <input
+                    type="text"
+                    value={newAcc.mt5Path}
+                    onChange={e => setNewAcc({ ...newAcc, mt5Path: e.target.value })}
+                    placeholder="C:\\AvaTrade MT5\\terminal64.exe"
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-white text-sm focus:outline-none focus:border-brand-500 font-mono"
+                  />
+                </div>
               </div>
               <div className="flex gap-2">
                 <button
@@ -338,6 +375,7 @@ export default function Backup() {
                     if (!newAcc.login || !newAcc.label) { toast.error('Compila login e etichetta'); return }
                     openPinModal('add_account', null, `Aggiungi account ${newAcc.label} (${newAcc.login})`, {
                       login: parseInt(newAcc.login), server: newAcc.server, label: newAcc.label, isDemo: newAcc.isDemo,
+                      mt5Path: newAcc.mt5Path, broker: newAcc.broker,
                     })
                   }}
                   className="px-4 py-2 text-sm bg-brand-600 hover:bg-brand-500 text-white rounded-lg font-medium transition-colors"
@@ -406,6 +444,56 @@ export default function Backup() {
           </div>
         )}
       </div>
+
+      {/* Edit account modal */}
+      {editAcc && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 w-[480px] shadow-xl">
+            <h3 className="text-white font-semibold text-lg mb-4">Modifica account MT5</h3>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Etichetta</label>
+                <input type="text" value={editAcc.label} onChange={e => setEditAcc({...editAcc, label: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-white text-sm" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Server</label>
+                <input type="text" value={editAcc.server} onChange={e => setEditAcc({...editAcc, server: e.target.value})}
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-white text-sm" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Broker tag</label>
+                <input type="text" value={editAcc.broker} onChange={e => setEditAcc({...editAcc, broker: e.target.value})}
+                  placeholder="xm / avatrade"
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-white text-sm" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Path terminale MT5</label>
+                <input type="text" value={editAcc.mt5_path} onChange={e => setEditAcc({...editAcc, mt5_path: e.target.value})}
+                  placeholder="C:\\AvaTrade MT5\\terminal64.exe"
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-white text-sm font-mono" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Tipo</label>
+                <select value={editAcc.is_demo ? 'demo' : 'real'} onChange={e => setEditAcc({...editAcc, is_demo: e.target.value === 'demo'})}
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-white text-sm">
+                  <option value="demo">Demo</option>
+                  <option value="real">Real</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setEditAcc(null)}
+                className="flex-1 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg">Annulla</button>
+              <button onClick={() => openPinModal('update_account', editAcc.id, `Aggiorna ${editAcc.label}`, {
+                  label: editAcc.label, server: editAcc.server, mt5_path: editAcc.mt5_path,
+                  broker: editAcc.broker, is_demo: editAcc.is_demo,
+                })}
+                className="flex-1 px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-lg font-medium">Salva</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal PIN */}
       {pinModal && (

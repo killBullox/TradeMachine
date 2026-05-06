@@ -96,6 +96,34 @@ load_dotenv()
 MT5_ACCOUNT = int(os.getenv("MT5_ACCOUNT", "27640489"))
 MT5_SERVER = os.getenv("MT5_SERVER", "XM.COM-MT5")
 MT5_PATH = os.getenv("MT5_PATH", "") or None  # Path seconda installazione MT5
+MT5_BROKER = "xm"  # tag broker corrente; aggiornato da _load_active_account()
+
+
+def _load_active_account():
+    """Legge l'account marcato is_active=True dal DB e aggiorna le globali.
+    Se nessuno e' attivo, usa is_default. Se nessun record, lascia i valori da .env.
+    Va chiamato all'avvio e dopo ogni switch_account.
+    """
+    global MT5_ACCOUNT, MT5_SERVER, MT5_PATH, MT5_BROKER
+    try:
+        from database import SessionLocal as _SL, Mt5Account as _Acc
+        db = _SL()
+        try:
+            acc = db.query(_Acc).filter(_Acc.is_active == True).first()
+            if not acc:
+                acc = db.query(_Acc).filter(_Acc.is_default == True).first()
+            if acc:
+                MT5_ACCOUNT = int(acc.login)
+                MT5_SERVER = acc.server
+                if acc.mt5_path:
+                    MT5_PATH = acc.mt5_path
+                if acc.broker:
+                    MT5_BROKER = acc.broker
+                log(f"Account attivo dal DB: {MT5_ACCOUNT}@{MT5_SERVER} broker={MT5_BROKER} path={MT5_PATH}")
+        finally:
+            db.close()
+    except Exception as e:
+        log(f"_load_active_account errore: {e} — uso valori .env")
 
 
 _mt5_server_offset = None  # secondi di offset tra server MT5 e UTC
@@ -890,7 +918,7 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         # multi-broker leggera' da risk_settings. mt5_account viene letto
         # direttamente dall'account info del terminale loggato.
         if not sig.broker:
-            sig.broker = "xm"
+            sig.broker = MT5_BROKER or "xm"
         if not sig.mt5_account:
             try:
                 acc_info = mt5.account_info()
@@ -1443,24 +1471,66 @@ def get_account_info() -> dict:
 
 
 def switch_account(login: int, server: str) -> dict:
-    """Cambia l'account MT5 attivo."""
-    global MT5_ACCOUNT, MT5_SERVER
+    """Cambia l'account MT5 attivo. Legge path/broker dal record DB."""
+    global MT5_ACCOUNT, MT5_SERVER, MT5_PATH, MT5_BROKER
     import MetaTrader5 as mt5
+    # Carica path/broker per il nuovo account dal DB
+    new_path = MT5_PATH
+    new_broker = MT5_BROKER
+    try:
+        from database import SessionLocal as _SL, Mt5Account as _Acc
+        db = _SL()
+        try:
+            acc = db.query(_Acc).filter(_Acc.login == login).first()
+            if acc:
+                if acc.mt5_path:
+                    new_path = acc.mt5_path
+                if acc.broker:
+                    new_broker = acc.broker
+        finally:
+            db.close()
+    except Exception as e:
+        log(f"switch_account: errore lettura DB account: {e}")
     mt5.shutdown()
-    if not mt5.initialize(login=login, server=server):
+    init_kwargs = {"login": login, "server": server}
+    if new_path:
+        init_kwargs["path"] = new_path
+    if not mt5.initialize(**init_kwargs):
         err = mt5.last_error()
-        log(f"Switch account fallito ({login}@{server}): {err}")
+        log(f"Switch account fallito ({login}@{server} path={new_path}): {err}")
         # Ripristina il precedente
-        mt5.initialize(login=MT5_ACCOUNT, server=MT5_SERVER)
+        prev_kwargs = {"login": MT5_ACCOUNT, "server": MT5_SERVER}
+        if MT5_PATH:
+            prev_kwargs["path"] = MT5_PATH
+        mt5.initialize(**prev_kwargs)
         return {"ok": False, "error": f"Connessione fallita: {err}"}
     info = mt5.account_info()
     if not info or info.login != login:
         log(f"Switch account: login mismatch {info.login if info else '?'} != {login}")
         mt5.shutdown()
-        mt5.initialize(login=MT5_ACCOUNT, server=MT5_SERVER)
+        prev_kwargs = {"login": MT5_ACCOUNT, "server": MT5_SERVER}
+        if MT5_PATH:
+            prev_kwargs["path"] = MT5_PATH
+        mt5.initialize(**prev_kwargs)
         return {"ok": False, "error": "Account non trovato nel terminale MT5"}
     MT5_ACCOUNT = login
     MT5_SERVER = server
+    MT5_PATH = new_path
+    MT5_BROKER = new_broker
+    # Persisti is_active=True sul nuovo account (e False su tutti gli altri)
+    try:
+        from database import SessionLocal as _SL, Mt5Account as _Acc
+        db = _SL()
+        try:
+            db.query(_Acc).update({_Acc.is_active: False})
+            acc = db.query(_Acc).filter(_Acc.login == login).first()
+            if acc:
+                acc.is_active = True
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        log(f"switch_account: errore persistenza is_active: {e}")
     log(f"Account cambiato: {login}@{server} ({info.name}) balance={info.balance}")
     return {
         "ok": True,

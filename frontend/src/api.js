@@ -60,9 +60,14 @@ export const api = {
   // MT5 Account
   getMt5Accounts: () => request('/mt5/accounts'),
   switchMt5Account: (login, server, pin) => request(`/mt5/switch-account?login=${login}&server=${server}&pin=${pin}`, { method: 'POST' }),
-  addMt5Account: (login, server, label, isDemo, pin) =>
-    request(`/mt5/add-account?login=${login}&server=${encodeURIComponent(server)}&label=${encodeURIComponent(label)}&is_demo=${isDemo}&pin=${pin}`, { method: 'POST' }),
+  addMt5Account: (login, server, label, isDemo, pin, mt5Path = '', broker = '') =>
+    request(`/mt5/add-account?login=${login}&server=${encodeURIComponent(server)}&label=${encodeURIComponent(label)}&is_demo=${isDemo}&pin=${pin}&mt5_path=${encodeURIComponent(mt5Path)}&broker=${encodeURIComponent(broker)}`, { method: 'POST' }),
   removeMt5Account: (id, pin) => request(`/mt5/remove-account/${id}?pin=${pin}`, { method: 'DELETE' }),
+  updateMt5Account: (id, pin, fields) => {
+    const q = new URLSearchParams({ pin })
+    Object.entries(fields).forEach(([k, v]) => { if (v !== undefined && v !== null) q.set(k, v) })
+    return request(`/mt5/update-account/${id}?${q.toString()}`, { method: 'PATCH' })
+  },
 
   // Backup & Ripristino
   archiveTrades: (pin) => request(`/backup/archive?pin=${pin}`, { method: 'POST' }),
