@@ -29,6 +29,10 @@ MT5_SYMBOL_MAP = {
     "AUDJPY":  "AUDJPY#",
     "GBPCHF":  "GBPCHF#",
     "EURGBP":  "EURGBP#",
+    "USTECH":  "US100Cash#",
+    "US100":   "US100Cash#",
+    "NAS100":  "US100Cash#",
+    "NASDAQ":  "US100Cash#",
 }
 
 _auto_trade_enabled = False   # toggle globale

@@ -41,8 +41,11 @@ SYMBOL_SPECS = {
     # Crypto (1 unità = 1 coin, point_value = $1 per $1 di prezzo per coin)
     "BTCUSD": {"pip": 1.0,   "pv": 1.0,  "lot_units": 1},
     "ETHUSD": {"pip": 0.1,   "pv": 1.0,  "lot_units": 1},
-    # Indici (futures mini)
-    "NASDAQ": {"pip": 0.25,  "pv": 5.0,  "lot_units": 1},       # NQ: $5/tick
+    # Indici CFD XM (US100Cash#: 1 lot = 1 unit, $1 per 1.0 price move)
+    "USTECH": {"pip": 1.0,   "pv": 1.0,  "lot_units": 1},
+    "US100":  {"pip": 1.0,   "pv": 1.0,  "lot_units": 1},
+    "NAS100": {"pip": 1.0,   "pv": 1.0,  "lot_units": 1},
+    "NASDAQ": {"pip": 1.0,   "pv": 1.0,  "lot_units": 1},       # XM CFD, NON futures NQ
     "US30":   {"pip": 1.0,   "pv": 5.0,  "lot_units": 1},       # YM: $5/tick
     "US500":  {"pip": 0.25,  "pv": 12.5, "lot_units": 1},       # ES: $12.5/tick
     # Petrolio
