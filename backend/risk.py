@@ -55,8 +55,31 @@ SYMBOL_SPECS = {
 
 DEFAULT_SPEC = {"pip": 0.0001, "pv": 10.0, "lot_units": 100000}
 
+# Override broker-specifici. Solo i simboli che differiscono dal default vanno qui.
+# AvaTrade: BTCUSD ha contract=10 (vs 1 nostro default), tick_val=0.1 per 0.01 movement
+# → $10/lot per $1 di movimento. NAS100 contract=100, tick_val=25 → $2500/lot per $1.
+SYMBOL_SPECS_AVATRADE = {
+    "BTCUSD":  {"pip": 1.0,  "pv": 10.0, "lot_units": 1},     # 1 USD movement * contract 10 = $10/lot
+    "ETHUSD":  {"pip": 1.0,  "pv": 100.0, "lot_units": 1},    # contract 100 → $100/lot per $1
+    "USTECH":  {"pip": 1.0,  "pv": 2500.0, "lot_units": 1},   # contract 100, tick_val 25 per 0.01 → $2500/lot per $1
+    "US100":   {"pip": 1.0,  "pv": 2500.0, "lot_units": 1},
+    "NAS100":  {"pip": 1.0,  "pv": 2500.0, "lot_units": 1},
+    "NASDAQ":  {"pip": 1.0,  "pv": 2500.0, "lot_units": 1},
+    "USOIL":   {"pip": 0.01, "pv": 10.0, "lot_units": 1000},  # CrudeOIL: $10/0.01/lot, identico XM
+    "OIL":     {"pip": 0.01, "pv": 10.0, "lot_units": 1000},
+}
+
 
 def get_spec(symbol: str) -> dict:
+    # Lookup broker-aware: prima cerca override broker, poi default XM-based.
+    try:
+        from mt5_trader import MT5_BROKER
+        if MT5_BROKER and MT5_BROKER.lower() == "avatrade":
+            sp = SYMBOL_SPECS_AVATRADE.get(symbol.upper())
+            if sp:
+                return sp
+    except Exception:
+        pass
     return SYMBOL_SPECS.get(symbol.upper(), DEFAULT_SPEC)
 
 

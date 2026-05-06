@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Optional
 
 # Mapping simboli DB → simboli MT5 (stesso di price_service.py)
-MT5_SYMBOL_MAP = {
+MT5_SYMBOL_MAP_XM = {
     "XAUUSD":  "GOLD#",
     "XAGUSD":  "SILVER#",
     "EURUSD":  "EURUSD#",
@@ -34,6 +34,57 @@ MT5_SYMBOL_MAP = {
     "NAS100":  "US100Cash#",
     "NASDAQ":  "US100Cash#",
 }
+
+MT5_SYMBOL_MAP_AVATRADE = {
+    "XAUUSD":  "GOLD",
+    "XAGUSD":  "SILVER",
+    "EURUSD":  "EURUSD",
+    "GBPUSD":  "GBPUSD",
+    "USDJPY":  "USDJPY",
+    "USDCHF":  "USDCHF",
+    "USDCAD":  "USDCAD",
+    "AUDUSD":  "AUDUSD",
+    "NZDUSD":  "NZDUSD",
+    "GBPJPY":  "GBPJPY",
+    "EURJPY":  "EURJPY",
+    "AUDJPY":  "AUDJPY",
+    "GBPCHF":  "GBPCHF",
+    "EURGBP":  "EURGBP",
+    "USTECH":  "NAS100",
+    "US100":   "NAS100",
+    "NAS100":  "NAS100",
+    "NASDAQ":  "NAS100",
+    "BTCUSD":  "BTCUSD",
+    "ETHUSD":  "ETHUSD",
+    "USOIL":   "CrudeOIL",
+    "OIL":     "CrudeOIL",
+    "WTI":     "CrudeOIL",
+    "UKOIL":   "BRENT_OIL",
+    "BRENT":   "BRENT_OIL",
+}
+
+
+def get_mt5_symbol(symbol: str, default=None):
+    """Mappa symbol logico -> simbolo MT5 specifico del broker attivo."""
+    s = symbol.upper()
+    if MT5_BROKER and MT5_BROKER.lower() == "avatrade":
+        return MT5_SYMBOL_MAP_AVATRADE.get(s, default if default is not None else symbol)
+    return MT5_SYMBOL_MAP_XM.get(s, default if default is not None else symbol)
+
+
+# Compat alias: alcuni call-site fanno MT5_SYMBOL_MAP.get(...)
+class _BrokerSymbolMap:
+    def get(self, symbol, default=None):
+        return get_mt5_symbol(symbol, default)
+    def __getitem__(self, symbol):
+        v = get_mt5_symbol(symbol, None)
+        if v is None:
+            raise KeyError(symbol)
+        return v
+    def __contains__(self, symbol):
+        return get_mt5_symbol(symbol, None) is not None
+
+MT5_SYMBOL_MAP = _BrokerSymbolMap()
 
 _auto_trade_enabled = False   # toggle globale
 

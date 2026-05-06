@@ -960,6 +960,58 @@ async def mt5_remove_account(account_id: int, pin: str = Query(...), db: Session
     return {"ok": True}
 
 
+class TestPlaceOrderIn(BaseModel):
+    symbol: str
+    direction: str  # "buy" o "sell"
+    entry_low: float
+    entry_high: Optional[float] = None
+    stoploss: float
+    tp1: Optional[float] = None
+    tp2: Optional[float] = None
+    tp3: Optional[float] = None
+    is_risky: bool = False
+
+
+@app.post("/api/test/place-order")
+async def test_place_order(body: TestPlaceOrderIn, pin: str = Query(...), db: Session = Depends(get_db)):
+    """Test endpoint: crea un Signal sintetico e lo manda al pipeline place_orders.
+    Richiede PIN e auto-trade attivo. Usato per verificare symbol map e specs broker."""
+    _verify_pin(pin)
+    if not mt5_trader._auto_trade_enabled:
+        raise HTTPException(status_code=400, detail="Abilita prima auto-trade dalla Dashboard")
+    direction = body.direction.lower()
+    if direction not in ("buy", "sell"):
+        raise HTTPException(status_code=400, detail="direction deve essere 'buy' o 'sell'")
+    if not (body.tp1 or body.tp2 or body.tp3):
+        raise HTTPException(status_code=400, detail="Almeno un TP richiesto")
+    sig = Signal(
+        symbol=body.symbol.upper(),
+        direction=direction,
+        entry_price=body.entry_low,
+        entry_price_high=body.entry_high or body.entry_low,
+        stoploss=body.stoploss,
+        tp1=body.tp1, tp2=body.tp2, tp3=body.tp3,
+        status="pending",
+        is_risky=body.is_risky,
+        raw_message=f"[TEST] {body.symbol} {direction} entry={body.entry_low}-{body.entry_high} SL={body.stoploss}",
+        created_at=datetime.utcnow(),
+    )
+    db.add(sig); db.commit(); db.refresh(sig)
+    tickets = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.place_orders, sig)
+    db.refresh(sig)
+    return {
+        "ok": bool(tickets),
+        "signal_id": sig.id,
+        "tickets": tickets,
+        "status": sig.status,
+        "actual_entry_price": sig.actual_entry_price,
+        "position_size": sig.position_size,
+        "broker": sig.broker,
+        "mt5_account": sig.mt5_account,
+        "notes": sig.notes,
+    }
+
+
 @app.post("/api/mt5/sync")
 async def mt5_sync():
     updated = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.sync_positions)
