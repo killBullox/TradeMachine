@@ -275,7 +275,25 @@ def _send_single_order(mt5, mt5_sym, order_type, action, entry, sl, tp, lots, si
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         code = result.retcode if result else "N/A"
         comment = result.comment if result else "N/A"
-        log(f"#{sig_id} TP{tp_num} order_send fallito: retcode={code} {comment}")
+        # Anche request_id e last_error per debug
+        try: last_err = mt5.last_error()
+        except: last_err = "?"
+        log(f"#{sig_id} TP{tp_num} order_send fallito: retcode={code} comment='{comment}' last_error={last_err} request={request}")
+        # Annotazione al trade_log: serve sapere PERCHE' su test/diagnostica
+        try:
+            from database import SessionLocal as _SL, Signal as _SG
+            _db = _SL()
+            try:
+                _ss = _db.query(_SG).get(sig_id)
+                if _ss:
+                    _append_trade_log_mt5(_ss, "mt5_send_fail",
+                        f"TP{tp_num} retcode={code} '{comment}' last_err={last_err}",
+                        {"retcode": int(code) if isinstance(code, int) else None, "tp_num": tp_num})
+                    _db.merge(_ss); _db.commit()
+            finally:
+                _db.close()
+        except Exception:
+            pass
         return None
     ticket = result.order
     # Verifica che il ticket esista: posizione aperta, ordine pendente, o già in storia
