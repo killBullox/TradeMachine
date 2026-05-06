@@ -254,6 +254,21 @@ def _round_volume(vol: float, step: float, min_vol: float, max_vol: float) -> fl
     return round(steps * step, 10)
 
 
+def _pick_filling_mode(mt5, mt5_sym):
+    """Sceglie il filling mode supportato dal simbolo del broker.
+    bitfield: 1=FOK, 2=IOC, 4=Return. XM accetta IOC, Avatrade richiede FOK.
+    Preferenza: IOC (legacy XM) > FOK > Return > fallback FOK."""
+    si = mt5.symbol_info(mt5_sym)
+    fm = (getattr(si, 'filling_mode', 0) or 0) if si else 0
+    if fm & 2:
+        return mt5.ORDER_FILLING_IOC
+    if fm & 1:
+        return mt5.ORDER_FILLING_FOK
+    if fm & 4:
+        return mt5.ORDER_FILLING_RETURN
+    return mt5.ORDER_FILLING_FOK
+
+
 def _send_single_order(mt5, mt5_sym, order_type, action, entry, sl, tp, lots, sig_id, tp_num, digits, is_buy=True) -> Optional[int]:
     """Invia un singolo ordine e ritorna il ticket."""
     direction = "B" if is_buy else "S"
@@ -269,7 +284,7 @@ def _send_single_order(mt5, mt5_sym, order_type, action, entry, sl, tp, lots, si
         "magic":        20250326,
         "comment":      f"IC#{sig_id} {mt5_sym[:6]} {direction}/TP{tp_num}"[:31],
         "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": _pick_filling_mode(mt5, mt5_sym),
     }
     result = mt5.order_send(request)
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
