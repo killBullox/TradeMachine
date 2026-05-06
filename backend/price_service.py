@@ -194,8 +194,12 @@ def get_ticks_mt5(symbol: str, since_utc: datetime, until_utc: Optional[datetime
 
 
 def get_current_price_mt5(symbol: str) -> Optional[float]:
-    """Prezzo corrente (last tick mid) da MT5."""
-    mt5_sym = MT5_MAP.get(symbol.upper())
+    """Prezzo corrente (last tick mid) da MT5. Mapping broker-aware via mt5_trader."""
+    try:
+        from mt5_trader import get_mt5_symbol
+        mt5_sym = get_mt5_symbol(symbol.upper(), default=None)
+    except Exception:
+        mt5_sym = MT5_MAP.get(symbol.upper())
     if not mt5_sym:
         return None
     if not _mt5_init():

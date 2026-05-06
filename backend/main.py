@@ -962,14 +962,21 @@ async def mt5_remove_account(account_id: int, pin: str = Query(...), db: Session
 
 class TestPlaceOrderIn(BaseModel):
     symbol: str
-    direction: str  # "buy" o "sell"
-    entry_low: float
+    direction: str = "buy"  # "buy" o "sell"
+    # Modo manuale: entry/SL/TP espliciti
+    entry_low: Optional[float] = None
     entry_high: Optional[float] = None
-    stoploss: float
+    stoploss: Optional[float] = None
     tp1: Optional[float] = None
     tp2: Optional[float] = None
     tp3: Optional[float] = None
     is_risky: bool = False
+    # Modo auto: il backend legge ask/bid corrente dal terminale e costruisce
+    # entry/SL/TP a sl_points/tp_points dal prezzo corrente. Se il broker ha
+    # uno stops_level piu' grande, il distance viene clampato a stops_level*5.
+    auto: bool = False
+    sl_points_factor: float = 5.0  # SL dist = stops_level * factor (min 50)
+    tp_points_factor: float = 5.0  # TP1 dist = stops_level * factor (TP2=2x, TP3=3x)
 
 
 @app.post("/api/test/place-order")
@@ -982,15 +989,54 @@ async def test_place_order(body: TestPlaceOrderIn, pin: str = Query(...), db: Se
     direction = body.direction.lower()
     if direction not in ("buy", "sell"):
         raise HTTPException(status_code=400, detail="direction deve essere 'buy' o 'sell'")
-    if not (body.tp1 or body.tp2 or body.tp3):
+    entry_low = body.entry_low
+    entry_high = body.entry_high
+    stoploss = body.stoploss
+    tp1, tp2, tp3 = body.tp1, body.tp2, body.tp3
+    if body.auto:
+        # Risolvi prezzo corrente e specs dal broker attivo
+        bsym = mt5_trader.get_mt5_symbol(body.symbol)
+        mt5 = mt5_trader._get_mt5()
+        if mt5 is None:
+            raise HTTPException(status_code=503, detail="MT5 non disponibile")
+        info = mt5.symbol_info(bsym)
+        if info is None:
+            raise HTTPException(status_code=400, detail=f"Simbolo {body.symbol} ({bsym}) non trovato sul broker")
+        if not info.visible:
+            mt5.symbol_select(bsym, True)
+            info = mt5.symbol_info(bsym)
+        tick = mt5.symbol_info_tick(bsym)
+        if tick is None or not tick.ask:
+            raise HTTPException(status_code=400, detail=f"Nessun tick per {bsym}")
+        ref = tick.ask if direction == "buy" else tick.bid
+        sl_pts = max(int(info.trade_stops_level * body.sl_points_factor), 50)
+        tp_pts = max(int(info.trade_stops_level * body.tp_points_factor), 50)
+        d = info.digits
+        if direction == "buy":
+            entry_low = round(ref, d)
+            entry_high = entry_low
+            stoploss = round(ref - sl_pts * info.point, d)
+            tp1 = round(ref + tp_pts * info.point, d)
+            tp2 = round(ref + 2 * tp_pts * info.point, d)
+            tp3 = round(ref + 3 * tp_pts * info.point, d)
+        else:
+            entry_low = round(ref, d)
+            entry_high = entry_low
+            stoploss = round(ref + sl_pts * info.point, d)
+            tp1 = round(ref - tp_pts * info.point, d)
+            tp2 = round(ref - 2 * tp_pts * info.point, d)
+            tp3 = round(ref - 3 * tp_pts * info.point, d)
+    if entry_low is None or stoploss is None:
+        raise HTTPException(status_code=400, detail="entry_low e stoploss richiesti (o usa auto=true)")
+    if not (tp1 or tp2 or tp3):
         raise HTTPException(status_code=400, detail="Almeno un TP richiesto")
     sig = Signal(
         symbol=body.symbol.upper(),
         direction=direction,
-        entry_price=body.entry_low,
-        entry_price_high=body.entry_high or body.entry_low,
-        stoploss=body.stoploss,
-        tp1=body.tp1, tp2=body.tp2, tp3=body.tp3,
+        entry_price=entry_low,
+        entry_price_high=entry_high or entry_low,
+        stoploss=stoploss,
+        tp1=tp1, tp2=tp2, tp3=tp3,
         status="pending",
         is_risky=body.is_risky,
         raw_message=f"[TEST] {body.symbol} {direction} entry={body.entry_low}-{body.entry_high} SL={body.stoploss}",
