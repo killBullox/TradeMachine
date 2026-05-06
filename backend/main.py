@@ -1004,10 +1004,17 @@ async def test_place_order(body: TestPlaceOrderIn, pin: str = Query(...), db: Se
             raise HTTPException(status_code=400, detail=f"Simbolo {body.symbol} ({bsym}) non trovato sul broker")
         if not info.visible:
             mt5.symbol_select(bsym, True)
-            info = mt5.symbol_info(bsym)
+            import time as _t
+            for _ in range(10):  # attendi fino a 1s che il tick si propaghi
+                _t.sleep(0.1)
+                info = mt5.symbol_info(bsym)
+                if info and info.visible:
+                    tk = mt5.symbol_info_tick(bsym)
+                    if tk and tk.ask:
+                        break
         tick = mt5.symbol_info_tick(bsym)
         if tick is None or not tick.ask:
-            raise HTTPException(status_code=400, detail=f"Nessun tick per {bsym}")
+            raise HTTPException(status_code=400, detail=f"Nessun tick per {bsym} dopo symbol_select")
         ref = tick.ask if direction == "buy" else tick.bid
         sl_pts = max(int(info.trade_stops_level * body.sl_points_factor), 50)
         tp_pts = max(int(info.trade_stops_level * body.tp_points_factor), 50)
@@ -1043,7 +1050,29 @@ async def test_place_order(body: TestPlaceOrderIn, pin: str = Query(...), db: Se
         created_at=datetime.utcnow(),
     )
     db.add(sig); db.commit(); db.refresh(sig)
-    tickets = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.place_orders, sig)
+    sig_id = sig.id
+    # Esegui place_orders su una session FRESCA nel worker thread (evita
+    # ORM cross-thread expired attributes che causavano return [] silenzioso).
+    def _run_place():
+        from database import SessionLocal as _SL, Signal as _Sig
+        s = _SL()
+        try:
+            ss = s.query(_Sig).get(sig_id)
+            if not ss:
+                return []
+            try:
+                return mt5_trader.place_orders(ss) or []
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                print(f"[test/place-order] place_orders EXCEPTION: {tb}", flush=True)
+                return {"_error": str(e), "_tb": tb[-800:]}
+        finally:
+            s.close()
+    result = await asyncio.get_event_loop().run_in_executor(None, _run_place)
+    if isinstance(result, dict) and "_error" in result:
+        raise HTTPException(status_code=500, detail=f"place_orders crashed: {result['_error']}")
+    tickets = result
     db.refresh(sig)
     return {
         "ok": bool(tickets),
