@@ -1642,22 +1642,40 @@ def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
             # TP raggiunto comunque, ma SL era inapplicabile — annota
             pass
 
-        # Calcolo P&L simulato (1 lotto standard come riferimento, normalizziamo via spec)
-        from risk import get_spec
+        # Calcolo P&L simulato normalizzato a max risk del signal originale ($100 default).
+        # Position size ricalcolata: lots = max_risk / (orig_sl_distance_pips * pv).
+        # Cosi' il P&L riflette quello che AVREMMO realmente fatto entrando a MARKET
+        # col rischio massimo identico al trade originale.
+        from risk import get_spec, get_risk_settings, calc_risk_amount
         spec = get_spec(sig.symbol)
+        # Risk amount: usa il rischio originale del trade se disponibile, altrimenti settings
+        if sig.risk_usd and sig.risk_usd > 0:
+            max_risk = float(sig.risk_usd)
+        else:
+            try:
+                rs = get_risk_settings()
+                max_risk = calc_risk_amount(rs)
+            except Exception:
+                max_risk = 100.0
+        # SL distance: usa la distanza originale del signal (entry-SL), preservata
+        # rispetto al nuovo entry_market.
+        orig_entry = float(sig.entry_price_high or sig.entry_price or entry_market)
+        orig_sl_dist = abs(orig_entry - sl) if sl else None
+        # Lots normalizzati su max_risk con quella distanza
+        if orig_sl_dist and orig_sl_dist > 0:
+            sl_dist_pips = orig_sl_dist / spec["pip"]
+            sim_lots = max_risk / (sl_dist_pips * spec["pv"]) if sl_dist_pips > 0 else 0.01
+        else:
+            sim_lots = sig.position_size or 0.01
         sim_pnl = 0.0
-        if sim_outcome == "tp1" and tp1:
-            dist = abs(tp1 - entry_market)
-            sim_pnl = dist / spec["pip"] * spec["pv"] * (sig.position_size or 0.01) / 1.0
-        elif sim_outcome == "tp2" and tp2:
-            dist = abs(tp2 - entry_market)
-            sim_pnl = dist / spec["pip"] * spec["pv"] * (sig.position_size or 0.01) / 1.0
-        elif sim_outcome == "tp3" and tp3:
-            dist = abs(tp3 - entry_market)
-            sim_pnl = dist / spec["pip"] * spec["pv"] * (sig.position_size or 0.01) / 1.0
-        elif sim_outcome == "sl_hit" and sl:
-            dist = abs(sl - entry_market)
-            sim_pnl = -dist / spec["pip"] * spec["pv"] * (sig.position_size or 0.01) / 1.0
+        target_price = None
+        if sim_outcome == "tp1" and tp1: target_price = tp1
+        elif sim_outcome == "tp2" and tp2: target_price = tp2
+        elif sim_outcome == "tp3" and tp3: target_price = tp3
+        elif sim_outcome == "sl_hit": sim_pnl = -max_risk  # per definizione
+        if target_price is not None:
+            dist = abs(target_price - entry_market)
+            sim_pnl = (dist / spec["pip"]) * spec["pv"] * sim_lots
         # Pct relativo
         max_fav_pct = (max_fav / entry_market * 100) if entry_market else 0.0
         max_adv_pct = (max_adv / entry_market * 100) if entry_market else 0.0
