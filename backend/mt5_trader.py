@@ -834,6 +834,59 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     effective_risk = sl_pips * spec["pv"] * lots_total
     log(f"#{sig.id} risk=${risk_usd:.0f} lots={lots_each}x{n}={lots_total} size_entry={size_entry} sl_pips={sl_pips:.0f} eff_risk=${effective_risk:.2f}")
 
+    # MARGIN CAP: ogni trade puo' usare al massimo X% del free margin (default 50%).
+    # Calcola il margin necessario per lots_total e, se eccede il cap, riduce i lotti.
+    # Cosi' i trade su simboli ad alta richiesta margin (es. BTC con leva 1:2 su Avatrade)
+    # non saturano il conto.
+    try:
+        max_margin_pct = float(settings.get("max_margin_pct_per_trade", 50.0))
+    except Exception:
+        max_margin_pct = 50.0
+    try:
+        acc_info = mt5.account_info()
+        free_margin = float(acc_info.margin_free) if acc_info else 0.0
+    except Exception:
+        free_margin = 0.0
+    margin_cap_usd = free_margin * (max_margin_pct / 100.0)
+    # Margin per 1 lot del simbolo al prezzo di riferimento
+    direction_action = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+    try:
+        margin_one_lot = mt5.order_calc_margin(direction_action, mt5_sym, 1.0, float(size_entry))
+    except Exception:
+        margin_one_lot = None
+    if margin_one_lot and margin_one_lot > 0 and margin_cap_usd > 0:
+        max_lots_by_margin = margin_cap_usd / margin_one_lot
+        if lots_total > max_lots_by_margin:
+            log(f"#{sig.id} MARGIN CAP: lots {lots_total} eccede cap {max_lots_by_margin:.4f} ({max_margin_pct}% di free ${free_margin:.0f}). Riduco.")
+            _append_trade_log_mt5(sig, "margin_cap_applied",
+                f"Lotti ridotti per cap margin {max_margin_pct}%: {lots_total} → cap {max_lots_by_margin:.4f}. "
+                f"Free margin ${free_margin:.0f}, margin/lot ${margin_one_lot:.0f}.",
+                {"original_lots": lots_total, "cap_lots": round(max_lots_by_margin, 4),
+                 "free_margin": free_margin, "max_margin_pct": max_margin_pct})
+            # Distribuisci il cap fra n ticket
+            lots_each_capped = max_lots_by_margin / n
+            lots_each = _round_volume(lots_each_capped, vol_step, min_vol, max_vol)
+            # Se anche il vol_min eccede il cap → cancella il signal
+            margin_for_min = margin_one_lot * min_vol * n
+            if margin_for_min > margin_cap_usd:
+                msg = (f"Margin insufficiente: anche vol_min {min_vol}×{n}={min_vol*n:.4f} richiede "
+                       f"${margin_for_min:.0f} > cap ${margin_cap_usd:.0f} ({max_margin_pct}% di ${free_margin:.0f}). "
+                       f"Margin/lot {mt5_sym}=${margin_one_lot:.0f}.")
+                log(f"#{sig.id} {msg}")
+                from database import SessionLocal as _SL
+                sig.status = "cancelled"
+                sig.notes = (sig.notes or "") + f" [Margin insufficiente: {msg}]"
+                _append_trade_log_mt5(sig, "insufficient_margin", msg)
+                _db = _SL()
+                try:
+                    _db.merge(sig); _db.commit()
+                finally:
+                    _db.close()
+                return []
+            lots_total = _round_volume(lots_each * n, vol_step, min_vol, max_vol)
+            effective_risk = sl_pips * spec["pv"] * lots_total
+            log(f"#{sig.id} dopo cap: lots={lots_each}x{n}={lots_total} eff_risk=${effective_risk:.2f}")
+
     # Determina tipo ordine
     current_bid = tick.bid
     current_ask = tick.ask

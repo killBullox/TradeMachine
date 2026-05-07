@@ -92,7 +92,8 @@ def get_risk_settings() -> dict:
         if s is None:
             return {"account_size": 10000, "risk_per_trade_pct": 1.0,
                     "risk_per_trade_usd": None, "use_fixed_usd": False,
-                    "entry_tolerance_pips": 3.0, "trail_stop_enabled": False}
+                    "entry_tolerance_pips": 3.0, "trail_stop_enabled": False,
+                    "max_margin_pct_per_trade": 50.0}
         return {
             "account_size":      s.account_size,
             "risk_per_trade_pct": s.risk_per_trade_pct,
@@ -100,6 +101,7 @@ def get_risk_settings() -> dict:
             "use_fixed_usd":     s.use_fixed_usd,
             "entry_tolerance_pips": getattr(s, "entry_tolerance_pips", None) or 3.0,
             "trail_stop_enabled": bool(getattr(s, "trail_stop_enabled", False)),
+            "max_margin_pct_per_trade": getattr(s, "max_margin_pct_per_trade", None) or 50.0,
         }
     finally:
         db.close()

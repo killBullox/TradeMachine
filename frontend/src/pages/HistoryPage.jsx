@@ -130,6 +130,16 @@ function SignalRow({ s }) {
           }
           {s.symbol}
           {s.is_risky && <span className="ml-1 text-xs text-amber-400" title="Risky trade — lotto dimezzato">⚠</span>}
+          {(() => {
+            try {
+              const log = s.trade_log ? JSON.parse(s.trade_log) : []
+              const cap = log.find(e => e?.event === 'margin_cap_applied')
+              if (cap) {
+                return <span className="ml-1 text-xs text-emerald-400 font-bold" title={`Lotti ridotti per cap margin: ${cap.detail || ''}`}>$</span>
+              }
+            } catch {}
+            return null
+          })()}
         </td>
         <td className="py-2 pr-3">
           <span className={s.direction === 'buy' ? 'badge-buy' : 'badge-sell'}>

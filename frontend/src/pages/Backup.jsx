@@ -80,6 +80,15 @@ function RiskPanel() {
               : 'OFF: il bot non muove lo SL in automatico, solo manuale'}
           </p>
         </div>
+        <div className="space-y-1">
+          <label className="text-xs text-slate-400" title="Cap di margine massimo che ogni nuovo trade puo' utilizzare, in % del free margin disponibile. Esempio 50%: se hai $10k liberi, ogni trade puo' bloccare al massimo $5k di margine. Se la position size calcolata dal rischio supera questo cap, viene ridotta (rischio reale < target). Default 50%.">
+            Max margin per trade (%)
+          </label>
+          <input type="number" step="5" min="5" max="100" value={settings.max_margin_pct_per_trade ?? 50}
+            onChange={e => setSettings(s => ({...s, max_margin_pct_per_trade: +e.target.value}))}
+            className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500" />
+          <p className="text-xs text-slate-500">Cap del margine usato per trade (% del free margin)</p>
+        </div>
         <div className="flex items-end">
           <div className="w-full">
             <div className="text-xs text-slate-500 mb-2">

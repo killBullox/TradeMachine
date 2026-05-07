@@ -116,6 +116,7 @@ class RiskSettings(Base):
     auto_trade = Column(Boolean, default=False)       # MT5 auto-trading attivo
     entry_tolerance_pips = Column(Float, default=3.0)  # tolleranza pip per entry MARKET vicino al range
     trail_stop_enabled = Column(Boolean, default=False)  # auto trail SL: TP1 hit -> BE+1pip, TP2 hit -> TP1+1pip
+    max_margin_pct_per_trade = Column(Float, default=50.0)  # cap % free margin per trade (default 50%)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -250,6 +251,9 @@ def init_db():
             conn.commit()
         if "trail_stop_enabled" not in rs_existing:
             conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN trail_stop_enabled BOOLEAN DEFAULT 0"))
+            conn.commit()
+        if "max_margin_pct_per_trade" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN max_margin_pct_per_trade FLOAT DEFAULT 50.0"))
             conn.commit()
         # Migrazione mt5_accounts
         try:
