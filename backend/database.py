@@ -183,6 +183,32 @@ class RestorePoint(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class EmaCase(Base):
+    """Entry Market Assessment: traccia trade non entrati per mancanza pullback
+    (STOP mai filled, droppato da TG). Simula esito se fossimo entrati a MARKET."""
+    __tablename__ = "ema_cases"
+    id = Column(Integer, primary_key=True, index=True)
+    signal_id = Column(Integer, nullable=False, index=True)
+    symbol = Column(String(20))
+    direction = Column(String(10))
+    signal_time = Column(DateTime)
+    cancel_time = Column(DateTime)
+    cancel_reason = Column(String(40))  # 'target_done', 'sl_move_drop', 'tg_close', 'expired'
+    entry_signal = Column(Float)         # entry dichiarato dal segnale
+    entry_market = Column(Float)         # prezzo che avremmo usato a MARKET (ask BUY / bid SELL)
+    stoploss = Column(Float)
+    tp1 = Column(Float)
+    tp2 = Column(Float)
+    tp3 = Column(Float)
+    sim_outcome = Column(String(20))     # 'tp1','tp2','tp3','sl_hit','no_hit'
+    sim_pnl_usd = Column(Float)
+    sim_close_time = Column(DateTime)
+    sim_max_favorable_pct = Column(Float)  # max distanza verso TP3 in % del prezzo
+    sim_max_adverse_pct = Column(Float)    # max distanza verso SL in %
+    notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     import sqlalchemy as sa

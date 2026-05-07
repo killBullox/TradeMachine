@@ -1520,6 +1520,157 @@ def close_position(ticket: int, symbol: str) -> bool:
     return False
 
 
+def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
+    """Entry Market Assessment: dato un signal di cui il pending STOP non è
+    mai stato filled e che è stato droppato, simula cosa sarebbe successo
+    entrando a MARKET al momento del segnale. Usa i tick MT5 storici.
+    Ritorna l'id della riga ema_cases creata, o None se non applicabile.
+    """
+    from database import SessionLocal as _SL, Signal as _Sig, EmaCase as _EC
+    import json as _json
+
+    db = _SL()
+    try:
+        sig = db.query(_Sig).filter(_Sig.id == signal_id).first()
+        if not sig:
+            return None
+        # Solo casi con STOP order mai filled
+        if sig.actual_entry_price is not None:
+            return None
+        # Estrai info dal trade_log
+        was_stop = False
+        ask_at_signal = None
+        bid_at_signal = None
+        order_type_str = ""
+        try:
+            for ev in _json.loads(sig.trade_log or "[]"):
+                if ev.get("event") == "mt5_preparing":
+                    detail = ev.get("detail", "")
+                    order_type_str = detail
+                    if "STOP" in detail.upper():
+                        was_stop = True
+                    # parse "ask=X bid=Y" dal detail
+                    import re
+                    a = re.search(r'ask=([0-9.]+)', detail)
+                    b = re.search(r'bid=([0-9.]+)', detail)
+                    if a: ask_at_signal = float(a.group(1))
+                    if b: bid_at_signal = float(b.group(1))
+                    break
+        except Exception:
+            pass
+        if not was_stop or ask_at_signal is None or bid_at_signal is None:
+            return None
+        # Evita duplicati
+        existing = db.query(_EC).filter(_EC.signal_id == signal_id).first()
+        if existing:
+            return existing.id
+
+        is_buy = (sig.direction or "buy").lower() == "buy"
+        entry_market = ask_at_signal if is_buy else bid_at_signal
+        sl = sig.stoploss
+        tp1, tp2, tp3 = sig.tp1, sig.tp2, sig.tp3
+
+        # Recupera tick fra signal_ts e cancel_ts
+        signal_ts = sig.created_at or datetime.utcnow()
+        cancel_ts = datetime.utcnow()
+        sim_outcome = "no_hit"
+        sim_close_time = None
+        max_fav = 0.0
+        max_adv = 0.0
+        try:
+            mt5 = _get_mt5()
+            if mt5 is None:
+                raise RuntimeError("MT5 unavailable")
+            mt5_sym = MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol)
+            # Aggiungi 30min di buffer dopo cancel per vedere se TP/SL sarebbero stati hit dopo
+            from datetime import timedelta as _td
+            ticks = mt5.copy_ticks_range(mt5_sym, signal_ts, cancel_ts + _td(minutes=30), mt5.COPY_TICKS_ALL)
+            if ticks is not None and len(ticks) > 0:
+                for t in ticks:
+                    bid = float(t['bid']) if t['bid'] else 0
+                    ask = float(t['ask']) if t['ask'] else 0
+                    if bid <= 0 or ask <= 0:
+                        continue
+                    # Per BUY: prezzo di chiusura sarebbe bid (vendiamo per chiudere). SL/TP sul bid.
+                    # Per SELL: chiusura su ask (compriamo per chiudere). SL/TP sull'ask.
+                    p_close = bid if is_buy else ask
+                    # Distanze massime
+                    if is_buy:
+                        fav = p_close - entry_market
+                        adv = entry_market - p_close
+                    else:
+                        fav = entry_market - p_close
+                        adv = p_close - entry_market
+                    if fav > max_fav: max_fav = fav
+                    if adv > max_adv: max_adv = adv
+                    # Hit detection (TP3 prima, in ordine di livello favorevole)
+                    if is_buy:
+                        if sl is not None and p_close <= sl:
+                            sim_outcome = "sl_hit"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
+                        if tp3 is not None and p_close >= tp3:
+                            sim_outcome = "tp3"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
+                        if tp2 is not None and p_close >= tp2:
+                            sim_outcome = "tp2"; sim_close_time = datetime.utcfromtimestamp(int(t['time']))
+                            # continua a vedere se arriva tp3
+                            continue
+                        if tp1 is not None and p_close >= tp1:
+                            sim_outcome = "tp1"; sim_close_time = datetime.utcfromtimestamp(int(t['time']))
+                            continue
+                    else:
+                        if sl is not None and p_close >= sl:
+                            sim_outcome = "sl_hit"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
+                        if tp3 is not None and p_close <= tp3:
+                            sim_outcome = "tp3"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
+                        if tp2 is not None and p_close <= tp2:
+                            sim_outcome = "tp2"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); continue
+                        if tp1 is not None and p_close <= tp1:
+                            sim_outcome = "tp1"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); continue
+        except Exception as e:
+            log(f"EMA #{signal_id} tick analysis error: {e}")
+
+        # Calcolo P&L simulato (1 lotto standard come riferimento, normalizziamo via spec)
+        from risk import get_spec
+        spec = get_spec(sig.symbol)
+        sim_pnl = 0.0
+        if sim_outcome == "tp1" and tp1:
+            dist = abs(tp1 - entry_market)
+            sim_pnl = dist / spec["pip"] * spec["pv"] * (sig.position_size or 0.01) / 1.0
+        elif sim_outcome == "tp2" and tp2:
+            dist = abs(tp2 - entry_market)
+            sim_pnl = dist / spec["pip"] * spec["pv"] * (sig.position_size or 0.01) / 1.0
+        elif sim_outcome == "tp3" and tp3:
+            dist = abs(tp3 - entry_market)
+            sim_pnl = dist / spec["pip"] * spec["pv"] * (sig.position_size or 0.01) / 1.0
+        elif sim_outcome == "sl_hit" and sl:
+            dist = abs(sl - entry_market)
+            sim_pnl = -dist / spec["pip"] * spec["pv"] * (sig.position_size or 0.01) / 1.0
+        # Pct relativo
+        max_fav_pct = (max_fav / entry_market * 100) if entry_market else 0.0
+        max_adv_pct = (max_adv / entry_market * 100) if entry_market else 0.0
+
+        ec = _EC(
+            signal_id=sig.id, symbol=sig.symbol, direction=sig.direction,
+            signal_time=signal_ts, cancel_time=cancel_ts,
+            cancel_reason=cancel_reason,
+            entry_signal=sig.entry_price, entry_market=entry_market,
+            stoploss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+            sim_outcome=sim_outcome, sim_pnl_usd=round(sim_pnl, 2),
+            sim_close_time=sim_close_time,
+            sim_max_favorable_pct=round(max_fav_pct, 4),
+            sim_max_adverse_pct=round(max_adv_pct, 4),
+            notes=order_type_str[:200],
+        )
+        db.add(ec)
+        db.commit()
+        log(f"EMA case #{ec.id} per signal #{sig.id}: outcome={sim_outcome} pnl={sim_pnl:.2f}")
+        return ec.id
+    except Exception as e:
+        log(f"analyze_ema_case error: {e}")
+        return None
+    finally:
+        db.close()
+
+
 def cancel_expired_signals():
     """
     1. Cancella segnali attivi (open/tp1/tp2) senza mt5_ticket: orphan, mai

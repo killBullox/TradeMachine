@@ -1203,6 +1203,43 @@ async def signal_cancel_manual(signal_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "cancelled_orders": cancelled, "status": sig.status}
 
 
+@app.get("/api/ema")
+def ema_status(db: Session = Depends(get_db)):
+    """EMA — Entry Market Assessment: lista casi di STOP mai filled droppati,
+    con simulazione di esito se fossimo entrati a MARKET. Aggregato + dettaglio."""
+    from database import EmaCase
+    cases = db.query(EmaCase).order_by(EmaCase.created_at.desc()).all()
+    n = len(cases)
+    by_outcome = {}
+    total_pnl = 0.0
+    for c in cases:
+        by_outcome[c.sim_outcome or "unknown"] = by_outcome.get(c.sim_outcome or "unknown", 0) + 1
+        total_pnl += (c.sim_pnl_usd or 0)
+    return {
+        "count": n,
+        "target": 10,
+        "ready_for_report": n >= 10,
+        "by_outcome": by_outcome,
+        "total_simulated_pnl_usd": round(total_pnl, 2),
+        "cases": [
+            {
+                "id": c.id, "signal_id": c.signal_id, "symbol": c.symbol,
+                "direction": c.direction, "signal_time": c.signal_time.isoformat() if c.signal_time else None,
+                "cancel_time": c.cancel_time.isoformat() if c.cancel_time else None,
+                "cancel_reason": c.cancel_reason,
+                "entry_signal": c.entry_signal, "entry_market": c.entry_market,
+                "stoploss": c.stoploss, "tp1": c.tp1, "tp2": c.tp2, "tp3": c.tp3,
+                "sim_outcome": c.sim_outcome, "sim_pnl_usd": c.sim_pnl_usd,
+                "sim_close_time": c.sim_close_time.isoformat() if c.sim_close_time else None,
+                "sim_max_favorable_pct": c.sim_max_favorable_pct,
+                "sim_max_adverse_pct": c.sim_max_adverse_pct,
+                "notes": c.notes,
+            }
+            for c in cases
+        ],
+    }
+
+
 @app.post("/api/test/raw-order")
 async def test_raw_order(symbol: str = Query(...), pin: str = Query(...),
                           direction: str = Query("buy"),

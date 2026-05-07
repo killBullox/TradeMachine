@@ -452,6 +452,12 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                         f"Close da Telegram applicato: pending mai eseguiti, segnale annullato (motivo: {reason_txt})",
                         {"reason": reason_txt})
                     db.add(sig)
+                    # EMA: registra caso STOP mai filled
+                    try:
+                        import mt5_trader as _mt5t
+                        _mt5t.analyze_ema_case(sig.id, "tg_close")
+                    except Exception:
+                        pass
                 else:
                     sig.status = "closed"
                     sig.closed_at = now
@@ -707,6 +713,12 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         log(f"[TargetDone] #{sig.id} {sig.symbol} pending dropped: {cancelled_count} ordini cancellati ({parsed.status_text})")
                     if pending_sigs:
                         db.commit()
+                        # EMA: registra casi di STOP mai filled
+                        for sig in pending_sigs:
+                            try:
+                                mt5_trader.analyze_ema_case(sig.id, "target_done")
+                            except Exception as _e:
+                                log(f"[EMA] errore analisi sig #{sig.id}: {str(_e)[:80]}")
             except Exception as e:
                 log(f"[TargetDone] Errore drop pending: {str(e)[:120]}")
 
@@ -779,6 +791,12 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         log(f"[SLMove] #{sig.id} {sig.symbol} pending dropped: {cancelled_count} ordini cancellati")
                     if pending_sigs_to_drop:
                         db.commit()
+                        # EMA: registra casi di STOP mai filled
+                        for sig in pending_sigs_to_drop:
+                            try:
+                                mt5_trader.analyze_ema_case(sig.id, "sl_move_drop")
+                            except Exception as _e:
+                                log(f"[EMA] errore analisi sig #{sig.id}: {str(_e)[:80]}")
 
                     open_sigs = []
                     skip = False
