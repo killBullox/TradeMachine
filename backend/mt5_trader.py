@@ -1483,8 +1483,14 @@ def close_position(ticket: int, symbol: str) -> bool:
 
 def cancel_expired_signals():
     """
-    1. Cancella segnali pending il cui prezzo è andato oltre lo SL.
-    2. Cancella segnali attivi senza mt5_ticket (non eseguiti su MT5).
+    1. Cancella segnali attivi (open/tp1/tp2) senza mt5_ticket: orphan, mai
+       eseguiti su MT5.
+    2. Cancella segnali pending SENZA ticket MT5 il cui prezzo e' andato oltre
+       SL: il LIMIT/STOP non e' mai stato piazzato e ora il trade e' perso.
+       NOTA: i pending CON ticket MT5 (broker ha gli ordini) NON vengono
+       toccati qui — il broker gestisce l'attivazione, e per un SELL_STOP
+       a 91.6 con SL 91.8, il prezzo a 94.2 non significa "trade perso", solo
+       "ordine non ancora attivato". Lasciar scadere via timeout o close TG.
     """
     from database import SessionLocal, Signal
     import json as jsonlib
@@ -1495,55 +1501,52 @@ def cancel_expired_signals():
 
     db = SessionLocal()
     try:
-        # Segnali attivi senza ticket MT5 → mai eseguiti, annulla
+        # Block 1: orphan (status attivo senza ticket MT5)
         orphans = db.query(Signal).filter(
             Signal.status.in_(["open", "tp1", "tp2"]),
             Signal.mt5_ticket.is_(None),
         ).all()
         cancelled = []
         for sig in orphans:
+            reason = f"orphan: status={sig.status} senza ticket MT5 (place_orders fallito o race)"
             sig.status = "cancelled"
             sig.updated_at = datetime.utcnow()
             sig.notes = (sig.notes or "") + " [Non eseguito su MT5]"
+            _append_trade_log_mt5(sig, "expired_cancel", reason, {"kind": "orphan"})
             db.add(sig)
             cancelled.append(sig.id)
-            log(f"#{sig.id} {sig.symbol} annullato: attivo senza ticket MT5")
+            log(f"#{sig.id} {sig.symbol} expired_cancel: {reason}")
 
-        # Segnali pending oltre SL
-        pending = db.query(Signal).filter(Signal.status == "pending").all()
+        # Block 2: pending SENZA ticket MT5 + prezzo oltre SL.
+        # ESCLUDIAMO i pending con mt5_tickets popolati: in quel caso gli ordini
+        # sono nelle mani del broker e non e' nostro compito cancellarli per
+        # "prezzo oltre SL" mentre il pending non si e' ancora attivato.
+        pending = db.query(Signal).filter(
+            Signal.status == "pending",
+            Signal.mt5_ticket.is_(None),
+        ).all()
 
         for sig in pending:
             mt5_sym = MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol)
             tick = mt5.symbol_info_tick(mt5_sym)
             if not tick:
                 continue
-
             is_buy = (sig.direction or "buy").lower() == "buy"
             sl = sig.stoploss
             if not sl:
                 continue
-
             price = tick.ask if is_buy else tick.bid
-            # Se il prezzo è andato oltre SL → annulla
             past_sl = (is_buy and price <= sl) or (not is_buy and price >= sl)
             if not past_sl:
                 continue
 
-            log(f"#{sig.id} {sig.symbol} prezzo={price} oltre SL={sl} → annullo segnale pending")
-
-            # Cancella ordini MT5 pending associati
-            if sig.mt5_tickets:
-                for ticket in jsonlib.loads(sig.mt5_tickets):
-                    orders = mt5.orders_get(ticket=ticket)
-                    if orders:
-                        mt5.order_send({
-                            "action": mt5.TRADE_ACTION_REMOVE,
-                            "order": ticket,
-                        })
-                        log(f"  Rimosso ordine pending MT5 ticket={ticket}")
-
+            reason = f"pending senza ticket MT5 e prezzo {price} oltre SL {sl} ({sig.direction})"
+            log(f"#{sig.id} {sig.symbol} expired_cancel: {reason}")
             sig.status = "cancelled"
             sig.updated_at = datetime.utcnow()
+            sig.notes = (sig.notes or "") + f" [Pending oltre SL: {price} vs {sl}]"
+            _append_trade_log_mt5(sig, "expired_cancel", reason,
+                                  {"kind": "pending_past_sl", "price": price, "sl": sl})
             db.add(sig)
             cancelled.append(sig.id)
 
