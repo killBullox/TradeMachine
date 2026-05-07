@@ -2110,11 +2110,39 @@ def sync_positions() -> list:
                                     (not is_buy and close_price <= sig.tp1)):
                         tp1_hit = True
                 else:
-                    # Nessun deal trovato — controlla se l'ordine è stato cancellato dal broker
+                    # Nessun deal trovato — controlla lo stato dell'ordine in history.
+                    # Avatrade puo' rejectare ordini con comment 'deleted [no money]'
+                    # quando un fill multiplo eccede il margin (sig.318 case).
                     hist_orders = mt5.history_orders_get(ticket=ticket)
-                    if hist_orders and hist_orders[0].state == 2:  # ORDER_STATE_CANCELED
-                        log(f"#{sig.id} ticket={ticket} ordine CANCELLATO dal broker (reason={hist_orders[0].reason})")
-                        # Non incrementa open_count → ticket morto
+                    if hist_orders:
+                        ord_state = hist_orders[0].state
+                        ord_comment = (hist_orders[0].comment or "")
+                        # ORDER_STATE_REJECTED = 5, ORDER_STATE_CANCELED = 2,
+                        # ORDER_STATE_EXPIRED = 6
+                        if ord_state in (2, 5, 6):
+                            state_label = {2: "CANCELED", 5: "REJECTED", 6: "EXPIRED"}[ord_state]
+                            log(f"#{sig.id} ticket={ticket} ordine {state_label} dal broker (comment='{ord_comment}')")
+                            # Idempotenza: log evento solo se non gia' presente
+                            import json as _jsonlib
+                            try:
+                                _ll = _jsonlib.loads(sig.trade_log) if sig.trade_log else []
+                            except Exception:
+                                _ll = []
+                            already = any(
+                                e.get("event") == "ticket_rejected" and e.get("ticket") == ticket
+                                for e in _ll
+                            )
+                            if not already:
+                                _append_trade_log_mt5(sig, "ticket_rejected",
+                                    f"ticket={ticket} {state_label} dal broker: '{ord_comment or 'no detail'}'",
+                                    {"ticket": ticket, "state": state_label, "broker_comment": ord_comment})
+                            # Non incrementa open_count, non somma volume
+                        else:
+                            sig_age = (datetime.utcnow() - sig.created_at).total_seconds() if sig.created_at else 9999
+                            if sig_age < 1800:
+                                open_count += 1
+                            else:
+                                log(f"#{sig.id} ticket={ticket} state={ord_state} dopo {int(sig_age/60)}min — orfano")
                     else:
                         sig_age = (datetime.utcnow() - sig.created_at).total_seconds() if sig.created_at else 9999
                         if sig_age < 1800:
