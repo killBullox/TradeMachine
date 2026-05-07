@@ -1093,6 +1093,116 @@ async def test_place_order(body: TestPlaceOrderIn, pin: str = Query(...), db: Se
     }
 
 
+@app.post("/api/signals/{signal_id}/retry-market")
+async def signal_retry_market(signal_id: int, db: Session = Depends(get_db)):
+    """Retry manuale a MARKET di un signal pending: cancella eventuali pending
+    sul broker e ripiazza con force_market=True. Usato quando il LIMIT/STOP
+    iniziale e' stato rifiutato (es. broker stops_level)."""
+    sig = db.query(Signal).filter(Signal.id == signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Segnale non trovato")
+    if sig.status not in ("pending", "cancelled"):
+        raise HTTPException(status_code=400, detail=f"Retry consentito solo su signal pending/cancelled, non '{sig.status}'")
+
+    def _do():
+        from database import SessionLocal as _SL, Signal as _Sig
+        s = _SL()
+        try:
+            ss = s.query(_Sig).get(signal_id)
+            if not ss:
+                return {"ok": False, "error": "signal vanished"}
+            # Cancella eventuali pending broker residui
+            mt5 = mt5_trader._get_mt5()
+            cancelled_orders = 0
+            if mt5 and ss.mt5_tickets:
+                try:
+                    existing = json.loads(ss.mt5_tickets)
+                    for t in existing:
+                        orders = mt5.orders_get(ticket=t)
+                        if orders:
+                            mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": t})
+                            cancelled_orders += 1
+                except Exception:
+                    pass
+            # Reset campi che place_orders ricompila
+            ss.mt5_ticket = None
+            ss.mt5_tickets = None
+            ss.status = "pending"
+            ss.notes = (ss.notes or "") + f" [Retry MARKET manuale, {cancelled_orders} pending precedenti rimossi]"
+            mt5_trader._append_trade_log_mt5(ss, "manual_retry_market",
+                f"Retry manuale a mercato richiesto dall'utente. Cancellati {cancelled_orders} pending precedenti.",
+                {"cancelled_orders": cancelled_orders})
+            s.commit()
+            try:
+                tickets = mt5_trader.place_orders(ss, force_market=True) or []
+                if tickets:
+                    ss.mt5_ticket = tickets[0]
+                    ss.mt5_tickets = json.dumps(tickets)
+                    ss.status = "open"
+                    mt5_trader._append_trade_log_mt5(ss, "mt5_placed",
+                        f"Retry MARKET ok: tickets={tickets}", {"tickets": tickets})
+                else:
+                    ss.status = "cancelled"
+                    ss.notes = (ss.notes or "") + " [Retry MARKET fallito]"
+                s.commit()
+                return {"ok": bool(tickets), "tickets": tickets, "status": ss.status,
+                        "broker": ss.broker, "notes": ss.notes}
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                print(f"[retry-market] EXCEPTION: {tb}", flush=True)
+                s.rollback()
+                return {"ok": False, "error": str(e)}
+        finally:
+            s.close()
+    return await asyncio.get_event_loop().run_in_executor(None, _do)
+
+
+@app.post("/api/signals/{signal_id}/cancel-manual")
+async def signal_cancel_manual(signal_id: int, db: Session = Depends(get_db)):
+    """Cancellazione manuale: rimuove pending broker e marca signal cancelled."""
+    sig = db.query(Signal).filter(Signal.id == signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Segnale non trovato")
+    if sig.status not in ("pending",):
+        raise HTTPException(status_code=400, detail=f"Cancel manuale consentito solo su pending, non '{sig.status}'")
+
+    def _do():
+        mt5 = mt5_trader._get_mt5()
+        cancelled = 0
+        if mt5 and sig.mt5_tickets:
+            try:
+                tickets = json.loads(sig.mt5_tickets)
+                for t in tickets:
+                    orders = mt5.orders_get(ticket=t)
+                    if orders:
+                        mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": t})
+                        cancelled += 1
+            except Exception:
+                pass
+        return cancelled
+    cancelled = await asyncio.get_event_loop().run_in_executor(None, _do)
+    sig.status = "cancelled"
+    sig.notes = (sig.notes or "") + f" [Annullato manualmente da utente, {cancelled} pending broker rimossi]"
+    sig.closed_at = datetime.utcnow()
+    sig.updated_at = datetime.utcnow()
+    # Append trade_log via session corrente
+    import json as _json
+    try:
+        log_list = _json.loads(sig.trade_log) if sig.trade_log else []
+    except Exception:
+        log_list = []
+    log_list.append({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "event": "manual_cancel",
+        "detail": f"Cancellato manualmente da utente. {cancelled} ordini pending broker rimossi.",
+        "cancelled_orders": cancelled,
+    })
+    sig.trade_log = _json.dumps(log_list)
+    db.commit()
+    return {"ok": True, "cancelled_orders": cancelled, "status": sig.status}
+
+
 @app.post("/api/test/raw-order")
 async def test_raw_order(symbol: str = Query(...), pin: str = Query(...),
                           direction: str = Query("buy"),

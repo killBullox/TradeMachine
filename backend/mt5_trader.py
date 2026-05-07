@@ -400,7 +400,7 @@ def _analyze_late_catch_ticks(mt5, mt5_sym, sig, signal_ts, now_ts, pip_size):
 
 
 def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str] = None,
-                 signal_ts: Optional[datetime] = None) -> list:
+                 signal_ts: Optional[datetime] = None, force_market: bool = False) -> list:
     """
     Piazza 2-3 ordini separati (uno per ogni TP) con lotti divisi equamente.
     Ritorna lista di ticket piazzati con successo.
@@ -882,7 +882,17 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
             return (mt5.ORDER_TYPE_BUY if buy_side else mt5.ORDER_TYPE_SELL, current)
         return (None, target_entry)
 
-    if is_buy:
+    # force_market: bypassa tutta la routing e va a mercato al prezzo corrente.
+    # Usato dal retry manuale quando il LIMIT/STOP precedente e' stato rifiutato.
+    if force_market:
+        if is_buy:
+            order_type = mt5.ORDER_TYPE_BUY
+            entry = current_ask
+        else:
+            order_type = mt5.ORDER_TYPE_SELL
+            entry = current_bid
+        log(f"#{sig.id} FORCE MARKET: prezzo {entry} (was force_market)")
+    elif is_buy:
         # BUY: favorevole = prezzo SOTTO range, sfavorevole = prezzo SOPRA.
         if current_ask < min_entry:
             order_type, entry_candidate = _safe_limit_or_market(True, entry_lower, current_ask)

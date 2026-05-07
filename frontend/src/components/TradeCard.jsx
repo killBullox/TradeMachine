@@ -124,6 +124,45 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
   // quindi non e' affidabile per evidenziare TP1 gia' colpito su trade aperti)
   const tpHitCount = getTpHitCount(sig)
 
+  const handleRetryMarket = async () => {
+    const entry = sig.entry_price ?? sig.entry_price_high
+    const drift = currentPrice && entry ? Math.abs(currentPrice - entry) : null
+    const driftMsg = drift ? `\n\nPrezzo attuale: ${currentPrice}\nEntry segnale: ${entry}\nScarto: ${drift.toFixed(decimals)}` : ''
+    if (!confirm(`Retry a MARKET di #${sig.id} ${sig.symbol}?\nEventuali pending broker verranno cancellati e si entra a mercato.${driftMsg}`)) return
+    setLocking(true)
+    try {
+      const r = await fetch(`/api/signals/${sig.id}/retry-market`, { method: 'POST' }).then(r => r.json())
+      if (r.ok) {
+        toast.success(`#${sig.id}: trade aperto a mercato (${r.tickets?.length || 0} ticket)`)
+        onClose?.()
+      } else {
+        toast.error(`Retry fallito: ${r.error || r.notes || 'sconosciuto'}`)
+      }
+    } catch {
+      toast.error('Errore di rete')
+    } finally {
+      setLocking(false)
+    }
+  }
+
+  const handleCancelManual = async () => {
+    if (!confirm(`Annullare il trade pending #${sig.id} ${sig.symbol}?\nEventuali ordini pending sul broker verranno rimossi.`)) return
+    setClosing(true)
+    try {
+      const r = await fetch(`/api/signals/${sig.id}/cancel-manual`, { method: 'POST' }).then(r => r.json())
+      if (r.ok) {
+        toast.success(`#${sig.id} annullato (${r.cancelled_orders} pending rimossi)`)
+        onClose?.()
+      } else {
+        toast.error('Cancellazione fallita')
+      }
+    } catch {
+      toast.error('Errore di rete')
+    } finally {
+      setClosing(false)
+    }
+  }
+
   const handleClose = async () => {
     if (!confirm(`Chiudere tutte le posizioni del trade #${sig.id} ${sig.symbol}?`)) return
     setClosing(true)
@@ -220,9 +259,10 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
       )}
 
       {/* Trail toggle + Lock profit + Close buttons */}
-      {tickets.length > 0 && (
+      {(tickets.length > 0 || sig.status === 'pending') && (
         <div className="space-y-2 mt-1">
-          {/* Trail stop toggle */}
+          {/* Trail stop toggle (solo se trade aperto) */}
+          {sig.status !== 'pending' && (
           <div className="flex items-center gap-2 bg-slate-800/40 border border-slate-700/50 rounded-lg px-3 py-2">
             <button
               onClick={handleTrailToggle}
@@ -242,22 +282,45 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
               Trail stop {trailEffective ? 'ON' : 'OFF'}
             </span>
           </div>
+          )}
 
-          <button
-            onClick={handleLockProfit}
-            disabled={locking || closing || !sig.actual_entry_price}
-            className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/70 hover:text-emerald-200 transition-colors disabled:opacity-50"
-            title="0/1 TP raggiunti: SL = BE+1 pip · 2 TP raggiunti, prezzo oltre TP1: SL = TP1"
-          >
-            {locking ? 'Lock profit...' : '🔒 Lock profit'}
-          </button>
-          <button
-            onClick={handleClose}
-            disabled={closing || locking}
-            className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-900/40 text-rose-400 hover:bg-rose-900/70 hover:text-rose-300 transition-colors disabled:opacity-50"
-          >
-            {closing ? 'Chiusura...' : 'Chiudi trade'}
-          </button>
+          {sig.status === 'pending' ? (
+            <>
+              <button
+                onClick={handleRetryMarket}
+                disabled={locking || closing}
+                className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-900/40 text-blue-300 hover:bg-blue-900/70 hover:text-blue-200 transition-colors disabled:opacity-50"
+                title="Cancella eventuali pending sul broker e apre a MARKET al prezzo corrente"
+              >
+                {locking ? 'Retry...' : '🔄 Retry a mercato'}
+              </button>
+              <button
+                onClick={handleCancelManual}
+                disabled={closing || locking}
+                className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-900/40 text-rose-400 hover:bg-rose-900/70 hover:text-rose-300 transition-colors disabled:opacity-50"
+              >
+                {closing ? 'Annullamento...' : '✗ Annulla trade'}
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={handleLockProfit}
+                disabled={locking || closing || !sig.actual_entry_price}
+                className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/70 hover:text-emerald-200 transition-colors disabled:opacity-50"
+                title="0/1 TP raggiunti: SL = BE+1 pip · 2 TP raggiunti, prezzo oltre TP1: SL = TP1"
+              >
+                {locking ? 'Lock profit...' : '🔒 Lock profit'}
+              </button>
+              <button
+                onClick={handleClose}
+                disabled={closing || locking}
+                className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-900/40 text-rose-400 hover:bg-rose-900/70 hover:text-rose-300 transition-colors disabled:opacity-50"
+              >
+                {closing ? 'Chiusura...' : 'Chiudi trade'}
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
