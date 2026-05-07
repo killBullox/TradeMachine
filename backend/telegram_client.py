@@ -638,8 +638,13 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                     _append_trade_log(sig, _tag, _cancel_reason)
                                     log(f"[AutoTrade] #{sig.id} {sig.symbol} ANNULLATO: {_cancel_reason}")
                                 else:
-                                    _append_trade_log(sig, "mt5_failed", "Nessun ticket MT5 ottenuto - controllare log MT5 per dettaglio errore")
-                                    log(f"[AutoTrade] #{sig.id} {sig.symbol} nessun ticket: segnale rimane in pending")
+                                    # Tutti gli ordini falliti senza ragione di "timing": marca cancelled.
+                                    # Lasciare in 'pending' inquina UI/storico (nessun ticket sul broker,
+                                    # nessuna possibilità che il trade parta da solo).
+                                    sig.status = "cancelled"
+                                    sig.notes = (sig.notes or "") + " [Tutti gli ordini MT5 rifiutati dal broker - vedi trade_log]"
+                                    _append_trade_log(sig, "mt5_failed", "Nessun ticket MT5 ottenuto - tutti gli order_send rifiutati. Segnale annullato.")
+                                    log(f"[AutoTrade] #{sig.id} {sig.symbol} ANNULLATO: tutti gli ordini rifiutati")
                                 db.add(sig)
                                 db.commit()
                 except Exception as e:
