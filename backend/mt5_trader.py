@@ -1569,6 +1569,13 @@ def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
         entry_market = ask_at_signal if is_buy else bid_at_signal
         sl = sig.stoploss
         tp1, tp2, tp3 = sig.tp1, sig.tp2, sig.tp3
+        # SL valido solo se sul lato corretto: BUY → sl < entry, SELL → sl > entry.
+        # Se entry_market e' gia' "oltre" l'SL del signal originale, l'SL e' inapplicabile
+        # con un'entrata MARKET (broker la rifiuterebbe). Skippa SL check ma continua TP.
+        sl_feasible = sl is not None and (
+            (is_buy and sl < entry_market) or
+            (not is_buy and sl > entry_market)
+        )
 
         # Recupera tick fra signal_ts e cancel_ts
         signal_ts = sig.created_at or datetime.utcnow()
@@ -1605,7 +1612,7 @@ def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
                     if adv > max_adv: max_adv = adv
                     # Hit detection (TP3 prima, in ordine di livello favorevole)
                     if is_buy:
-                        if sl is not None and p_close <= sl:
+                        if sl_feasible and p_close <= sl:
                             sim_outcome = "sl_hit"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
                         if tp3 is not None and p_close >= tp3:
                             sim_outcome = "tp3"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
@@ -1617,7 +1624,7 @@ def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
                             sim_outcome = "tp1"; sim_close_time = datetime.utcfromtimestamp(int(t['time']))
                             continue
                     else:
-                        if sl is not None and p_close >= sl:
+                        if sl_feasible and p_close >= sl:
                             sim_outcome = "sl_hit"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
                         if tp3 is not None and p_close <= tp3:
                             sim_outcome = "tp3"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
@@ -1627,6 +1634,13 @@ def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
                             sim_outcome = "tp1"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); continue
         except Exception as e:
             log(f"EMA #{signal_id} tick analysis error: {e}")
+
+        # Se SL inapplicabile e nessun TP raggiunto, segna outcome speciale
+        if not sl_feasible and sim_outcome == "no_hit":
+            sim_outcome = "sl_infeasible"
+        elif not sl_feasible and sim_outcome != "no_hit":
+            # TP raggiunto comunque, ma SL era inapplicabile — annota
+            pass
 
         # Calcolo P&L simulato (1 lotto standard come riferimento, normalizziamo via spec)
         from risk import get_spec
