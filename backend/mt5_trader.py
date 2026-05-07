@@ -1590,8 +1590,18 @@ def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
                 raise RuntimeError("MT5 unavailable")
             mt5_sym = MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol)
             # Aggiungi 30min di buffer dopo cancel per vedere se TP/SL sarebbero stati hit dopo
-            from datetime import timedelta as _td
-            ticks = mt5.copy_ticks_range(mt5_sym, signal_ts, cancel_ts + _td(minutes=30), mt5.COPY_TICKS_ALL)
+            # IMPORTANTE: copy_ticks_range deve ricevere datetime tz-aware UTC, altrimenti
+            # su Windows interpreta naive come local time (Rome UTC+2) e sfasa la finestra di 2h.
+            from datetime import timedelta as _td, timezone as _tz
+            def _to_utc_aware(dt):
+                if dt is None:
+                    return None
+                if dt.tzinfo is None:
+                    return dt.replace(tzinfo=_tz.utc)
+                return dt.astimezone(_tz.utc)
+            sig_utc = _to_utc_aware(signal_ts)
+            cancel_utc = _to_utc_aware(cancel_ts)
+            ticks = mt5.copy_ticks_range(mt5_sym, sig_utc, cancel_utc + _td(minutes=30), mt5.COPY_TICKS_ALL)
             if ticks is not None and len(ticks) > 0:
                 for t in ticks:
                     bid = float(t['bid']) if t['bid'] else 0
@@ -1610,28 +1620,29 @@ def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
                         adv = p_close - entry_market
                     if fav > max_fav: max_fav = fav
                     if adv > max_adv: max_adv = adv
+                    def _t_to_utc(epoch):
+                        return datetime.fromtimestamp(int(epoch), tz=_tz.utc).replace(tzinfo=None)
                     # Hit detection (TP3 prima, in ordine di livello favorevole)
                     if is_buy:
                         if sl_feasible and p_close <= sl:
-                            sim_outcome = "sl_hit"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
+                            sim_outcome = "sl_hit"; sim_close_time = _t_to_utc(t['time']); break
                         if tp3 is not None and p_close >= tp3:
-                            sim_outcome = "tp3"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
+                            sim_outcome = "tp3"; sim_close_time = _t_to_utc(t['time']); break
                         if tp2 is not None and p_close >= tp2:
-                            sim_outcome = "tp2"; sim_close_time = datetime.utcfromtimestamp(int(t['time']))
-                            # continua a vedere se arriva tp3
+                            sim_outcome = "tp2"; sim_close_time = _t_to_utc(t['time'])
                             continue
                         if tp1 is not None and p_close >= tp1:
-                            sim_outcome = "tp1"; sim_close_time = datetime.utcfromtimestamp(int(t['time']))
+                            sim_outcome = "tp1"; sim_close_time = _t_to_utc(t['time'])
                             continue
                     else:
                         if sl_feasible and p_close >= sl:
-                            sim_outcome = "sl_hit"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
+                            sim_outcome = "sl_hit"; sim_close_time = _t_to_utc(t['time']); break
                         if tp3 is not None and p_close <= tp3:
-                            sim_outcome = "tp3"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); break
+                            sim_outcome = "tp3"; sim_close_time = _t_to_utc(t['time']); break
                         if tp2 is not None and p_close <= tp2:
-                            sim_outcome = "tp2"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); continue
+                            sim_outcome = "tp2"; sim_close_time = _t_to_utc(t['time']); continue
                         if tp1 is not None and p_close <= tp1:
-                            sim_outcome = "tp1"; sim_close_time = datetime.utcfromtimestamp(int(t['time'])); continue
+                            sim_outcome = "tp1"; sim_close_time = _t_to_utc(t['time']); continue
         except Exception as e:
             log(f"EMA #{signal_id} tick analysis error: {e}")
 
