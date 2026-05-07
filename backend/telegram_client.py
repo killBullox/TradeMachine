@@ -662,6 +662,49 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
 
         elif msg_type == "update" and parsed:
             _save_update(db, parsed, msg_id)
+
+            # "Target Done" su un pending = il TG ha incassato ma il nostro
+            # stop/limit entry non si e' mai attivato → trade perso, cancella.
+            # Stesso razionale del SLMove drop: TG e' avanti al nostro fill.
+            try:
+                import re as _re, json as _json, mt5_trader
+                status_lower = (parsed.status_text or "").lower()
+                is_target_hit = bool(_re.search(r'(1st|first|2nd|second|3rd|third|all|last)\s+target\s*done', status_lower))
+                if is_target_hit and parsed.symbol and mt5_trader.is_enabled():
+                    # Cerca pending dello stesso simbolo CON ticket broker
+                    pending_sigs = db.query(Signal).filter(
+                        Signal.status == "pending",
+                        Signal.mt5_ticket.isnot(None),
+                        Signal.symbol == parsed.symbol,
+                    ).all()
+                    for sig in pending_sigs:
+                        tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
+                        cancelled_count = 0
+                        mt5_inst = mt5_trader._get_mt5()
+                        if mt5_inst:
+                            for t in tickets:
+                                orders = mt5_inst.orders_get(ticket=t)
+                                if orders:
+                                    mt5_inst.order_send({"action": mt5_inst.TRADE_ACTION_REMOVE, "order": t})
+                                    cancelled_count += 1
+                        sig.status = "cancelled"
+                        sig.notes = (sig.notes or "") + (
+                            f" [Trade non partito: TG ha segnalato '{parsed.status_text}' "
+                            f"ma il LIMIT/STOP non si era mai attivato]"
+                        )
+                        sig.updated_at = datetime.utcnow()
+                        sig.closed_at = datetime.utcnow()
+                        _append_trade_log(sig, "pending_dropped",
+                            f"Target raggiunto da TG ('{parsed.status_text}') su trade ancora pending: "
+                            f"il LIMIT/STOP non si e' mai filled. {cancelled_count} pending order cancellati.",
+                            {"tickets": tickets, "cancelled": cancelled_count, "trigger": "target_done"})
+                        db.add(sig)
+                        log(f"[TargetDone] #{sig.id} {sig.symbol} pending dropped: {cancelled_count} ordini cancellati ({parsed.status_text})")
+                    if pending_sigs:
+                        db.commit()
+            except Exception as e:
+                log(f"[TargetDone] Errore drop pending: {str(e)[:120]}")
+
             await broadcast_ws({
                 "event": "trade_update",
                 "data": {
