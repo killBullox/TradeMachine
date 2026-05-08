@@ -248,6 +248,14 @@ def _get_mt5():
         if info is None:
             log(f"_get_mt5: account_info() None dopo init — MT5_ACCOUNT={MT5_ACCOUNT}")
             return None
+        # Check critico: AutoTrading abilitato sul terminale (pulsante verde).
+        # Se rosso, ogni order_send tornera' retcode 10027 'AutoTrading disabled'.
+        try:
+            term_info = mt5.terminal_info()
+            if term_info and not term_info.trade_allowed:
+                log(f"ATTENZIONE: AutoTrading DISABILITATO sul terminale MT5 (pulsante rosso). Abilitalo per piazzare ordini.")
+        except Exception:
+            pass
         return mt5
     except Exception as e:
         log(f"_get_mt5 EXCEPTION: {e}")
@@ -420,6 +428,27 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         log(f"#{sig.id} place_orders: _get_mt5() returned None (account={MT5_ACCOUNT}, server={MT5_SERVER}, path={MT5_PATH})")
         _append_trade_log_mt5(sig, "mt5_unavailable", f"_get_mt5() None — MT5_ACCOUNT={MT5_ACCOUNT} server={MT5_SERVER}")
         return []
+
+    # Pre-check: AutoTrading abilitato sul terminale. Se disabilitato, NON inviare
+    # nulla — risparmiamo round-trip a Avatrade e logghiamo motivazione chiara.
+    try:
+        term_info = mt5.terminal_info()
+        if term_info and not term_info.trade_allowed:
+            msg = ("AutoTrading disabilitato sul terminale MT5 (pulsante rosso). "
+                   "Abilitarlo manualmente nel terminale per piazzare ordini.")
+            log(f"#{sig.id} {msg}")
+            from database import SessionLocal as _SL
+            sig.status = "cancelled"
+            sig.notes = (sig.notes or "") + f" [{msg}]"
+            _append_trade_log_mt5(sig, "autotrading_disabled", msg)
+            _db = _SL()
+            try:
+                _db.merge(sig); _db.commit()
+            finally:
+                _db.close()
+            return []
+    except Exception:
+        pass
 
     mt5_sym = MT5_SYMBOL_MAP.get(sig.symbol.upper())
     if not mt5_sym:
