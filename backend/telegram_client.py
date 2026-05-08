@@ -680,8 +680,11 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
             # Stesso razionale del SLMove drop: TG e' avanti al nostro fill.
             try:
                 import re as _re, json as _json, mt5_trader
-                status_lower = (parsed.status_text or "").lower()
-                is_target_hit = bool(_re.search(r'(1st|first|2nd|second|3rd|third|all|last)\s+target\s*done', status_lower))
+                # Cerca "Target Done" sia nello status_text che nel raw text del
+                # messaggio (parser regex spesso mette 'update' generico in status_text
+                # mentre "First Target Done" e' visibile solo nel raw — caso #325).
+                hay_lower = ((parsed.status_text or "") + " " + (parsed.raw or "") + " " + (text or "")).lower()
+                is_target_hit = bool(_re.search(r'(1st|first|2nd|second|3rd|third|all|last)\s+target\s*done', hay_lower))
                 if is_target_hit and parsed.symbol and mt5_trader.is_enabled():
                     # Cerca pending dello stesso simbolo CON ticket broker
                     pending_sigs = db.query(Signal).filter(
