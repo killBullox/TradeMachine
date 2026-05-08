@@ -23,6 +23,7 @@ class ParsedSignal:
     stoploss: Optional[float]
     raw: str
     is_risky: bool = False
+    entry_type: str = "near"  # "near" (LIMIT/MARKET pullback) o "breakout" (STOP)
 
 
 @dataclass
@@ -244,7 +245,15 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
         return None
 
     # Entry price — gestisce: Near, Below, Above, Limit, At, @, Now
+    # entry_type: distingue tra "near"/"limit" (pullback, ordine LIMIT) e
+    # "above"/"below" (breakout, ordine STOP). Per "above"/"below" il bot
+    # NON deve entrare a market sotto/sopra il livello — deve aspettare
+    # che il prezzo lo attraversi nella direzione del breakout.
     entry_low = entry_high = None
+    entry_type = "near"  # default
+    breakout_m = re.search(r'\b(above|below)\b', clean, re.IGNORECASE)
+    if breakout_m:
+        entry_type = "breakout"
     range_m = re.search(
         r'(?:near|below|above|limit|at|@|now)\s*[-–]?\s*([\d]+\.?\d*)\s*[-–]\s*([\d]+\.?\d*)',
         clean, re.IGNORECASE
@@ -351,6 +360,7 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
         stoploss=sl,
         raw=text,
         is_risky=is_risky,
+        entry_type=entry_type,
     )
 
 

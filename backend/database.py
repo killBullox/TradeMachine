@@ -77,6 +77,9 @@ class Signal(Base):
     # Popolato all'apertura. Permette di distinguere trade fra conti diversi
     # dello stesso broker (es. demo vs reale).
     mt5_account = Column(Integer, nullable=True)
+    # Tipo di entry richiesto dal segnale: 'near' (LIMIT/MARKET su pullback)
+    # oppure 'breakout' (STOP sopra/sotto livello, da "Buy Above"/"Sell Below").
+    entry_type = Column(String(20), nullable=True)
 
 
 class TradeUpdate(Base):
@@ -240,6 +243,8 @@ def init_db():
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN broker VARCHAR(20)"))
         if "mt5_account" not in existing:
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN mt5_account INTEGER"))
+        if "entry_type" not in existing:
+            conn.execute(sa.text("ALTER TABLE signals ADD COLUMN entry_type VARCHAR(20)"))
         conn.commit()
         # Migrazione risk_settings
         rs_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(risk_settings)")).fetchall()]

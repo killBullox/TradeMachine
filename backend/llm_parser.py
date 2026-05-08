@@ -171,6 +171,10 @@ def llm_to_parsed(data: dict):
         direction = data.get("direction")
         if not symbol or not direction:
             return "other", None
+        # Detection breakout dal raw text: "above"/"below" → entry_type=breakout
+        import re as _re_lp
+        raw_text = data.get("_raw", "") or ""
+        entry_type = "breakout" if _re_lp.search(r'\b(above|below)\b', raw_text, _re_lp.IGNORECASE) else "near"
         return "signal", ParsedSignal(
             symbol=symbol,
             direction=direction,
@@ -180,8 +184,9 @@ def llm_to_parsed(data: dict):
             tp2=data.get("tp2"),
             tp3=data.get("tp3"),
             stoploss=data.get("sl"),
-            raw=data.get("_raw", ""),
+            raw=raw_text,
             is_risky=data.get("is_risky", False),
+            entry_type=entry_type,
         )
 
     elif msg_type == "close":

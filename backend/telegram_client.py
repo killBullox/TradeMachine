@@ -269,6 +269,7 @@ def _save_signal(db, parsed: ParsedSignal, msg_id: int):
         status="pending",
         raw_message=parsed.raw,
         is_risky=getattr(parsed, 'is_risky', False),
+        entry_type=getattr(parsed, 'entry_type', None),
     )
     _append_trade_log(sig, "received", f"Segnale Telegram ricevuto: {parsed.symbol} {parsed.direction} entry={parsed.entry_price}-{parsed.entry_price_high} sl={parsed.stoploss} tp1={parsed.tp1}", {"msg_id": msg_id})
     db.add(sig)

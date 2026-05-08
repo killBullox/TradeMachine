@@ -964,9 +964,44 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
             return (mt5.ORDER_TYPE_BUY if buy_side else mt5.ORDER_TYPE_SELL, current)
         return (None, target_entry)
 
+    # BREAKOUT entry ("Buy Above X" / "Sell Below X"): attesa breakout.
+    # Per BUY: se ask >= entry il breakout e' gia' avvenuto → MARKET; altrimenti
+    #          BUY STOP a entry (aspetta che il prezzo salga oltre il livello).
+    # Per SELL: se bid <= entry il breakdown e' gia' avvenuto → MARKET; altrimenti
+    #           SELL STOP a entry (aspetta che il prezzo scenda sotto il livello).
+    is_breakout = (getattr(sig, 'entry_type', None) == 'breakout')
+    if is_breakout and not force_market:
+        breakout_level = float(sig.entry_price or sig.entry_price_high or entry)
+        if is_buy:
+            if current_ask >= breakout_level:
+                order_type = mt5.ORDER_TYPE_BUY
+                entry = current_ask
+                log(f"#{sig.id} BREAKOUT BUY MARKET: ask={current_ask} >= level={breakout_level}, breakout in corso")
+            else:
+                # BUY STOP — verifica stops_level minimum
+                target_entry = breakout_level
+                if broker_floor and abs(current_ask - target_entry) < broker_floor:
+                    target_entry = round(current_ask + broker_floor, digits)
+                    log(f"#{sig.id} BREAKOUT BUY STOP: livello {breakout_level} troppo vicino, alzo a {target_entry}")
+                order_type = mt5.ORDER_TYPE_BUY_STOP
+                entry = round(target_entry, digits)
+                log(f"#{sig.id} BREAKOUT BUY STOP a {entry} (livello breakout {breakout_level}, ask={current_ask})")
+        else:
+            if current_bid <= breakout_level:
+                order_type = mt5.ORDER_TYPE_SELL
+                entry = current_bid
+                log(f"#{sig.id} BREAKOUT SELL MARKET: bid={current_bid} <= level={breakout_level}, breakdown in corso")
+            else:
+                target_entry = breakout_level
+                if broker_floor and abs(current_bid - target_entry) < broker_floor:
+                    target_entry = round(current_bid - broker_floor, digits)
+                    log(f"#{sig.id} BREAKOUT SELL STOP: livello {breakout_level} troppo vicino, abbasso a {target_entry}")
+                order_type = mt5.ORDER_TYPE_SELL_STOP
+                entry = round(target_entry, digits)
+                log(f"#{sig.id} BREAKOUT SELL STOP a {entry} (livello breakdown {breakout_level}, bid={current_bid})")
     # force_market: bypassa tutta la routing e va a mercato al prezzo corrente.
     # Usato dal retry manuale quando il LIMIT/STOP precedente e' stato rifiutato.
-    if force_market:
+    elif force_market:
         if is_buy:
             order_type = mt5.ORDER_TYPE_BUY
             entry = current_ask
