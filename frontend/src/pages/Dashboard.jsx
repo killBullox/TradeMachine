@@ -37,7 +37,21 @@ function MT5Panel() {
   const acc = mt5.account || {}
   const positions = mt5.open_positions || []
 
+  const tradeBlocked = mt5.terminal && mt5.terminal.trade_allowed === false
   return (
+    <>
+    {tradeBlocked && (
+      <div className="card border border-rose-600 bg-rose-950/40 mb-3 flex items-center gap-3">
+        <span className="text-2xl">🚫</span>
+        <div className="flex-1">
+          <div className="text-sm font-semibold text-rose-300">AutoTrading disabilitato sul terminale MT5</div>
+          <div className="text-xs text-rose-400/80 mt-0.5">
+            Il pulsante <strong>AutoTrading</strong> nel terminale MT5 è OFF (rosso). Ogni nuovo segnale verrà
+            cancellato finché non lo riabiliti manualmente nel terminale (toolbar in alto, deve diventare verde).
+          </div>
+        </div>
+      </div>
+    )}
     <div className={`card border ${mt5.auto_trade ? 'border-emerald-700/50 bg-emerald-950/20' : 'border-slate-700'}`}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -88,6 +102,7 @@ function MT5Panel() {
         </div>
       )}
     </div>
+    </>
   )
 }
 

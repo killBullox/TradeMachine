@@ -813,10 +813,23 @@ async def get_price(symbol: str):
 async def mt5_status():
     info = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.get_account_info)
     positions = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.get_open_positions)
+    # Stato pulsante AutoTrading sul terminale MT5 (se False → ordini bloccati lato MT5)
+    def _term():
+        m = mt5_trader._get_mt5()
+        if not m:
+            return None
+        try:
+            ti = m.terminal_info()
+            return {"trade_allowed": bool(ti.trade_allowed) if ti else None,
+                    "connected": bool(ti.connected) if ti else None}
+        except Exception:
+            return None
+    terminal = await asyncio.get_event_loop().run_in_executor(None, _term)
     return {
         "auto_trade": mt5_trader.is_enabled(),
         "account": info,
         "open_positions": positions,
+        "terminal": terminal,
     }
 
 @app.post("/api/mt5/enable")
