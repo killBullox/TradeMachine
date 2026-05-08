@@ -947,11 +947,13 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     realtime_tol = settings.get("entry_tolerance_pips", 3.0) * pip_size
     # Soglia minima broker: LIMIT/STOP devono essere >= stops_level dal prezzo corrente.
     # Su XM stops_level=0 → no impatto. Su Avatrade GOLD=0.50, BTC=$190 ecc.
-    # Se la "tolleranza MARKET" e' inferiore allo stops_level, allargamola a
-    # stops_level + 2 punti di buffer: cosi' quando il prezzo e' entro questo
-    # range il bot sceglie MARKET invece di LIMIT/STOP che il broker rifiuterebbe.
     broker_floor = (stops_level + 2) * point if stops_level else 0.0
-    market_tol = max(realtime_tol, broker_floor) if is_realtime else max(realtime_tol, broker_floor)
+    # Tolleranza MARKET PROPORZIONALE alla SL distance del segnale: se il prezzo
+    # e' entro 30% della SL_distance dal range, il setup e' ancora valido e
+    # andiamo a MARKET (caso #325: bid 0.6 sotto range, SL_dist 5 → 12% → MARKET
+    # invece di LIMIT pendente che si e' attivato 27min dopo al picco UP per SL).
+    proportional_tol = sl_distance * 0.30 if sl_distance else 0.0
+    market_tol = max(realtime_tol, broker_floor, proportional_tol)
     upper_threshold = (entry_upper + market_tol) if is_realtime else (entry_upper + max(sl_distance, broker_floor))
     lower_threshold = (entry_lower - market_tol) if is_realtime else (entry_lower - max(sl_distance, broker_floor))
 
