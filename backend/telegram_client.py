@@ -840,9 +840,12 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 ok = mt5_trader.modify_sl(ticket, new_sl, sig.symbol)
                                 if not ok:
                                     err = mt5_trader._last_modify_error
-                                    if err and isinstance(err, tuple) and len(err) >= 2:
-                                        msg_err = str(err[1] or "").lower()
-                                        if 'invalid' in msg_err and 'sl' in msg_err:
+                                    # err = (retcode, comment) da result.retcode/comment.
+                                    # 10016 = TRADE_RETCODE_INVALID_STOPS (SL/TP troppo
+                                    # vicini al prezzo o lato sbagliato). Standard MT5,
+                                    # indipendente da broker e da testo del comment.
+                                    if err and isinstance(err, tuple) and len(err) >= 1:
+                                        if err[0] == 10016:
                                             failed_invalid_sl = True
                             label = "BE" if parsed.is_breakeven else f"SL->{new_sl}"
                             if failed_invalid_sl:
