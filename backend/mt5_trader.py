@@ -1723,12 +1723,18 @@ def close_position(ticket: int, symbol: str) -> bool:
             "deviation": 20,
             "magic":     20250326,
             "comment":   "IC-close",
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": _pick_filling_mode(mt5, pos.symbol),
         }
         result = mt5.order_send(request)
         ok = result and result.retcode == mt5.TRADE_RETCODE_DONE
-        status = "OK" if ok else f"FAIL {result.retcode if result else '?'}"
-        log(f"close_position ticket={ticket} -> {status}")
+        if not ok:
+            try: last_err = mt5.last_error()
+            except: last_err = "?"
+            comm = result.comment if result else "?"
+            rc = result.retcode if result else "?"
+            log(f"close_position ticket={ticket} FAIL retcode={rc} comment='{comm}' last_err={last_err}")
+        else:
+            log(f"close_position ticket={ticket} OK")
         return ok
 
     # Prova come ordine pendente (BUY_LIMIT / SELL_LIMIT / ecc.)
