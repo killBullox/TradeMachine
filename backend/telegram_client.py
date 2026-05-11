@@ -847,19 +847,32 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             label = "BE" if parsed.is_breakeven else f"SL->{new_sl}"
                             if failed_invalid_sl:
                                 # Modify rifiutato perche' SL troppo vicino al prezzo:
-                                # registra in pending queue per riprovare a ogni sync (30s).
-                                mt5_trader.register_pending_sl(sig.id, new_sl, tickets, sig.symbol, sig.direction)
-                                _append_trade_log(sig, "sl_pending",
-                                    f"SL Move da TG ({label}) RIFIUTATO da MT5 (SL troppo vicino al prezzo): "
-                                    f"messo in pending, ritentero' ogni 30s. "
-                                    f"Se il prezzo tocca lo SL forzero' la chiusura.",
-                                    {"new_sl": new_sl, "is_breakeven": parsed.is_breakeven, "tickets": tickets})
+                                # significa che il prezzo ha gia' superato/raggiunto il
+                                # livello voluto dal trader. Chiusura IMMEDIATA dei ticket
+                                # a mercato (invece di attesa con coda pending che poteva
+                                # fallire come in #330).
+                                closed_count = 0
+                                fail_tickets = []
+                                for ticket in tickets:
+                                    if mt5_trader.close_position(ticket, sig.symbol):
+                                        closed_count += 1
+                                    else:
+                                        fail_tickets.append(ticket)
+                                if fail_tickets:
+                                    # Fallback: se anche close_position fallisce per qualcuno,
+                                    # tienili in pending queue per riprovare
+                                    mt5_trader.register_pending_sl(sig.id, new_sl, fail_tickets, sig.symbol, sig.direction)
+                                _append_trade_log(sig, "sl_immediate_close",
+                                    f"SL Move da TG ({label}) RIFIUTATO da MT5 (SL troppo vicino): "
+                                    f"chiusura immediata a mercato di {closed_count}/{len(tickets)} ticket"
+                                    + (f" ({len(fail_tickets)} fallback in pending queue)" if fail_tickets else ""),
+                                    {"new_sl": new_sl, "closed": closed_count, "failed": fail_tickets})
                                 # Aggiorna nota visibile nello storico
                                 import re as _re
                                 if sig.notes:
                                     sig.notes = _re.sub(r'\s*\[SL pending[^\]]*\]', '', sig.notes).strip() or None
-                                sig.notes = (sig.notes or "") + f" [SL pending: {new_sl}]"
-                                log(f"[SLMove] #{sig.id} {sig.symbol} SL->{new_sl} RIFIUTATO (Invalid sl) -> pending queue")
+                                sig.notes = (sig.notes or "") + f" [SL Move {new_sl} rifiutato → chiusura immediata: {closed_count}/{len(tickets)}]"
+                                log(f"[SLMove] #{sig.id} {sig.symbol} SL->{new_sl} RIFIUTATO -> chiusura immediata {closed_count}/{len(tickets)}")
                             else:
                                 _append_trade_log(sig, "sl_move",
                                     f"SL Move da TG ({label}) applicato su {len(tickets)} ticket (DB stoploss invariato={sig.stoploss})",
