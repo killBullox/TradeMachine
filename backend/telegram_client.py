@@ -338,6 +338,8 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
     import json as jsonlib
     from datetime import datetime as _dt
 
+    log(f"[Close] handler START: symbol={parsed.symbol} reason='{(parsed.reason or '')[:80]}' reply_to={reply_to_msg_id}")
+
     # La chiusura va eseguita SEMPRE, indipendentemente da auto_trade
     # auto_trade controlla l'apertura di nuovi trade, non la chiusura di quelli esistenti
 
@@ -375,6 +377,8 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
     if not targets:
         log(f"[Close] Nessun segnale aperto da chiudere (sym={parsed.symbol})")
         return
+
+    log(f"[Close] {len(targets)} target(s): {[(t.id, t.symbol, t.status) for t in targets]}")
 
     now = _dt.utcnow()
     raw_lower = (parsed.raw or "").lower()
