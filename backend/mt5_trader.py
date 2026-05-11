@@ -291,6 +291,9 @@ def _pick_filling_mode(mt5, mt5_sym):
     return mt5.ORDER_FILLING_FOK
 
 
+_last_send_error = {}  # sig_id -> (retcode, comment) per ultimo fallimento, letto da place_orders
+
+
 def _send_single_order(mt5, mt5_sym, order_type, action, entry, sl, tp, lots, sig_id, tp_num, digits, is_buy=True) -> Optional[int]:
     """Invia un singolo ordine e ritorna il ticket."""
     direction = "B" if is_buy else "S"
@@ -316,6 +319,8 @@ def _send_single_order(mt5, mt5_sym, order_type, action, entry, sl, tp, lots, si
         try: last_err = mt5.last_error()
         except: last_err = "?"
         log(f"#{sig_id} TP{tp_num} order_send fallito: retcode={code} comment='{comment}' last_error={last_err}")
+        # Memorizza errore per il chiamante (place_orders) che lo logga sulla sua session
+        _last_send_error[(sig_id, tp_num)] = {"retcode": code, "comment": comment, "last_err": str(last_err)}
         # SAFETY NET: order_send puo' rispondere None per timeout/risposta lenta
         # MA l'ordine puo' essere comunque andato a mercato (caso #327 USDJPY).
         # Cerca sul broker ordini recenti con il nostro comment esatto e usalo.
@@ -1193,7 +1198,11 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
             _append_trade_log_mt5(sig, "mt5_order_sent", f"TP{tp_num}: ticket={ticket} | {order_type_str} | entry={entry} | sl={sl} | tp={tp} | lots={lots_each}", {"ticket": ticket, "tp_num": tp_num})
             log(f"#{sig.id} TP{tp_num} ticket={ticket} lots={lots_each} entry={entry} sl={sl} tp={tp}")
         else:
-            _append_trade_log_mt5(sig, "mt5_order_failed", f"TP{tp_num}: ordine FALLITO | {order_type_str} | entry={entry} | sl={sl} | tp={tp}")
+            err = _last_send_error.pop((sig.id, tp_num), None)
+            err_str = f" | retcode={err['retcode']} '{err['comment']}'" if err else ""
+            _append_trade_log_mt5(sig, "mt5_order_failed",
+                f"TP{tp_num}: ordine FALLITO | {order_type_str} | entry={entry} | sl={sl} | tp={tp}{err_str}",
+                {"retcode": err["retcode"] if err else None, "comment": err["comment"] if err else None, "tp_num": tp_num})
             log(f"#{sig.id} TP{tp_num} FALLITO entry={entry} sl={sl} tp={tp}")
 
     # Salva sul signal i lotti totali EFFETTIVAMENTE piazzati su MT5,
