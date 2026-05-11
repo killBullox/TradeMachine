@@ -740,8 +740,85 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
                     _append_trade_log_mt5(sig, "mt5_tp_fix", f"TP{i} corretto da {tp_f} a {fix} (typo single-digit)")
                     setattr(sig, f'tp{i}', fix)
                     sig.notes = (sig.notes or "") + f" [TP{i} auto-corretto: {tp_f} -> {fix}]"
-                elif len(candidates) > 1:
-                    log(f"#{sig.id} TP{i}={tp_f} fuori scala ma {len(candidates)} candidati ambigui - lascio com'e'")
+                else:
+                    # Disambiguazione via PROIEZIONE: se i TP precedenti formano
+                    # una progressione coerente, calcola il TP{i} atteso e scegli
+                    # il candidato (anche 2-digit) piu' vicino alla proiezione.
+                    # Caso #328: TP1=4660 TP2=4665 → TP3 atteso 4670 (gap 5).
+                    # Ricevuto 4772 → single-digit candidati [4672, 4702, 4712,
+                    # 4722, 4732] ambigui. 4670 (2-digit: 7→6, 2→0) e' il match
+                    # esatto della proiezione.
+                    projection = None
+                    if i == 3 and tp1_val is not None:
+                        tp2_val_p = getattr(sig, 'tp2', None)
+                        if tp2_val_p is not None:
+                            t1, t2 = float(tp1_val), float(tp2_val_p)
+                            projection = t2 + (t2 - t1)  # progressione lineare
+                    if projection is not None:
+                        # Tolleranza: 50% del gap TP1→TP2 oppure 2 punti
+                        tol = max(abs(float(tp2_val_p) - float(tp1_val)) * 0.5, 2 * point)
+                        # 1) PREFERISCI candidati SINGLE-DIGIT vicini alla proiezione.
+                        sd_with_dist = sorted(((c, abs(c - projection)) for c in candidates), key=lambda x: x[1])
+                        best_sd, best_sd_dist = sd_with_dist[0]
+                        if best_sd_dist <= tol:
+                            fix = round(best_sd, digits)
+                            log(f"#{sig.id} TP{i}={tp_f} ambiguo → scelto {fix} (single-digit) piu' vicino a proiezione {projection:.2f} (dist {best_sd_dist:.2f}, tol {tol:.2f})")
+                            _append_trade_log_mt5(sig, "mt5_tp_fix",
+                                f"TP{i} corretto da {tp_f} a {fix} (single-digit via proiezione TP1→TP2 = {projection:.2f})")
+                            setattr(sig, f'tp{i}', fix)
+                            sig.notes = (sig.notes or "") + f" [TP{i} auto-corretto: {tp_f} -> {fix}]"
+                        else:
+                            # 2) Single-digit non bastano: prova 2-digit variants
+                            two_digit = set()
+                            for p1, c1 in enumerate(tp_str_full):
+                                if not c1.isdigit():
+                                    continue
+                                for d1 in "0123456789":
+                                    if d1 == c1:
+                                        continue
+                                    s1 = tp_str_full[:p1] + d1 + tp_str_full[p1+1:]
+                                    for p2 in range(p1+1, len(s1)):
+                                        if not s1[p2].isdigit():
+                                            continue
+                                        for d2 in "0123456789":
+                                            if d2 == s1[p2]:
+                                                continue
+                                            s2 = s1[:p2] + d2 + s1[p2+1:]
+                                            try:
+                                                two_digit.add(float(s2))
+                                            except ValueError:
+                                                continue
+                            valid2 = []
+                            for c in two_digit:
+                                if c <= 0:
+                                    continue
+                                side_ok = (is_buy and c > e_f) or (not is_buy and c < e_f)
+                                if not side_ok: continue
+                                if not ((is_buy and c > prev_tp) or (not is_buy and c < prev_tp)):
+                                    continue
+                                if next_tp is not None:
+                                    if not ((is_buy and c < next_tp) or (not is_buy and c > next_tp)):
+                                        continue
+                                cd = abs(c - e_f)
+                                if not (lo * tp1_dist <= cd <= hi * tp1_dist):
+                                    continue
+                                valid2.append((c, abs(c - projection)))
+                            if valid2:
+                                valid2.sort(key=lambda x: x[1])
+                                best2, best2_dist = valid2[0]
+                                if best2_dist <= tol:
+                                    fix = round(best2, digits)
+                                    log(f"#{sig.id} TP{i}={tp_f} typo 2-digit via proiezione {projection:.2f} → corretto a {fix} (dist {best2_dist:.2f})")
+                                    _append_trade_log_mt5(sig, "mt5_tp_fix",
+                                        f"TP{i} corretto da {tp_f} a {fix} (2-digit via proiezione TP1→TP2 = {projection:.2f})")
+                                    setattr(sig, f'tp{i}', fix)
+                                    sig.notes = (sig.notes or "") + f" [TP{i} auto-corretto: {tp_f} -> {fix}]"
+                                else:
+                                    log(f"#{sig.id} TP{i}={tp_f} ambiguo, best 1-digit={best_sd}(d={best_sd_dist:.2f}) 2-digit={best2}(d={best2_dist:.2f}) tutti fuori tolleranza {tol:.2f} - lascio com'e'")
+                            else:
+                                log(f"#{sig.id} TP{i}={tp_f} fuori scala, single-digit fuori tolleranza, 2-digit nessuno valido - lascio com'e'")
+                    else:
+                        log(f"#{sig.id} TP{i}={tp_f} fuori scala ma {len(candidates)} candidati ambigui senza proiezione - lascio com'e'")
 
     # Validazione coerenza direzione: scarta singoli TP ancora invalidi
     for i in range(1, 4):
