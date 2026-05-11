@@ -308,14 +308,37 @@ def _send_single_order(mt5, mt5_sym, order_type, action, entry, sl, tp, lots, si
         "type_time":    mt5.ORDER_TIME_GTC,
         "type_filling": _pick_filling_mode(mt5, mt5_sym),
     }
+    expected_comment = request["comment"]  # IC#xxx ...
     result = mt5.order_send(request)
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         code = result.retcode if result else "N/A"
         comment = result.comment if result else "N/A"
-        # Anche request_id e last_error per debug
         try: last_err = mt5.last_error()
         except: last_err = "?"
-        log(f"#{sig_id} TP{tp_num} order_send fallito: retcode={code} comment='{comment}' last_error={last_err} request={request}")
+        log(f"#{sig_id} TP{tp_num} order_send fallito: retcode={code} comment='{comment}' last_error={last_err}")
+        # SAFETY NET: order_send puo' rispondere None per timeout/risposta lenta
+        # MA l'ordine puo' essere comunque andato a mercato (caso #327 USDJPY).
+        # Cerca sul broker ordini recenti con il nostro comment esatto e usalo.
+        import time as _time
+        _time.sleep(1.5)  # da' tempo al broker di propagare
+        try:
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            recent_from = _dt.now(_tz.utc) - _td(seconds=30)
+            recent_to = _dt.now(_tz.utc) + _td(seconds=5)
+            recent = mt5.history_orders_get(recent_from, recent_to) or []
+            for ho in recent:
+                if (ho.magic == 20250326 and ho.symbol == mt5_sym
+                        and ho.comment == expected_comment and ho.state in (1, 4)):  # PLACED or FILLED
+                    log(f"#{sig_id} TP{tp_num} SAFETY NET: trovato ticket={ho.ticket} sul broker (state={ho.state}) — uso questo invece di fallire")
+                    return int(ho.ticket)
+            # Anche tra le posizioni aperte
+            open_pos = mt5.positions_get(symbol=mt5_sym) or []
+            for p in open_pos:
+                if p.magic == 20250326 and p.comment == expected_comment:
+                    log(f"#{sig_id} TP{tp_num} SAFETY NET: trovata posizione aperta ticket={p.ticket} — uso questo")
+                    return int(p.ticket)
+        except Exception as _e:
+            log(f"#{sig_id} TP{tp_num} SAFETY NET errore: {_e}")
         # Annotazione al trade_log: serve sapere PERCHE' su test/diagnostica
         try:
             from database import SessionLocal as _SL, Signal as _SG
