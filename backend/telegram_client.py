@@ -928,12 +928,54 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         ).order_by(Signal.created_at.desc()).first()
 
                 if last_sig:
-                    # Clona come nuovo segnale
+                    # Override entry range se il msg di reenter contiene numeri.
+                    # Pattern supportati nel raw del msg:
+                    #   "Near 78-79"        → range 78-79 (formato 2-digit, va espanso col prefisso del clone)
+                    #   "Near 4678-4679"    → range completo
+                    #   "Near 4678-79"      → 4678 e 79 espanso a 4679
+                    # I numeri vengono interpretati nel CONTESTO del livello del clone
+                    # (es. clone era 4682-4684 → un "78-79" del reenter diventa 4678-4679).
+                    import re as _re_reenter
+                    override_low = override_high = None
+                    raw_reenter = (parsed.raw or "")
+                    # Range: "X-Y" oppure "X - Y" oppure "X to Y"
+                    m_rng = _re_reenter.search(r'(?:near|@|at)?\s*([0-9]+(?:\.[0-9]+)?)\s*[-–toTO]+\s*([0-9]+(?:\.[0-9]+)?)', raw_reenter, _re_reenter.IGNORECASE)
+                    if m_rng:
+                        try:
+                            n1, n2 = m_rng.group(1), m_rng.group(2)
+                            v1 = float(n1)
+                            v2 = float(n2)
+                            # Espansione del secondo numero col prefisso del clone se troncato
+                            # (es. clone 4682, msg "78-79" → 4678 e 4679).
+                            ref = float(last_sig.entry_price or last_sig.entry_price_high or 0)
+                            if ref > 0:
+                                # Se i numeri sono molto piu' piccoli del ref e l'ordine di
+                                # grandezza differisce, ricostruisci col prefisso del ref.
+                                from parser import _expand_range
+                                ref_str = str(int(ref))
+                                if v1 < ref / 10:
+                                    # Numero troncato: ricostruisci col prefisso
+                                    # 4682 → prefisso "46", "78" → "4678"
+                                    v1_str = str(int(v1))
+                                    if len(v1_str) < len(ref_str):
+                                        v1 = float(ref_str[:len(ref_str) - len(v1_str)] + v1_str)
+                                # Espandi v2 vs v1 (es. "4678-79" → 4678, 4679)
+                                v2_str = str(int(v2)) if v2 == int(v2) else str(v2)
+                                v1_str_now = str(int(v1)) if v1 == int(v1) else str(v1)
+                                if len(v2_str) < len(v1_str_now):
+                                    v2 = float(v1_str_now[:len(v1_str_now) - len(v2_str)] + v2_str)
+                            override_low, override_high = min(v1, v2), max(v1, v2)
+                        except Exception:
+                            override_low = override_high = None
+
+                    # Clona come nuovo segnale (con eventuali override)
+                    new_entry_low = override_low if override_low is not None else last_sig.entry_price
+                    new_entry_high = override_high if override_high is not None else last_sig.entry_price_high
                     new_sig = Signal(
                         symbol=last_sig.symbol,
                         direction=last_sig.direction,
-                        entry_price=last_sig.entry_price,
-                        entry_price_high=last_sig.entry_price_high,
+                        entry_price=new_entry_low,
+                        entry_price_high=new_entry_high,
                         tp1=last_sig.tp1, tp2=last_sig.tp2, tp3=last_sig.tp3,
                         stoploss=last_sig.stoploss,
                         is_risky=last_sig.is_risky,
@@ -943,8 +985,11 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     db.add(new_sig)
                     db.flush()  # get new_sig.id
 
-                    _append_trade_log(new_sig, "reenter", f"Rientro nel trade #{last_sig.id} {last_sig.symbol} {last_sig.direction}")
-                    log(f"[Reenter] Nuovo segnale #{new_sig.id} clonato da #{last_sig.id} {last_sig.symbol}")
+                    override_note = ""
+                    if override_low is not None:
+                        override_note = f" entry override da msg: {override_low}-{override_high} (clone era {last_sig.entry_price}-{last_sig.entry_price_high})"
+                    _append_trade_log(new_sig, "reenter", f"Rientro nel trade #{last_sig.id} {last_sig.symbol} {last_sig.direction}.{override_note}")
+                    log(f"[Reenter] Nuovo segnale #{new_sig.id} clonato da #{last_sig.id} {last_sig.symbol}.{override_note}")
 
                     if mt5_trader.is_enabled():
                         _append_trade_log(new_sig, "mt5_placing", f"Invio ordini a MT5 per {new_sig.symbol} {new_sig.direction}")
