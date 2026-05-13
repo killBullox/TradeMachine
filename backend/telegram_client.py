@@ -684,15 +684,17 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
             # Stesso razionale del SLMove drop: TG e' avanti al nostro fill.
             try:
                 import re as _re, json as _json, mt5_trader
-                # Cerca "Target Done" sia nello status_text che nel raw text del
-                # messaggio. Normalizza: rimuove markdown (**, *), emoji, caratteri
-                # non-alphanumerici tra le parole — cosi' pattern come
-                # "**Target** Done" (caso #337) o "1st *Target* Done" matchano.
-                raw_combo = (parsed.status_text or "") + " " + (parsed.raw or "") + " " + (text or "")
-                # Sostituisce qualsiasi sequenza di non-alphanumeric con singolo spazio
-                normalized = _re.sub(r'[^\w\s]+', ' ', raw_combo.lower())
-                normalized = _re.sub(r'\s+', ' ', normalized)
-                is_target_hit = bool(_re.search(r'\b(1st|first|2nd|second|3rd|third|all|last)\s+target\s+done\b', normalized))
+                # Detection target hit:
+                # 1) Fast-path: LLM ha gia' classificato lo status (first/second/third/all_targets_done)
+                # 2) Fallback regex robusto su testo normalizzato (rimuove markdown, emoji)
+                semantic_hit_statuses = ("first_target_hit", "second_target_hit",
+                                         "third_target_hit", "all_targets_done")
+                is_target_hit = (parsed.status_text or "") in semantic_hit_statuses
+                if not is_target_hit:
+                    raw_combo = (parsed.status_text or "") + " " + (parsed.raw or "") + " " + (text or "")
+                    normalized = _re.sub(r'[^\w\s]+', ' ', raw_combo.lower())
+                    normalized = _re.sub(r'\s+', ' ', normalized)
+                    is_target_hit = bool(_re.search(r'\b(1st|first|2nd|second|3rd|third|all|last)\s+target\s+done\b', normalized))
                 if is_target_hit and parsed.symbol and mt5_trader.is_enabled():
                     # Cerca pending dello stesso simbolo CON ticket broker
                     pending_sigs = db.query(Signal).filter(

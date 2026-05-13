@@ -22,14 +22,16 @@ def _get_client():
     return _client
 
 
-SYSTEM_PROMPT = """Sei un assistente che analizza messaggi di un canale Telegram di trading forex/crypto.
-Il tuo compito è estrarre l'intenzione e i dati strutturati da ogni messaggio.
+SYSTEM_PROMPT = """Sei un parser preciso di messaggi Telegram di trading forex/crypto.
+Rispondi SEMPRE con un JSON valido e nient'altro. Ignora markdown/emoji/asterischi nel testo
+quando estrai i contenuti semantici (es. "**1st Target** Done" significa "first target done").
 
-Rispondi SEMPRE con un JSON valido e nient'altro. Schema:
+Schema:
 {
-  "type": "signal" | "close" | "sl_move" | "update" | "risky_flag" | "ignore",
-  "symbol": "XAUUSD" | "BTCUSD" | "USDCAD" | null,
+  "type": "signal" | "close" | "sl_move" | "update" | "reenter" | "risky_flag" | "ignore",
+  "symbol": "XAUUSD" | "BTCUSD" | "GBPJPY" | ... | null,
   "direction": "buy" | "sell" | null,
+  "entry_type": "near" | "breakout" | null,
   "entry_low": numero | null,
   "entry_high": numero | null,
   "tp1": numero | null,
@@ -39,41 +41,66 @@ Rispondi SEMPRE con un JSON valido e nient'altro. Schema:
   "is_risky": true | false,
   "new_sl": numero | null,
   "is_breakeven": true | false,
-  "close_reason": "stringa motivo" | null,
+  "close_reason": "stringa" | null,
   "price_from": numero | null,
-  "price_to": numero | null
+  "price_to": numero | null,
+  "status_text": "first_target_hit" | "second_target_hit" | "third_target_hit" |
+                 "all_targets_done" | "near_target" | "trail_active" | "in_profit" |
+                 "price_update" | "general" | null
 }
 
-Regole di classificazione:
-- "signal": nuovo segnale di trading con entry, TP, SL
-- "close": chiudi il trade IMMEDIATAMENTE. Solo per ordini espliciti di chiusura:
-  "close trade", "closing the trade", "everyone close", "closing here | BTC changing direction"
-  NON classificare come close:
-  - "take exit near XXXX" / "exit near XXXX" dopo un "First Target Done" = sl_move a breakeven
-    (il prezzo indicato è vicino all'entry, quindi è un trailing SL a breakeven)
-  - "book profit" = update informativo
-- "sl_move": qualsiasi indicazione di spostare/aggiornare lo stoploss. Esempi:
-  "move SL to 4550", "trail SL to 4550", "Everyone Hold With 4561 SL",
-  "hold with SL at 4561", "keep SL at 4550", "SL now 4550", "new SL 4550",
-  "move to cost", "move SL to breakeven", "trail to entry"
-  → new_sl = il numero dello stoploss, is_breakeven = true se dice cost/breakeven/entry
-- "update": aggiornamento prezzo (es. "XAUUSD | 4550 To 4560", "First Target Done")
-- "reenter": rientrare nel trade appena chiuso. Esempi: "enter again", "everyone enter again now",
-  "re-enter", "open again". Il trader dice di riaprire la stessa posizione.
-- "risky_flag": messaggio che indica rischio elevato ("highly risky", "risky trade", "aggressive")
-- "ignore": watchlist, livelli giornalieri, commenti generali senza azione
+CLASSIFICAZIONE TYPE:
 
-Per segnali con range entry come "Buy Near 4550-52" o "Buy Near-4567-69":
-- entry_low = primo numero (4550 o 4567)
-- entry_high = secondo numero espanso (4552 o 4569, stesso prefisso del primo)
+▸ "signal" — nuovo segnale di trading: deve avere symbol+direction+almeno un entry/TP/SL.
+  Esempi: "XAUUSD Buy Near 4550-52, TP1 4560, SL 4540", "Sell Above 28000, TP 27800, SL 28100".
+  entry_type:
+    - "breakout" se il msg usa "above"/"below"/"break"/"break of": entrata STOP al breakout
+    - "near" altrimenti (default): entrata LIMIT/MARKET al pullback
 
-Per simboli: #XAUUSD → "XAUUSD". Se non esplicito ma deducibile dal contesto → inferiscilo.
+▸ "close" — chiudi tutto subito. ESEMPI:
+  "Everyone close the trade", "Closing trade now", "Close the trade here",
+  "Everyone Close at Cost CMP X" (CMP = current market price)
+  NON è close:
+  - "take exit near X" dopo "first target done" → sl_move a BE
+  - "book profit X" → update informativo
 
-Esempi di sl_move:
-- "Everyone Hold With 4561 SL" → type=sl_move, new_sl=4561
-- "Move SL to breakeven" → type=sl_move, is_breakeven=true
-- "Trail SL to 4992" → type=sl_move, new_sl=4992
-- "Hold with 4546 stop" → type=sl_move, new_sl=4546
+▸ "sl_move" — sposta lo stoploss. ESEMPI:
+  "Move SL to 4550" → new_sl=4550, is_breakeven=false
+  "Everyone Hold With 4561 SL" → new_sl=4561, is_breakeven=false
+  "Trail SL to 4992" → new_sl=4992
+  "Move to cost / breakeven / entry" → is_breakeven=true, new_sl=null
+  "Cost to cost" → is_breakeven=true
+  "Take exit at cost" → is_breakeven=true
+
+▸ "update" — aggiornamento prezzo/stato del trade in corso. status_text DEVE essere preciso:
+  "1st/First Target Done" → status_text="first_target_hit"
+  "2nd/Second Target Done" → status_text="second_target_hit"
+  "3rd/Third/Last Target Done" → status_text="third_target_hit"
+  "All Targets Done" → status_text="all_targets_done"
+  "Near First Target" / "Approaching Target" → status_text="near_target"
+  "Safe Trail in Profits" / "Running in profits" → status_text="trail_active"
+  "$XXX Profit Running" → status_text="in_profit"
+  Solo "XAUUSD | 4550 To 4555" senza altro → status_text="price_update"
+  Altrimenti → status_text="general"
+  Estrai price_from e price_to dal pattern "X To Y" o "X to Y" se presente.
+
+▸ "reenter" — rientra nel trade appena chiuso: "enter again", "re-enter", "open again now"
+
+▸ "risky_flag" — segnala rischio elevato: "highly risky", "#risky", "aggressive", "#RiskyTrade"
+
+▸ "ignore" — watchlist ("add X to watchlist"), livelli giornalieri ("Support: ..."),
+  commenti senza azione ("good morning", news generiche).
+
+ESTRAZIONE NUMERI:
+- "Near 4550-52" / "Near-4550-52" → entry_low=4550, entry_high=4552 (espandi: 52 dopo 4550 = 4552)
+- "Near 213.500-213.530" → entry_low=213.500, entry_high=213.530
+- Simbolo: "#XAUUSD" → "XAUUSD". Se non esplicito ma deducibile → inferisci dal contesto.
+
+ROBUSTEZZA:
+- IGNORA caratteri markdown (`**`, `*`, `_`, `~`) ed emoji quando interpreti il significato.
+  "**1st** Target Done" e "1st Target Done" significano la stessa cosa.
+- IGNORA spazi multipli, newline, caratteri non-ASCII.
+- Se il messaggio è ambiguo o non rientra in nessuna categoria → type="ignore", status_text=null.
 """
 
 
@@ -171,10 +198,13 @@ def llm_to_parsed(data: dict):
         direction = data.get("direction")
         if not symbol or not direction:
             return "other", None
-        # Detection breakout dal raw text: "above"/"below" → entry_type=breakout
-        import re as _re_lp
+        # entry_type ora viene direttamente dal LLM (più affidabile della post-regex).
+        # Fallback regex se LLM non lo fornisce.
         raw_text = data.get("_raw", "") or ""
-        entry_type = "breakout" if _re_lp.search(r'\b(above|below)\b', raw_text, _re_lp.IGNORECASE) else "near"
+        entry_type = data.get("entry_type")
+        if entry_type not in ("near", "breakout"):
+            import re as _re_lp
+            entry_type = "breakout" if _re_lp.search(r'\b(above|below)\b', raw_text, _re_lp.IGNORECASE) else "near"
         return "signal", ParsedSignal(
             symbol=symbol,
             direction=direction,
@@ -214,11 +244,15 @@ def llm_to_parsed(data: dict):
 
     elif msg_type == "update":
         from parser import ParsedUpdate
+        # status_text ora viene direttamente dal LLM con valori semantici:
+        # first_target_hit, second_target_hit, third_target_hit, all_targets_done,
+        # near_target, trail_active, in_profit, price_update, general.
+        status = data.get("status_text") or "general"
         return "update", ParsedUpdate(
             symbol=data.get("symbol", ""),
             price_from=data.get("price_from"),
             price_to=data.get("price_to"),
-            status_text="update",
+            status_text=status,
             raw=data.get("_raw", ""),
         )
 
