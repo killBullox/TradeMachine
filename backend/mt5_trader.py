@@ -1948,6 +1948,77 @@ def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
         db.close()
 
 
+def drop_pending_missed_tp():
+    """Per ogni signal in stato 'pending' con ticket broker, verifica se il
+    prezzo corrente del nostro broker ha raggiunto/superato TP1 in direzione
+    favorevole. Se si', il trade e' un 'missed' (LIMIT/STOP mai filled mentre
+    il prezzo ha gia' fatto target). Drop i pending order broker + marca
+    signal cancelled. Indipendente da TG e parser.
+    """
+    from database import SessionLocal, Signal
+    import json as _json
+
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return []
+
+    db = SessionLocal()
+    dropped = []
+    try:
+        pending = db.query(Signal).filter(
+            Signal.status == "pending",
+            Signal.mt5_ticket.isnot(None),
+            Signal.tp1.isnot(None),
+        ).all()
+        for sig in pending:
+            mt5_sym = MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol)
+            tick = mt5.symbol_info_tick(mt5_sym)
+            if not tick or tick.bid <= 0 or tick.ask <= 0:
+                continue
+            is_buy = (sig.direction or "buy").lower() == "buy"
+            tp1 = float(sig.tp1)
+            # Per BUY: TP1 raggiunto quando bid >= tp1 (prezzo a cui chiuderemmo)
+            # Per SELL: TP1 raggiunto quando ask <= tp1
+            tp_reached = (is_buy and tick.bid >= tp1) or (not is_buy and tick.ask <= tp1)
+            if not tp_reached:
+                continue
+            # Drop: cancella pending broker + marca signal cancelled
+            tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
+            cancelled_count = 0
+            for t in tickets:
+                orders = mt5.orders_get(ticket=t)
+                if orders:
+                    mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": t})
+                    cancelled_count += 1
+            reason = (f"TP1 {tp1} raggiunto dal prezzo broker "
+                      f"(bid={tick.bid} ask={tick.ask}) ma LIMIT/STOP mai filled. "
+                      f"Drop di {cancelled_count} pending broker.")
+            log(f"#{sig.id} {sig.symbol} {reason}")
+            _append_trade_log_mt5(sig, "pending_dropped_missed_tp", reason,
+                {"tp1": tp1, "bid": tick.bid, "ask": tick.ask, "cancelled": cancelled_count,
+                 "trigger": "price_check"})
+            sig.status = "cancelled"
+            sig.notes = (sig.notes or "") + (
+                f" [Pending mai filled: prezzo ha raggiunto TP1 {tp1} ma LIMIT/STOP non attivato]"
+            )
+            from datetime import datetime as _dt
+            sig.updated_at = _dt.utcnow()
+            sig.closed_at = _dt.utcnow()
+            db.add(sig)
+            dropped.append(sig.id)
+            # EMA: registra caso missed
+            try:
+                analyze_ema_case(sig.id, "price_missed_tp")
+            except Exception:
+                pass
+        if dropped:
+            db.commit()
+            log(f"drop_pending_missed_tp: cancellati {len(dropped)} signals: {dropped}")
+        return dropped
+    finally:
+        db.close()
+
+
 def cancel_expired_signals():
     """
     1. Cancella segnali attivi (open/tp1/tp2) senza mt5_ticket: orphan, mai
@@ -2221,6 +2292,11 @@ def sync_positions() -> list:
 
     # Riprocessa eventuali pending SL requests (modify rifiutati per 'Invalid sl')
     process_pending_sl_requests()
+
+    # ROBUSTEZZA: drop pending signals il cui TP1 e' stato raggiunto/superato
+    # dal prezzo broker mentre il LIMIT/STOP non si e' mai fillato.
+    # Indipendente da TG, parser, markdown — usa solo prezzi reali Avatrade.
+    drop_pending_missed_tp()
 
     mt5 = _get_mt5()
     if mt5 is None:
