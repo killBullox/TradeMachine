@@ -558,6 +558,21 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
         log(f"[Parser] Errore LLM, uso regex: {str(e)[:80]}")
         msg_type, parsed = parse_message(text)
 
+    # FALLBACK REENTER: se LLM/regex hanno classificato come "other" o "update" ma
+    # il msg contiene chiaramente un pattern di reenter ("re enter", "re-enter",
+    # "reenter", "enter again"), forza reenter. Cattura casi come #345-style:
+    # "Sl hit In Sudden Spike Risky Can Re enter Here With Same Sl" → other.
+    if msg_type in ("other", "update", "ignore") and text:
+        import re as _re_re
+        if _re_re.search(r'\b(re\s*-?\s*enter|reenter|enter\s+again|open\s+again)\b', text, _re_re.IGNORECASE):
+            from parser import ParsedReenter as _PR
+            # Tenta a estrarre il simbolo dal testo (se presente)
+            sym_m = _re_re.search(r'#([A-Z]{3,8})', text)
+            forced_sym = sym_m.group(1).upper() if sym_m else None
+            parsed = _PR(symbol=forced_sym, raw=text)
+            msg_type = "reenter"
+            log(f"[FallbackReenter] msg riclassificato 'other/update' → 'reenter' (sym={forced_sym})")
+
     db = SessionLocal()
     try:
         _save_raw(db, msg_id, sender, text, msg_type)

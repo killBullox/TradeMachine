@@ -84,7 +84,15 @@ CLASSIFICAZIONE TYPE:
   Altrimenti → status_text="general"
   Estrai price_from e price_to dal pattern "X To Y" o "X to Y" se presente.
 
-▸ "reenter" — rientra nel trade appena chiuso: "enter again", "re-enter", "open again now"
+▸ "reenter" — rientra nel trade. Anche quando il msg menziona "SL hit" o "loss" PRIMA,
+  l'intenzione principale e' "rientra". ESEMPI tutti type=reenter:
+  - "enter again", "everyone enter again now"
+  - "re-enter", "reenter", "Re enter" (con spazio), "RE-ENTER"
+  - "open again", "open again now"
+  - "Sl hit In Sudden Spike Risky Can Re enter Here With Same Sl" → reenter
+    (il "Sl hit" e' contesto, l'azione e' "Re enter ... With Same Sl")
+  - "SL hit but re-enter at same levels" → reenter
+  - "Stop loss hit, you can re-enter here" → reenter
 
 ▸ "risky_flag" — segnala rischio elevato: "highly risky", "#risky", "aggressive", "#RiskyTrade"
 
