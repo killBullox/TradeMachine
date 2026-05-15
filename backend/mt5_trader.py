@@ -967,58 +967,69 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
                 sl_raw = sl_corrected
                 sl = sl_corrected
 
-    # PRE-R/R: TP1 fuori scala vs TP2/TP3 → typo single-digit. Caso #351:
-    # entry 4550, TP1 4654 (typo, dovrebbe 4554), TP2 4558, TP3 4564. La R/R
-    # guard scarterebbe per ratio 20:1 ma TP2/TP3 mostrano chiaramente che
-    # TP1 e' il typo. Cerca single-digit fix che porta TP1 in (entry, TP2)
-    # per BUY o (TP2, entry) per SELL.
+    # PRE-R/R: TP_n fuori scala vs gli altri TP → typo single-digit isolato.
+    # Casi:
+    #  - #351: entry 4550, TP1 4654 (typo), TP2 4558, TP3 4564 → fix TP1 4554
+    #  - speculare: entry 4550, TP1 4554, TP2 4658 (typo), TP3 4564 → fix TP2 4558
+    #  - speculare: entry 4550, TP1 4554, TP2 4558, TP3 4664 (typo) → fix TP3 4564
+    # Ogni TP_n viene controllato vs MEDIA degli altri due. Se fuori scala >5x,
+    # cerca single-digit replacement che soddisfi il vincolo sandwich corretto:
+    #   BUY:  entry < TP1 < TP2 < TP3
+    #   SELL: entry > TP1 > TP2 > TP3
     if tps_raw and len(tps_raw) >= 2:
-        tp1_n, tp1_v = tps_raw[0]
-        tp2_v = float(tps_raw[1][1])
         e_f0 = float(entry)
-        tp1_f = float(tp1_v)
-        tp1_dist0 = abs(tp1_f - e_f0)
-        # Distanze TP successivi (2,3) come reference
-        other_dists = [abs(float(t) - e_f0) for _, t in tps_raw[1:]]
-        if other_dists:
+        # Snapshot dei TP attuali per usarli come reference (i fix successivi
+        # vengono applicati a sig ma la lista locale resta come baseline).
+        tp_vals = {n: float(v) for n, v in tps_raw}
+        for target_n in sorted(tp_vals.keys()):
+            target_v = tp_vals[target_n]
+            others = [tp_vals[n] for n in tp_vals if n != target_n]
+            if not others:
+                continue
+            target_dist = abs(target_v - e_f0)
+            other_dists = [abs(o - e_f0) for o in others]
             other_avg = sum(other_dists) / len(other_dists)
-            if other_avg > 0 and tp1_dist0 > other_avg * 5:
-                # TP1 fuori scala. Cerca single-digit fix in (entry, TP2) per BUY
-                # o (TP2, entry) per SELL.
-                tp1_str = f"{tp1_f:.{digits}f}" if digits else f"{int(tp1_f)}"
-                cands_pre = []
-                seen_pre = set()
-                for ip, ch in enumerate(tp1_str):
-                    if not ch.isdigit():
+            if other_avg <= 0 or target_dist <= other_avg * 5:
+                continue
+            # Calcola bounds del sandwich per il target_n
+            # Per BUY: TP_n deve stare TRA TP_{n-1} (o entry) e TP_{n+1} (o +inf)
+            # Per SELL: simmetrico
+            prev_v = tp_vals.get(target_n - 1, e_f0) if target_n - 1 >= 1 else e_f0
+            next_v = tp_vals.get(target_n + 1) if target_n + 1 in tp_vals else None
+            tgt_str = f"{target_v:.{digits}f}" if digits else f"{int(target_v)}"
+            cands_pre = []
+            seen_pre = set()
+            for ip, ch in enumerate(tgt_str):
+                if not ch.isdigit():
+                    continue
+                for d in "0123456789":
+                    if d == ch:
                         continue
-                    for d in "0123456789":
-                        if d == ch:
-                            continue
-                        cs = tp1_str[:ip] + d + tp1_str[ip+1:]
-                        try:
-                            cv = float(cs)
-                        except ValueError:
-                            continue
-                        if cv in seen_pre or cv <= 0:
-                            continue
-                        seen_pre.add(cv)
-                        # Lato giusto + dentro range (entry, TP2) per BUY,
-                        # (TP2, entry) per SELL
-                        if is_buy:
-                            if cv > e_f0 and cv < tp2_v:
-                                cands_pre.append(cv)
-                        else:
-                            if cv < e_f0 and cv > tp2_v:
-                                cands_pre.append(cv)
-                if len(cands_pre) == 1:
-                    fix = round(cands_pre[0], digits)
-                    log(f"#{sig.id} TP1={tp1_f} typo single-digit (fuori scala vs TP2={tp2_v}) → corretto a {fix}")
-                    _append_trade_log_mt5(sig, "mt5_tp_fix",
-                        f"TP1 corretto da {tp1_f} a {fix} (typo single-digit, fuori scala vs TP2)")
-                    setattr(sig, f'tp1', fix)
-                    sig.notes = (sig.notes or "") + f" [TP1 auto-corretto: {tp1_f} -> {fix}]"
-                    # aggiorna tps_raw
-                    tps_raw = [(i+1, getattr(sig, f'tp{i+1}')) for i in range(3) if getattr(sig, f'tp{i+1}', None)]
+                    cs = tgt_str[:ip] + d + tgt_str[ip+1:]
+                    try:
+                        cv = float(cs)
+                    except ValueError:
+                        continue
+                    if cv in seen_pre or cv <= 0:
+                        continue
+                    seen_pre.add(cv)
+                    # Vincolo sandwich
+                    if is_buy:
+                        if cv > prev_v and (next_v is None or cv < next_v):
+                            cands_pre.append(cv)
+                    else:
+                        if cv < prev_v and (next_v is None or cv > next_v):
+                            cands_pre.append(cv)
+            if len(cands_pre) == 1:
+                fix = round(cands_pre[0], digits)
+                log(f"#{sig.id} TP{target_n}={target_v} typo single-digit (fuori scala vs altri TP) → corretto a {fix}")
+                _append_trade_log_mt5(sig, "mt5_tp_fix",
+                    f"TP{target_n} corretto da {target_v} a {fix} (single-digit, sandwich constraint)")
+                setattr(sig, f'tp{target_n}', fix)
+                sig.notes = (sig.notes or "") + f" [TP{target_n} auto-corretto: {target_v} -> {fix}]"
+                tp_vals[target_n] = fix
+        # aggiorna tps_raw dopo eventuali fix
+        tps_raw = [(i+1, getattr(sig, f'tp{i+1}')) for i in range(3) if getattr(sig, f'tp{i+1}', None)]
 
     # Sanity check R/R: se TP1 e SL sono sproporzionati di oltre 5x in qualunque
     # direzione il segnale è probabilmente sbagliato (typo grave del trader).
