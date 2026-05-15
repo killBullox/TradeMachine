@@ -1031,6 +1031,124 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         # aggiorna tps_raw dopo eventuali fix
         tps_raw = [(i+1, getattr(sig, f'tp{i+1}')) for i in range(3) if getattr(sig, f'tp{i+1}', None)]
 
+    # PRE-R/R: SL single-digit fix (oltre il lato-sbagliato gia' coperto sopra).
+    # Caso: SL valore numerico anomalo (distanza da entry >5x o <0.2x della
+    # distanza tipica TP1). Esempio: BUY entry=4550 TP1=4555 SL=4575 (typo:
+    # voleva 4545). SL_dist=25 vs TP1_dist=5 → ratio 5 → fuori scala.
+    # Vincoli: candidato deve essere su lato giusto (sotto entry per BUY),
+    # con SL_dist nuovo in (0.3x, 3x) della TP1_dist.
+    if sl_raw and tps_raw:
+        e_f0 = float(entry)
+        sl_f = float(sl_raw)
+        tp1_v = float(tps_raw[0][1])
+        sl_dist0 = abs(e_f0 - sl_f)
+        tp1_dist0 = abs(e_f0 - tp1_v)
+        # Lato corretto?
+        side_ok_now = (is_buy and sl_f < e_f0) or (not is_buy and sl_f > e_f0)
+        if side_ok_now and tp1_dist0 > 0:
+            ratio = sl_dist0 / tp1_dist0
+            # Anomalo se SL distance >5x TP1 distance o <0.2x
+            if ratio > 5 or ratio < 0.2:
+                sl_str = f"{sl_f:.{digits}f}" if digits else f"{int(sl_f)}"
+                cands_sl = []
+                seen_sl = set()
+                for ip, ch in enumerate(sl_str):
+                    if not ch.isdigit():
+                        continue
+                    for d in "0123456789":
+                        if d == ch:
+                            continue
+                        cs = sl_str[:ip] + d + sl_str[ip+1:]
+                        try:
+                            cv = float(cs)
+                        except ValueError:
+                            continue
+                        if cv in seen_sl or cv <= 0:
+                            continue
+                        seen_sl.add(cv)
+                        # Lato corretto + nuovo SL_dist in range plausibile
+                        new_side_ok = (is_buy and cv < e_f0) or (not is_buy and cv > e_f0)
+                        if not new_side_ok:
+                            continue
+                        new_dist = abs(e_f0 - cv)
+                        if new_dist <= 0:
+                            continue
+                        new_ratio = new_dist / tp1_dist0
+                        if 0.3 <= new_ratio <= 3:
+                            cands_sl.append(cv)
+                if len(cands_sl) == 1:
+                    fix = round(cands_sl[0], digits)
+                    log(f"#{sig.id} SL={sl_f} typo single-digit (dist anomala vs TP1) → corretto a {fix}")
+                    _append_trade_log_mt5(sig, "mt5_sl_autocorrect",
+                        f"SL corretto da {sl_f} a {fix} (single-digit, dist anomala vs TP1)")
+                    sig.notes = (sig.notes or "") + f" [SL auto-corretto: {sl_f} -> {fix}]"
+                    sl_raw = fix
+                    sl = fix
+
+    # PRE-R/R: Entry single-digit fix (oltre il "wrong side" gia' coperto da
+    # mt5_entry_fix che usa prezzo corrente). Caso: entry coerente con SL/TP1
+    # in lato ma valore "lontano dal pattern" formato da SL+TP. Es: BUY signal
+    # SL=4545, TP1=4554, entry=4548 (typo: voleva 4550). Entry_dist da SL=3,
+    # da TP1=6 — asimmetrico. Cerca single-digit fix che renda entry vicino
+    # al midpoint di SL e TP1, e dentro al range broker.
+    if sl_raw and tps_raw:
+        e_f0 = float(entry)
+        sl_f = float(sl_raw)
+        tp1_v = float(tps_raw[0][1])
+        # Verifica sandwich + asymmetric distance
+        if is_buy:
+            in_sandwich = sl_f < e_f0 < tp1_v
+        else:
+            in_sandwich = tp1_v < e_f0 < sl_f
+        if in_sandwich:
+            d_to_sl = abs(e_f0 - sl_f)
+            d_to_tp1 = abs(e_f0 - tp1_v)
+            total_range = d_to_sl + d_to_tp1
+            if total_range > 0:
+                # Posizione dell'entry nel range SL-TP1 (0=SL, 1=TP1)
+                pos_in_range = d_to_sl / total_range
+                # Anomalo se entry occupa <10% o >90% del range
+                if pos_in_range < 0.10 or pos_in_range > 0.90:
+                    e_str = f"{e_f0:.{digits}f}" if digits else f"{int(e_f0)}"
+                    cands_e = []
+                    seen_e = set()
+                    for ip, ch in enumerate(e_str):
+                        if not ch.isdigit():
+                            continue
+                        for d in "0123456789":
+                            if d == ch:
+                                continue
+                            cs = e_str[:ip] + d + e_str[ip+1:]
+                            try:
+                                cv = float(cs)
+                            except ValueError:
+                                continue
+                            if cv in seen_e or cv <= 0:
+                                continue
+                            seen_e.add(cv)
+                            # Sandwich + posizione in range plausibile
+                            if is_buy:
+                                ok = sl_f < cv < tp1_v
+                            else:
+                                ok = tp1_v < cv < sl_f
+                            if not ok:
+                                continue
+                            new_d_to_sl = abs(cv - sl_f)
+                            new_pos = new_d_to_sl / (new_d_to_sl + abs(cv - tp1_v))
+                            if 0.20 <= new_pos <= 0.80:
+                                cands_e.append(cv)
+                    if len(cands_e) == 1:
+                        fix = round(cands_e[0], digits)
+                        log(f"#{sig.id} Entry={e_f0} typo single-digit (asimmetrico in sandwich SL-TP1) → corretto a {fix}")
+                        _append_trade_log_mt5(sig, "mt5_entry_fix",
+                            f"Entry corretto da {e_f0} a {fix} (single-digit, asimmetrico vs SL/TP1)")
+                        sig.entry_price = fix
+                        if not sig.entry_price_high or sig.entry_price_high == e_f0:
+                            sig.entry_price_high = fix
+                        sig.notes = (sig.notes or "") + f" [Entry auto-corretto: {e_f0} -> {fix}]"
+                        entry = fix
+                        entry_high = sig.entry_price_high
+
     # Sanity check R/R: se TP1 e SL sono sproporzionati di oltre 5x in qualunque
     # direzione il segnale è probabilmente sbagliato (typo grave del trader).
     # Caso A (TP1 troppo lontano): "Sell 4734 SL 4742 TP1 4624" — voleva entry
