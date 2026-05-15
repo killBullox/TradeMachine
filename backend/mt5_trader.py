@@ -595,6 +595,84 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         _append_trade_log_mt5(sig, "mt5_skip", "Nessun entry price definito, ordini non inviati")
         return []
 
+    # ────────────────────────────────────────────────────────────────────────
+    # AUTO-CORREZIONE TYPO SISTEMATICO: il trader scrive una cifra sbagliata
+    # nello stesso slot per TUTTI i livelli (es. #348: "4653-54 SL 4658 TP1 4650"
+    # invece di "4553-54 SL 4558 TP1 4550" — ha messo "6" invece di "5" nella
+    # posizione delle centinaia in tutti i numeri). Detection:
+    #   1. Confronta la media dei livelli signal col prezzo broker corrente.
+    #   2. Se la media e' significativamente off (>=1%), prova a cambiare
+    #      una stessa cifra in una stessa posizione su tutti i livelli.
+    #   3. Se esiste un cambio uniforme che porta la media entro 0.5%, applicalo.
+    # Conservativo: richiede che tutti i livelli abbiano stessa cifra in quella
+    # posizione (origine comune del typo), niente over-correzione.
+    try:
+        levels = []
+        if sig.entry_price: levels.append(float(sig.entry_price))
+        if sig.entry_price_high and sig.entry_price_high != sig.entry_price:
+            levels.append(float(sig.entry_price_high))
+        if sl_raw: levels.append(float(sl_raw))
+        for tp_n in (1, 2, 3):
+            v = getattr(sig, f'tp{tp_n}', None)
+            if v: levels.append(float(v))
+        cur_price = (tick.bid + tick.ask) / 2 if tick and tick.bid > 0 and tick.ask > 0 else None
+        if cur_price and len(levels) >= 3:
+            avg = sum(levels) / len(levels)
+            offset_pct = abs(avg - cur_price) / cur_price
+            if offset_pct >= 0.01:
+                # Tenta digit replacement uniforme sull'INTERO part
+                int_levels = [int(round(l)) for l in levels]
+                str_int = [str(l) for l in int_levels]
+                if len(set(len(s) for s in str_int)) == 1:
+                    n_digits = len(str_int[0])
+                    best = None
+                    for pos in range(n_digits):
+                        digits_at_pos = [s[pos] for s in str_int]
+                        if len(set(digits_at_pos)) != 1:
+                            continue
+                        original = digits_at_pos[0]
+                        for repl in "0123456789":
+                            if repl == original:
+                                continue
+                            try:
+                                # Applica replacement preservando i decimali
+                                new_levels = []
+                                for orig, l_int in zip(levels, int_levels):
+                                    decimal_part = orig - l_int
+                                    new_int = int(str(l_int)[:pos] + repl + str(l_int)[pos+1:])
+                                    new_levels.append(new_int + decimal_part)
+                                new_avg = sum(new_levels) / len(new_levels)
+                                new_off = abs(new_avg - cur_price) / cur_price
+                                if new_off < 0.005:
+                                    if best is None or new_off < best[0]:
+                                        best = (new_off, pos, original, repl, new_levels)
+                            except Exception:
+                                continue
+                    if best:
+                        new_off, pos, original, repl, new_levels = best
+                        log(f"#{sig.id} TYPO SISTEMATICO rilevato: cifra '{original}' in pos {pos} → '{repl}' su tutti i livelli (signal_avg ${avg:.2f} vs broker ${cur_price:.2f})")
+                        # Applica nuovi valori in ordine: entry_low, entry_high (se presente), sl, tp1, tp2, tp3
+                        idx = 0
+                        if sig.entry_price:
+                            sig.entry_price = round(new_levels[idx], digits); entry = sig.entry_price; idx += 1
+                        if sig.entry_price_high and sig.entry_price_high != (sig.entry_price if idx == 0 else None):
+                            sig.entry_price_high = round(new_levels[idx], digits); entry_high = sig.entry_price_high; idx += 1
+                        if sl_raw:
+                            sl_raw = round(new_levels[idx], digits); sl = sl_raw; idx += 1
+                        for tp_n in (1, 2, 3):
+                            if getattr(sig, f'tp{tp_n}', None):
+                                setattr(sig, f'tp{tp_n}', round(new_levels[idx], digits)); idx += 1
+                        # Aggiorna anche tps_raw e altre derivate
+                        tps_raw = [(i+1, getattr(sig, f'tp{i+1}')) for i in range(3) if getattr(sig, f'tp{i+1}', None)]
+                        sig.notes = (sig.notes or "") + f" [Typo sistematico corretto: '{original}' pos {pos} → '{repl}']"
+                        _append_trade_log_mt5(sig, "mt5_systematic_typo_fix",
+                            f"Typo sistematico: cifra '{original}' in posizione {pos} sostituita con '{repl}' su tutti i livelli. "
+                            f"Signal avg era ${avg:.2f}, broker ${cur_price:.2f}, ora avg ${sum(new_levels)/len(new_levels):.2f}.",
+                            {"position": pos, "old": original, "new": repl, "new_levels": new_levels})
+    except Exception as _e:
+        log(f"#{sig.id} typo detection errore: {_e}")
+    # ────────────────────────────────────────────────────────────────────────
+
     # Auto-correzione TP con typo (zero di troppo/meno): confronta con gli altri TP e l'entry
     valid_tps = [float(getattr(sig, f'tp{i}')) for i in range(1, 4) if getattr(sig, f'tp{i}', None)]
     e_f = float(entry)
