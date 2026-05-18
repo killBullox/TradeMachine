@@ -2905,8 +2905,13 @@ def sync_positions() -> list:
                             # cosi' la UI mostra il valore corrente invece dell'originale del segnale.
                             sig.stoploss = target_sl
 
-            # Aggiorna P&L live (somma profit aperte + chiuse parziali)
-            sig.pnl_usd = round(total_profit, 2)
+            # Aggiorna P&L live (somma profit aperte + chiuse parziali).
+            # GUARD: per signal gia' completed (closed_at settato), NON sovrascrivere
+            # pnl_usd. Su cicli sync successivi total_profit puo' tornare 0 perche'
+            # i deal cadono fuori dalla hist_from window (1h-7d), e sovrascriverebbe
+            # il valore corretto salvato al momento del completed (caso #355).
+            if sig.closed_at is None:
+                sig.pnl_usd = round(total_profit, 2)
 
             # Aggiorna position_size con la somma reale dei lotti su MT5,
             # così il valore mostrato nel frontend riflette quello effettivo
