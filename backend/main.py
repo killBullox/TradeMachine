@@ -545,6 +545,23 @@ def get_performance(
     today_losses = sum(1 for s in today_closed if s.pnl_usd and s.pnl_usd < 0)
     today_trades = len(today_closed)
 
+    # Sharpe ratio annualizzato su P&L giornalieri (risk-free = 0)
+    from collections import defaultdict
+    import math
+    daily_pnl_map = defaultdict(float)
+    for s in closed:
+        d = (s.closed_at or s.created_at)
+        if d and s.pnl_usd is not None:
+            daily_pnl_map[d.date()] += s.pnl_usd
+    daily_vals = list(daily_pnl_map.values())
+    sharpe = None
+    if len(daily_vals) >= 2:
+        mean = sum(daily_vals) / len(daily_vals)
+        var = sum((x - mean) ** 2 for x in daily_vals) / (len(daily_vals) - 1)
+        std = math.sqrt(var)
+        if std > 0:
+            sharpe = round((mean / std) * math.sqrt(252), 2)
+
     # Daily drawdown: max peak-to-trough sulla equity intraday di oggi
     today_series = [s.pnl_usd for s in sorted(today_closed, key=lambda x: x.closed_at or x.created_at) if s.pnl_usd is not None]
     eq = 0.0; pk = 0.0; ddd = 0.0
@@ -581,6 +598,7 @@ def get_performance(
         "profit_factor": profit_factor,
         "max_drawdown_usd": max_dd,
         "daily_drawdown_usd": daily_dd,
+        "sharpe_ratio": sharpe,
         "best_streak": best_streak,
         "worst_streak": worst_streak,
         # Oggi

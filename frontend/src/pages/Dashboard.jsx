@@ -167,7 +167,7 @@ export default function Dashboard({ wsEvents }) {
 
       {/* Stats */}
       {perf && (
-        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-3 gap-4">
           <StatCard
             label="Segnali totali"
             value={<>{perf.total_signals ?? '—'} <span className="text-slate-500 text-lg font-normal">({perf.managed_signals ?? 0})</span></>}
@@ -194,6 +194,17 @@ export default function Dashboard({ wsEvents }) {
             value={<span className="text-amber-400">-{(perf.daily_drawdown_usd ?? 0).toFixed(2)}$</span>}
             icon={TrendingDown}
             color="bg-amber-900/40 text-amber-400"
+          />
+          <StatCard
+            label="Sharpe"
+            value={perf.sharpe_ratio != null ? perf.sharpe_ratio.toFixed(2) : '—'}
+            icon={BarChart3}
+            color={
+              perf.sharpe_ratio == null ? 'bg-slate-800 text-slate-400'
+              : perf.sharpe_ratio >= 2 ? 'bg-emerald-900/40 text-emerald-400'
+              : perf.sharpe_ratio >= 1 ? 'bg-sky-900/40 text-sky-400'
+              : 'bg-amber-900/40 text-amber-400'
+            }
           />
           <StatCard
             label="Max DD"
