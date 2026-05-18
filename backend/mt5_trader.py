@@ -596,7 +596,101 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         return []
 
     # ────────────────────────────────────────────────────────────────────────
-    # AUTO-CORREZIONE TYPO SISTEMATICO: il trader scrive una cifra sbagliata
+    # AUTO-CORREZIONE PRICE-ANCHORED (pipeline unificata): ancora al prezzo
+    # broker corrente, classifica ogni livello come OK/ANOMALO, genera
+    # candidati single-digit per gli ANOMALI scegliendo quello piu' vicino al
+    # prezzo, valida che il pattern complessivo (SL/entry/TP) sia semanticamente
+    # coerente per il side del trade. Copre:
+    #   - tipi misti (#356: entry/TP off ma SL corretto)
+    #   - typo sistematico uniforme (#348: tutti i livelli off di stessa cifra)
+    #   - typo isolato TP1/TP2/TP3 (#351 e simmetrici)
+    # Se applica fix uniforme + monotono, prosegue. Altrimenti fall-through
+    # ai check legacy (sistematico, sl_autocorrect, tp_fix) che gestiscono
+    # casi che la pipeline non puo' risolvere.
+    try:
+        cur_price = (tick.bid + tick.ask) / 2.0 if tick and tick.bid > 0 and tick.ask > 0 else None
+        if cur_price:
+            raw_levels = {}
+            if sig.entry_price: raw_levels['entry_low'] = float(sig.entry_price)
+            if sig.entry_price_high and sig.entry_price_high != sig.entry_price:
+                raw_levels['entry_high'] = float(sig.entry_price_high)
+            if sl_raw: raw_levels['sl'] = float(sl_raw)
+            for n in (1, 2, 3):
+                v = getattr(sig, f'tp{n}', None)
+                if v: raw_levels[f'tp{n}'] = float(v)
+            if len(raw_levels) >= 3:
+                # OK = entro 1% prezzo; ANOMALO = oltre 1%
+                ok_tol_pct = 0.01
+                ANOMALO_set = set()
+                for label, val in raw_levels.items():
+                    if abs(val - cur_price) > cur_price * ok_tol_pct:
+                        ANOMALO_set.add(label)
+                if ANOMALO_set:
+                    # Per ogni anomalo: cerca single-digit candidato piu' vicino
+                    # al prezzo entro 5% (filtro contro candidati assurdi)
+                    fixes = {}
+                    feasible = True
+                    for label in ANOMALO_set:
+                        val = raw_levels[label]
+                        val_str = f"{val:.{digits}f}" if digits else f"{int(val)}"
+                        cands = []
+                        seen = set()
+                        for ip, ch in enumerate(val_str):
+                            if not ch.isdigit():
+                                continue
+                            for d in "0123456789":
+                                if d == ch:
+                                    continue
+                                cs = val_str[:ip] + d + val_str[ip+1:]
+                                try:
+                                    cv = float(cs)
+                                except ValueError:
+                                    continue
+                                if cv in seen or cv <= 0:
+                                    continue
+                                seen.add(cv)
+                                if abs(cv - cur_price) <= cur_price * 0.05:
+                                    cands.append(cv)
+                        if not cands:
+                            feasible = False
+                            break
+                        fixes[label] = min(cands, key=lambda c: abs(c - cur_price))
+                    if feasible:
+                        # Valida monotonia del pattern dopo i fix
+                        new_levels = {l: fixes.get(l, raw_levels[l]) for l in raw_levels}
+                        order = [l for l in ('sl', 'entry_low', 'entry_high', 'tp1', 'tp2', 'tp3') if l in new_levels]
+                        seq = [new_levels[l] for l in order]
+                        if is_buy:
+                            monotone = all(seq[i] <= seq[i+1] for i in range(len(seq)-1))
+                        else:
+                            monotone = all(seq[i] >= seq[i+1] for i in range(len(seq)-1))
+                        if monotone and fixes:
+                            # Applica i fix
+                            if 'entry_low' in fixes:
+                                sig.entry_price = round(fixes['entry_low'], digits)
+                                entry = sig.entry_price
+                            if 'entry_high' in fixes:
+                                sig.entry_price_high = round(fixes['entry_high'], digits)
+                                entry_high = sig.entry_price_high
+                            if 'sl' in fixes:
+                                sig.stoploss = round(fixes['sl'], digits)
+                                sl_raw = sig.stoploss
+                                sl = sl_raw
+                            for n in (1, 2, 3):
+                                if f'tp{n}' in fixes:
+                                    setattr(sig, f'tp{n}', round(fixes[f'tp{n}'], digits))
+                            tps_raw = [(i+1, getattr(sig, f'tp{i+1}')) for i in range(3) if getattr(sig, f'tp{i+1}', None)]
+                            desc = "; ".join(f"{l}: {raw_levels[l]} → {round(fixes[l], digits)}" for l in fixes)
+                            log(f"#{sig.id} typo anchored fix (prezzo {cur_price:.2f}): {desc}")
+                            _append_trade_log_mt5(sig, "mt5_typo_anchored_fix",
+                                f"Typo anchored al prezzo {cur_price:.2f}: {desc}",
+                                {"price": cur_price, "fixes": {k: float(v) for k, v in fixes.items()}})
+                            sig.notes = (sig.notes or "") + f" [Typo anchored fix: {desc}]"
+    except Exception as _e:
+        log(f"#{sig.id} typo anchored pipeline errore: {_e}")
+    # ────────────────────────────────────────────────────────────────────────
+
+    # AUTO-CORREZIONE TYPO SISTEMATICO (legacy, fallback): il trader scrive una cifra sbagliata
     # nello stesso slot per TUTTI i livelli (es. #348: "4653-54 SL 4658 TP1 4650"
     # invece di "4553-54 SL 4558 TP1 4550" — ha messo "6" invece di "5" nella
     # posizione delle centinaia in tutti i numeri). Detection:
