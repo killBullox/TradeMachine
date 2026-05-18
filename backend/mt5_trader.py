@@ -2969,6 +2969,7 @@ def sync_positions() -> list:
                 sig.status     = new_status
                 sig.exit_price = close_price
                 sig.closed_at  = close_time
+                sig.pnl_usd    = round(total_profit, 2)
                 sig.updated_at = datetime.utcnow()
                 # Build_mt5_trade_log solo se trade_log proprio vuoto (legacy)
                 if not sig.trade_log:
