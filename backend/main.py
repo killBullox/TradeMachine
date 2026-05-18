@@ -545,6 +545,16 @@ def get_performance(
     today_losses = sum(1 for s in today_closed if s.pnl_usd and s.pnl_usd < 0)
     today_trades = len(today_closed)
 
+    # Daily drawdown: max peak-to-trough sulla equity intraday di oggi
+    today_series = [s.pnl_usd for s in sorted(today_closed, key=lambda x: x.closed_at or x.created_at) if s.pnl_usd is not None]
+    eq = 0.0; pk = 0.0; ddd = 0.0
+    for p in today_series:
+        eq += p
+        if eq > pk: pk = eq
+        d = pk - eq
+        if d > ddd: ddd = d
+    daily_dd = round(ddd, 2)
+
     # Risk settings
     rs = db.query(RiskSettings).first()
     risk_info = {
@@ -570,6 +580,7 @@ def get_performance(
         "avg_loss_usd": avg_loss,
         "profit_factor": profit_factor,
         "max_drawdown_usd": max_dd,
+        "daily_drawdown_usd": daily_dd,
         "best_streak": best_streak,
         "worst_streak": worst_streak,
         # Oggi

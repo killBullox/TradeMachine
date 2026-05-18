@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
-import { TrendingUp, TrendingDown, Target, ShieldAlert, Activity, DollarSign, Calendar, BarChart3 } from 'lucide-react'
+import { TrendingUp, TrendingDown, Target, ShieldAlert, Activity, DollarSign, Calendar, BarChart3, TrendingDown as DDIcon } from 'lucide-react'
 import TradeCard from '../components/TradeCard'
 
 function StatCard({ label, value, icon: Icon, color }) {
@@ -167,7 +167,7 @@ export default function Dashboard({ wsEvents }) {
 
       {/* Stats */}
       {perf && (
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-4 gap-4">
           <StatCard
             label="Segnali totali"
             value={<>{perf.total_signals ?? '—'} <span className="text-slate-500 text-lg font-normal">({perf.managed_signals ?? 0})</span></>}
@@ -188,6 +188,18 @@ export default function Dashboard({ wsEvents }) {
             value={<span className={perf.total_pnl_usd >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{perf.total_pnl_usd >= 0 ? '+' : ''}{perf.total_pnl_usd?.toFixed(2)}$</span>}
             icon={DollarSign}
             color={perf.total_pnl_usd >= 0 ? 'bg-emerald-900/40 text-emerald-400' : 'bg-rose-900/40 text-rose-400'}
+          />
+          <StatCard
+            label="Daily DD"
+            value={<span className="text-amber-400">-{(perf.daily_drawdown_usd ?? 0).toFixed(2)}$</span>}
+            icon={TrendingDown}
+            color="bg-amber-900/40 text-amber-400"
+          />
+          <StatCard
+            label="Max DD"
+            value={<span className="text-rose-400">-{(perf.max_drawdown_usd ?? 0).toFixed(2)}$</span>}
+            icon={DDIcon}
+            color="bg-rose-900/40 text-rose-400"
           />
         </div>
       )}
