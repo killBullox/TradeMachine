@@ -1511,7 +1511,7 @@ async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
                 "pip_size": pip_size, "results": results, "skipped": skipped_tickets}
 
     out = await asyncio.get_event_loop().run_in_executor(None, _do)
-    # Log nel trade_log
+    # Log nel trade_log + aggiorna sig.stoploss col SL reale applicato
     if out.get("ok"):
         try:
             log_list = json.loads(sig.trade_log) if sig.trade_log else []
@@ -1525,6 +1525,7 @@ async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
                 "tp_hit": out["tp_hit"],
             })
             sig.trade_log = json.dumps(log_list)
+            sig.stoploss = out["new_sl"]
             db.add(sig)
             db.commit()
         except Exception:

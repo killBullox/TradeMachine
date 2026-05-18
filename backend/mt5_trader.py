@@ -1915,6 +1915,7 @@ def process_pending_sl_requests():
                     f"SL pending {sl} applicato (bid={tick.bid} ask={tick.ask})")
                 _strip_pending_note(sig)
                 sig.notes = (sig.notes or "") + f" [SL pending {sl} applicato]"
+                sig.stoploss = sl
                 db.merge(sig)
                 db.commit()
                 _pending_sl_requests.pop(sig_id, None)
@@ -2806,6 +2807,9 @@ def sync_positions() -> list:
                             _append_trade_log_mt5(sig, "trail_applied",
                                 f"TP{tp_levels_hit} raggiunto: SL spostato a {target_sl} ({trail_label}) sui {len(affected_tickets)} ticket residui",
                                 {"price": target_sl, "rule": trail_label, "tp_hit": tp_levels_hit, "tickets": affected_tickets})
+                            # Aggiorna sig.stoploss con il SL reale applicato sul broker,
+                            # cosi' la UI mostra il valore corrente invece dell'originale del segnale.
+                            sig.stoploss = target_sl
 
             # Aggiorna P&L live (somma profit aperte + chiuse parziali)
             sig.pnl_usd = round(total_profit, 2)

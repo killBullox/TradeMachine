@@ -898,12 +898,14 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 sig.notes = (sig.notes or "") + f" [SL Move {new_sl} rifiutato → chiusura immediata: {closed_count}/{len(tickets)}]"
                                 log(f"[SLMove] #{sig.id} {sig.symbol} SL->{new_sl} RIFIUTATO -> chiusura immediata {closed_count}/{len(tickets)}")
                             else:
+                                old_db_sl = sig.stoploss
+                                sig.stoploss = new_sl  # allinea DB col SL reale sul broker
                                 _append_trade_log(sig, "sl_move",
-                                    f"SL Move da TG ({label}) applicato su {len(tickets)} ticket (DB stoploss invariato={sig.stoploss})",
-                                    {"new_sl": new_sl, "is_breakeven": parsed.is_breakeven, "tickets": tickets})
+                                    f"SL Move da TG ({label}) applicato su {len(tickets)} ticket (DB stoploss aggiornato: {old_db_sl} → {new_sl})",
+                                    {"new_sl": new_sl, "is_breakeven": parsed.is_breakeven, "tickets": tickets, "old_db_sl": old_db_sl})
                                 # Se c'era una pending precedente, viene sostituita: pulisci
                                 mt5_trader.clear_pending_sl(sig.id)
-                                log(f"[SLMove] #{sig.id} {sig.symbol} SL->{new_sl} su {len(tickets)} ticket (DB stoploss invariato={sig.stoploss})")
+                                log(f"[SLMove] #{sig.id} {sig.symbol} SL->{new_sl} su {len(tickets)} ticket (DB aggiornato)")
                             db.add(sig)
                     db.commit()
             except Exception as e:
