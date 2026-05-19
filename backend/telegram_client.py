@@ -942,6 +942,54 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         if parsed.is_breakeven and sig.actual_entry_price:
                             new_sl = sig.actual_entry_price
                         if new_sl:
+                            # ─── Validazione typo SL Move ancorata al prezzo ───
+                            # Regole:
+                            #  - BUY: SL deve stare SOTTO il prezzo corrente. Inoltre uno
+                            #    SL Move sensato tightens (sale, verso BE); allontanarsi
+                            #    sotto il vecchio SL e' tipicamente un typo.
+                            #  - SELL: simmetrico.
+                            #  - Se il valore proposto e' oltre il 2% dal prezzo o viola
+                            #    la direzione (allontanamento), tenta single-digit fix.
+                            try:
+                                cur_price = mt5_trader.get_current_price(sig.symbol)
+                                is_buy = (sig.direction or "").lower() == "buy"
+                                old_sl = sig.stoploss
+                                if cur_price:
+                                    if is_buy:
+                                        min_a = None
+                                        max_a = cur_price * 0.9999           # SL BUY deve stare sotto il prezzo
+                                    else:
+                                        min_a = cur_price * 1.0001           # SL SELL deve stare sopra il prezzo
+                                        max_a = None
+                                    # digits dal simbolo
+                                    try:
+                                        sym_info_v = mt5_trader._get_mt5().symbol_info(
+                                            mt5_trader.MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol))
+                                        digits_v = sym_info_v.digits if sym_info_v else 2
+                                    except Exception:
+                                        digits_v = 2
+                                    fixed_sl, was_fixed, reason = mt5_trader.fix_price_typo(
+                                        new_sl, cur_price, digits=digits_v,
+                                        min_allowed=min_a, max_allowed=max_a, anchor_tol_pct=0.02)
+                                    if was_fixed:
+                                        _append_trade_log(sig, "sl_move_typo_fixed",
+                                            f"SL Move TG ({new_sl}) incoerente col prezzo {cur_price:.{digits_v}f} "
+                                            f"e/o col vecchio SL {old_sl}: auto-corretto a {fixed_sl}.",
+                                            {"original": new_sl, "fixed": fixed_sl, "price": cur_price,
+                                             "old_sl": old_sl, "reason": reason})
+                                        log(f"[SLMove] #{sig.id} {sig.symbol} typo: {new_sl} -> {fixed_sl} ({reason})")
+                                        new_sl = fixed_sl
+                                    elif reason == "no_fix":
+                                        _append_trade_log(sig, "sl_move_rejected",
+                                            f"SL Move TG ({new_sl}) ignorato: incoerente col prezzo {cur_price:.{digits_v}f} "
+                                            f"e/o col vecchio SL {old_sl}, nessuna correzione single-digit plausibile.",
+                                            {"proposed": new_sl, "price": cur_price, "old_sl": old_sl,
+                                             "min_allowed": min_a, "max_allowed": max_a})
+                                        log(f"[SLMove] #{sig.id} {sig.symbol} RIFIUTATO {new_sl} (no fix plausibile)")
+                                        db.add(sig)
+                                        continue
+                            except Exception as _e:
+                                log(f"[SLMove] #{sig.id} validazione typo errore: {str(_e)[:80]}")
                             tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
                             failed_invalid_sl = False
                             for ticket in tickets:

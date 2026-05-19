@@ -1851,6 +1851,76 @@ def _send_with_retry(mt5, request: dict, label: str, attempts: int = 3, delay: f
     return False, last_result, last_err
 
 
+def get_current_price(symbol: str) -> Optional[float]:
+    """Ritorna il prezzo medio (bid+ask)/2 corrente del simbolo, o None se non disponibile."""
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return None
+    try:
+        mt5_sym = MT5_SYMBOL_MAP.get(symbol.upper(), symbol)
+        if not mt5.symbol_select(mt5_sym, True):
+            return None
+        tick = mt5.symbol_info_tick(mt5_sym)
+        if tick and tick.bid > 0 and tick.ask > 0:
+            return (tick.bid + tick.ask) / 2.0
+    except Exception:
+        pass
+    return None
+
+
+def fix_price_typo(value: float, anchor_price: float, digits: int = 2,
+                   min_allowed: Optional[float] = None,
+                   max_allowed: Optional[float] = None,
+                   anchor_tol_pct: float = 0.02) -> tuple:
+    """Validazione/correzione single-digit typo per un singolo prezzo, ancorato
+    al prezzo broker corrente con vincoli opzionali min/max.
+
+    Ritorna (corrected_value, was_corrected, reason).
+    Se value e' gia' coerente (entro anchor_tol_pct dal prezzo e dentro min/max),
+    ritorna (value, False, "ok"). Altrimenti tenta tutte le variazioni single-digit
+    e sceglie quella entro anchor_tol_pct dal prezzo E che rispetta min/max,
+    preferendo la piu' vicina al prezzo. Se nessun candidato e' valido,
+    ritorna (value, False, "no_fix").
+    """
+    if anchor_price is None or anchor_price <= 0 or value is None or value <= 0:
+        return value, False, "no_anchor"
+
+    def _in_bounds(v):
+        if min_allowed is not None and v < min_allowed:
+            return False
+        if max_allowed is not None and v > max_allowed:
+            return False
+        return True
+
+    near_price = abs(value - anchor_price) <= anchor_price * anchor_tol_pct
+    if near_price and _in_bounds(value):
+        return value, False, "ok"
+
+    val_str = f"{value:.{digits}f}" if digits else f"{int(value)}"
+    seen = set()
+    cands = []
+    for ip, ch in enumerate(val_str):
+        if not ch.isdigit():
+            continue
+        for d in "0123456789":
+            if d == ch:
+                continue
+            cs = val_str[:ip] + d + val_str[ip+1:]
+            try:
+                cv = float(cs)
+            except ValueError:
+                continue
+            if cv <= 0 or cv in seen:
+                continue
+            seen.add(cv)
+            if abs(cv - anchor_price) <= anchor_price * anchor_tol_pct and _in_bounds(cv):
+                cands.append(cv)
+    if not cands:
+        return value, False, "no_fix"
+    best = min(cands, key=lambda c: abs(c - anchor_price))
+    return round(best, digits), True, f"single_digit_fix: {value} -> {best}"
+
+
 def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
     """Modifica lo SL di una posizione aperta. Skip silenzioso se è già al valore
     richiesto. Retry breve (3 tentativi) se MT5 risponde None o errore transitorio."""
