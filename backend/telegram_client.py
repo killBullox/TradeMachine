@@ -705,45 +705,117 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 semantic_hit_statuses = ("first_target_hit", "second_target_hit",
                                          "third_target_hit", "all_targets_done")
                 is_target_hit = (parsed.status_text or "") in semantic_hit_statuses
+                # Determina livello TP raggiunto (1/2/3, oppure 99=all)
+                tp_level_hit = 0
+                status_map = {"first_target_hit": 1, "second_target_hit": 2,
+                              "third_target_hit": 3, "all_targets_done": 99}
+                if is_target_hit:
+                    tp_level_hit = status_map.get(parsed.status_text or "", 0)
+                raw_combo = (parsed.status_text or "") + " " + (parsed.raw or "") + " " + (text or "")
+                normalized = _re.sub(r'[^\w\s]+', ' ', raw_combo.lower())
+                normalized = _re.sub(r'\s+', ' ', normalized)
                 if not is_target_hit:
-                    raw_combo = (parsed.status_text or "") + " " + (parsed.raw or "") + " " + (text or "")
-                    normalized = _re.sub(r'[^\w\s]+', ' ', raw_combo.lower())
-                    normalized = _re.sub(r'\s+', ' ', normalized)
-                    is_target_hit = bool(_re.search(r'\b(1st|first|2nd|second|3rd|third|all|last)\s+target\s+done\b', normalized))
-                if is_target_hit and parsed.symbol and mt5_trader.is_enabled():
-                    # Cerca pending dello stesso simbolo CON ticket broker
-                    pending_sigs = db.query(Signal).filter(
-                        Signal.status == "pending",
-                        Signal.mt5_ticket.isnot(None),
-                        Signal.symbol == parsed.symbol,
+                    m = _re.search(r'\b(1st|first|2nd|second|3rd|third|all|last)\s+target\s+done\b', normalized)
+                    if m:
+                        is_target_hit = True
+                        kw = m.group(1)
+                        tp_level_hit = {"1st":1,"first":1,"2nd":2,"second":2,
+                                        "3rd":3,"third":3,"all":99,"last":99}.get(kw, 1)
+                # Fallback symbol extraction se LLM non l'ha messo: cerca #SYMBOL nel testo
+                detected_symbol = parsed.symbol
+                if is_target_hit and not detected_symbol and text:
+                    sm = _re.search(r'#([A-Z]{3,10})', text.upper())
+                    if sm:
+                        detected_symbol = sm.group(1)
+                if is_target_hit and detected_symbol and mt5_trader.is_enabled():
+                    # Tutti i signal del simbolo non ancora chiusi (pending o open/tp1/tp2)
+                    affected_sigs = db.query(Signal).filter(
+                        Signal.status.in_(("pending", "open", "tp1", "tp2")),
+                        Signal.mt5_tickets.isnot(None),
+                        Signal.symbol == detected_symbol,
                     ).all()
-                    for sig in pending_sigs:
+                    mt5_inst = mt5_trader._get_mt5()
+                    sigs_to_ema = []
+                    for sig in affected_sigs:
                         tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
-                        cancelled_count = 0
-                        mt5_inst = mt5_trader._get_mt5()
+                        cancelled_pending = 0
+                        closed_at_market = 0
+                        sl_moved = 0
+                        be_sl = None
                         if mt5_inst:
+                            # Calcola SL target per BE (trail) sui residui aperti.
+                            pip_size = 0.0
+                            try:
+                                from mt5_trader import MT5_SYMBOL_MAP as _MAP
+                                sym_info = mt5_inst.symbol_info(_MAP.get(sig.symbol.upper(), sig.symbol))
+                                if sym_info:
+                                    pip_size = sym_info.point * 10
+                            except Exception:
+                                pass
+                            is_buy = (sig.direction or "").lower() == "buy"
+                            entry_anchor = sig.actual_entry_price or sig.entry_price
+                            if entry_anchor and pip_size > 0:
+                                be_sl = round(entry_anchor + pip_size, 5) if is_buy else round(entry_anchor - pip_size, 5)
+
+                            # Determina mapping ticket→TP livello (dal trade_log mt5_order_sent)
+                            ticket_tp_level = {}
+                            try:
+                                tl = _json.loads(sig.trade_log) if sig.trade_log else []
+                                for ev in tl:
+                                    if ev.get("event") == "mt5_order_sent":
+                                        det = ev.get("detail", "")
+                                        mt = _re.search(r'TP(\d):\s*ticket=(\d+)', det)
+                                        if mt:
+                                            ticket_tp_level[int(mt.group(2))] = int(mt.group(1))
+                            except Exception:
+                                pass
+
                             for t in tickets:
                                 orders = mt5_inst.orders_get(ticket=t)
                                 if orders:
+                                    # Pending order → cancella (entry mai filled)
                                     mt5_inst.order_send({"action": mt5_inst.TRADE_ACTION_REMOVE, "order": t})
-                                    cancelled_count += 1
-                        sig.status = "cancelled"
-                        sig.notes = (sig.notes or "") + (
-                            f" [Trade non partito: TG ha segnalato '{parsed.status_text}' "
-                            f"ma il LIMIT/STOP non si era mai attivato]"
-                        )
-                        sig.updated_at = datetime.utcnow()
-                        sig.closed_at = datetime.utcnow()
-                        _append_trade_log(sig, "pending_dropped",
-                            f"Target raggiunto da TG ('{parsed.status_text}') su trade ancora pending: "
-                            f"il LIMIT/STOP non si e' mai filled. {cancelled_count} pending order cancellati.",
-                            {"tickets": tickets, "cancelled": cancelled_count, "trigger": "target_done"})
+                                    cancelled_pending += 1
+                                    continue
+                                positions = mt5_inst.positions_get(ticket=t)
+                                if not positions:
+                                    continue
+                                # Posizione aperta: decide se chiudere o spostare SL a BE
+                                tp_lvl = ticket_tp_level.get(t, 0)
+                                if tp_level_hit == 99 or (tp_lvl and tp_lvl <= tp_level_hit):
+                                    if mt5_trader.close_position(t, sig.symbol):
+                                        closed_at_market += 1
+                                elif be_sl is not None:
+                                    if mt5_trader.modify_sl(t, be_sl, sig.symbol):
+                                        sl_moved += 1
+
+                        if cancelled_pending and not closed_at_market and not sl_moved:
+                            # Tutto era pending → drop legacy
+                            sig.status = "cancelled"
+                            sig.updated_at = datetime.utcnow()
+                            sig.closed_at = datetime.utcnow()
+                            sig.notes = (sig.notes or "") + (
+                                f" [Trade non partito: TG ha segnalato '{parsed.status_text or 'target_done'}' "
+                                f"ma il LIMIT/STOP non si era mai attivato]"
+                            )
+                            _append_trade_log(sig, "pending_dropped",
+                                f"Target raggiunto da TG su trade ancora pending: {cancelled_pending} pending cancellati.",
+                                {"tickets": tickets, "cancelled": cancelled_pending, "trigger": "target_done"})
+                            sigs_to_ema.append(sig)
+                        elif closed_at_market or sl_moved:
+                            if be_sl is not None and sl_moved > 0:
+                                sig.stoploss = be_sl
+                            sig.updated_at = datetime.utcnow()
+                            _append_trade_log(sig, "target_done_tg_action",
+                                f"TG '{parsed.status_text or 'TP'+str(tp_level_hit)+' done'}': "
+                                f"chiusi a market {closed_at_market}, SL→BE su {sl_moved}, cancellati {cancelled_pending}.",
+                                {"tp_level_hit": tp_level_hit, "closed_at_market": closed_at_market,
+                                 "sl_moved_to": be_sl, "cancelled_pending": cancelled_pending})
                         db.add(sig)
-                        log(f"[TargetDone] #{sig.id} {sig.symbol} pending dropped: {cancelled_count} ordini cancellati ({parsed.status_text})")
-                    if pending_sigs:
+                        log(f"[TargetDone] #{sig.id} {sig.symbol}: close@mkt={closed_at_market} sl→BE={sl_moved} cancel_pend={cancelled_pending} (tp_lvl={tp_level_hit})")
+                    if affected_sigs:
                         db.commit()
-                        # EMA: registra casi di STOP mai filled
-                        for sig in pending_sigs:
+                        for sig in sigs_to_ema:
                             try:
                                 mt5_trader.analyze_ema_case(sig.id, "target_done")
                             except Exception as _e:
@@ -758,7 +830,7 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     "price_from": parsed.price_from,
                     "price_to": parsed.price_to,
                     "status_text": parsed.status_text,
-                }
+                },
             })
 
         elif msg_type == "sl_move" and parsed:
