@@ -2705,6 +2705,54 @@ def _build_mt5_trade_log(sig, closed_tickets, is_buy, new_status) -> str:
     return jsonlib.dumps(events)
 
 
+def backfill_missing_pnl() -> int:
+    """Backfill pnl_usd per signal chiusi (closed_at settato) ma con pnl_usd=None.
+    Tipicamente price_service.py marca status=sl_hit + closed_at via monitor
+    prezzo senza interrogare MT5, lasciando pnl_usd vuoto. sync_positions
+    li ignora perche' closed_at e' set. Qui li riprendiamo: leggiamo i deal
+    di chiusura da MT5 history e sommiamo i profit per ogni ticket."""
+    from database import SessionLocal, Signal
+    import json as jsonlib
+    from datetime import timedelta
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return 0
+    db = SessionLocal()
+    fixed = 0
+    try:
+        candidates = db.query(Signal).filter(
+            Signal.pnl_usd.is_(None),
+            Signal.closed_at.isnot(None),
+            Signal.mt5_ticket.isnot(None),
+            Signal.status.in_(("sl_hit", "tp1", "tp2", "tp3", "closed")),
+        ).all()
+        for sig in candidates:
+            try:
+                tickets = jsonlib.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
+                total = 0.0
+                found_any = False
+                for t in tickets:
+                    deals = mt5.history_deals_get(position=t)
+                    if not deals:
+                        continue
+                    for d in deals:
+                        if d.entry == mt5.DEAL_ENTRY_OUT:
+                            total += float(d.profit) + float(getattr(d, 'commission', 0) or 0) + float(getattr(d, 'swap', 0) or 0)
+                            found_any = True
+                if found_any:
+                    sig.pnl_usd = round(total, 2)
+                    db.add(sig)
+                    fixed += 1
+                    log(f"[BackfillPnL] #{sig.id} {sig.symbol} pnl_usd={sig.pnl_usd}")
+            except Exception as e:
+                log(f"[BackfillPnL] #{sig.id} errore: {str(e)[:80]}")
+        if fixed:
+            db.commit()
+    finally:
+        db.close()
+    return fixed
+
+
 def sync_positions() -> list:
     """
     Confronta posizioni/ordini MT5 con segnali 'open' nel DB.
@@ -2722,6 +2770,12 @@ def sync_positions() -> list:
     # dal prezzo broker mentre il LIMIT/STOP non si e' mai fillato.
     # Indipendente da TG, parser, markdown — usa solo prezzi reali Avatrade.
     drop_pending_missed_tp()
+
+    # Backfill pnl_usd per signal chiusi via price_service senza P&L
+    try:
+        backfill_missing_pnl()
+    except Exception as _e:
+        log(f"[BackfillPnL] errore globale: {str(_e)[:80]}")
 
     mt5 = _get_mt5()
     if mt5 is None:
@@ -2982,6 +3036,24 @@ def sync_positions() -> list:
             # il valore corretto salvato al momento del completed (caso #355).
             if sig.closed_at is None:
                 sig.pnl_usd = round(total_profit, 2)
+
+            # Avanza status durante i partial close: tp1 -> tp2 -> tp3 in base
+            # ai ticket gia' chiusi che hanno raggiunto i livelli TP. Cosi' la
+            # tile in UI riflette lo stato reale anche durante il trade.
+            if open_count > 0 and closed_tickets:
+                tp_levels_hit_status = 0
+                for _tp_num, _tp_price in [(1, sig.tp1), (2, sig.tp2), (3, sig.tp3)]:
+                    if _tp_price is None:
+                        continue
+                    if any((is_buy and cp >= _tp_price) or (not is_buy and cp <= _tp_price)
+                           for _, cp, _, _ in closed_tickets):
+                        tp_levels_hit_status = max(tp_levels_hit_status, _tp_num)
+                if tp_levels_hit_status > 0:
+                    new_status_partial = f"tp{tp_levels_hit_status}"
+                    cur_lvl = {"tp1": 1, "tp2": 2, "tp3": 3}.get(sig.status or "", 0)
+                    if tp_levels_hit_status > cur_lvl:
+                        sig.status = new_status_partial
+                        log(f"#{sig.id} status avanzato: {new_status_partial} (partial close)")
 
             # Aggiorna position_size con la somma reale dei lotti su MT5,
             # così il valore mostrato nel frontend riflette quello effettivo
