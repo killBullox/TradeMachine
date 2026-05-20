@@ -805,6 +805,16 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         elif closed_at_market or sl_moved:
                             if be_sl is not None and sl_moved > 0:
                                 sig.stoploss = be_sl
+                            # Avanza sig.status al livello TP dichiarato dal TG.
+                            # Il close al market avviene al prezzo broker corrente,
+                            # che puo' essere leggermente diverso dal TP esatto del
+                            # signal (per noise di spread/tick). Il completed branch
+                            # in sync_positions calcola lo status dai close_prices
+                            # vs tp_price e puo' sottostimare (caso #366).
+                            if tp_level_hit and tp_level_hit < 99:
+                                cur_lvl = {"tp1": 1, "tp2": 2, "tp3": 3}.get(sig.status or "", 0)
+                                if tp_level_hit > cur_lvl:
+                                    sig.status = f"tp{tp_level_hit}"
                             sig.updated_at = datetime.utcnow()
                             _append_trade_log(sig, "target_done_tg_action",
                                 f"TG '{parsed.status_text or 'TP'+str(tp_level_hit)+' done'}': "

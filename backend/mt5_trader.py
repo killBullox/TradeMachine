@@ -3113,7 +3113,17 @@ def sync_positions() -> list:
                         f"Trade chiuso: status={new_status}, P&L totale {total_profit:+.2f}$",
                         {"status": new_status, "exit_price": close_price, "pnl": round(total_profit, 2)})
 
-                sig.status     = new_status
+                # Non degradare lo status: se gia' avanzato a tp_n da TG action o
+                # da partial close, mantieni il livello massimo raggiunto (caso #366:
+                # TG ha annunciato TP2 e abbiamo force-chiuso a 4479.26, ma il
+                # match cp<=tp non riconosce 4479 per la noise di tick -> tp1).
+                lvl_map = {"tp1": 1, "tp2": 2, "tp3": 3}
+                cur_lvl = lvl_map.get(sig.status or "", 0)
+                new_lvl = lvl_map.get(new_status, 0)
+                if new_lvl >= cur_lvl:
+                    sig.status = new_status
+                else:
+                    log(f"#{sig.id} status preservato: {sig.status} (calc {new_status} sarebbe regressione)")
                 sig.exit_price = close_price
                 sig.closed_at  = close_time
                 sig.pnl_usd    = round(total_profit, 2)
