@@ -780,12 +780,17 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 positions = mt5_inst.positions_get(ticket=t)
                                 if not positions:
                                     continue
-                                # Posizione aperta: decide se chiudere o spostare SL a BE
-                                tp_lvl = ticket_tp_level.get(t, 0)
-                                if tp_level_hit == 99 or (tp_lvl and tp_lvl <= tp_level_hit):
-                                    if mt5_trader.close_position(t, sig.symbol):
-                                        closed_at_market += 1
-                                elif be_sl is not None:
+                                # Posizione aperta: SOLO sposta SL a BE.
+                                # NON force-chiudere il ticket TP_n a market: il
+                                # broker ha gia' il TP server-side. Se TG annuncia
+                                # TP_n ma il ticket e' ancora aperto, il broker NON
+                                # ha raggiunto il livello (caso #368: trader vede
+                                # 4516, broker minimo 4516.58 - 5.8 pip short).
+                                # Force-chiudere a market prendeva +1.60$ near-entry
+                                # e poi gli altri ticket andavano in perdita su SL
+                                # originale (-34$). Meglio fidarsi del TP broker
+                                # server-side e cappare downside con BE.
+                                if be_sl is not None:
                                     if mt5_trader.modify_sl(t, be_sl, sig.symbol):
                                         sl_moved += 1
 
