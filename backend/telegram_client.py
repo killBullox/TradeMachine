@@ -664,13 +664,28 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                     _append_trade_log(sig, _tag, _cancel_reason)
                                     log(f"[AutoTrade] #{sig.id} {sig.symbol} ANNULLATO: {_cancel_reason}")
                                 else:
-                                    # Tutti gli ordini falliti senza ragione di "timing": marca cancelled.
-                                    # Lasciare in 'pending' inquina UI/storico (nessun ticket sul broker,
-                                    # nessuna possibilità che il trade parta da solo).
-                                    sig.status = "cancelled"
-                                    sig.notes = (sig.notes or "") + " [Tutti gli ordini MT5 rifiutati dal broker - vedi trade_log]"
-                                    _append_trade_log(sig, "mt5_failed", "Nessun ticket MT5 ottenuto - tutti gli order_send rifiutati. Segnale annullato.")
-                                    log(f"[AutoTrade] #{sig.id} {sig.symbol} ANNULLATO: tutti gli ordini rifiutati")
+                                    # Distingui auto-cancellazione a monte (rr_suspect, typo guards,
+                                    # ecc.) da rifiuto reale del broker. Se sig e' gia' stato marcato
+                                    # cancelled da place_orders col suo tag specifico, NON sovrascrivere
+                                    # con il messaggio "rifiutati dal broker" (mai inviati).
+                                    db.refresh(sig)
+                                    auto_cancelled = False
+                                    try:
+                                        import json as _jsonlib
+                                        _tl = _jsonlib.loads(sig.trade_log) if sig.trade_log else []
+                                        for ev in _tl:
+                                            if ev.get("event") in ("rr_suspect", "mt5_skip", "mt5_no_lots"):
+                                                auto_cancelled = True
+                                                break
+                                    except Exception:
+                                        pass
+                                    if auto_cancelled:
+                                        log(f"[AutoTrade] #{sig.id} {sig.symbol} gia' auto-cancellato a monte (rr_suspect/skip) — nessun messaggio extra")
+                                    else:
+                                        sig.status = "cancelled"
+                                        sig.notes = (sig.notes or "") + " [Tutti gli ordini MT5 rifiutati dal broker - vedi trade_log]"
+                                        _append_trade_log(sig, "mt5_failed", "Nessun ticket MT5 ottenuto - tutti gli order_send rifiutati dal broker. Segnale annullato.")
+                                        log(f"[AutoTrade] #{sig.id} {sig.symbol} ANNULLATO: tutti gli ordini rifiutati dal broker")
                                 db.add(sig)
                                 db.commit()
                 except Exception as e:
