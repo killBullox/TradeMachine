@@ -1895,6 +1895,16 @@ if _os.path.isdir(_frontend_dist):
     if _os.path.isdir(_assets_dir):
         app.mount("/assets", StaticFiles(directory=_assets_dir), name="static-assets")
 
+    # Headers per impedire al browser di cachare index.html (gli asset hashati
+    # da Vite restano cacheabili long-term, ma index.html DEVE essere ricaricato
+    # ad ogni navigazione altrimenti il browser serve vecchi riferimenti agli
+    # asset dopo un rebuild del frontend - utente costretto a Ctrl+F5).
+    _no_cache_headers = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
     # Catch-all: qualsiasi route non-API serve index.html (SPA)
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
@@ -1903,4 +1913,4 @@ if _os.path.isdir(_frontend_dist):
         file_path = _os.path.join(_frontend_dist, full_path)
         if full_path and _os.path.isfile(file_path):
             return FileResponse(file_path)
-        return FileResponse(_os.path.join(_frontend_dist, "index.html"))
+        return FileResponse(_os.path.join(_frontend_dist, "index.html"), headers=_no_cache_headers)
