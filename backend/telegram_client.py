@@ -754,63 +754,37 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     for sig in affected_sigs:
                         tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
                         cancelled_pending = 0
-                        closed_at_market = 0
-                        sl_moved = 0
-                        be_sl = None
+                        open_found = 0
                         if mt5_inst:
-                            # Calcola SL target per BE (trail) sui residui aperti.
-                            pip_size = 0.0
-                            try:
-                                from mt5_trader import MT5_SYMBOL_MAP as _MAP
-                                sym_info = mt5_inst.symbol_info(_MAP.get(sig.symbol.upper(), sig.symbol))
-                                if sym_info:
-                                    pip_size = sym_info.point * 10
-                            except Exception:
-                                pass
-                            is_buy = (sig.direction or "").lower() == "buy"
-                            entry_anchor = sig.actual_entry_price or sig.entry_price
-                            if entry_anchor and pip_size > 0:
-                                be_sl = round(entry_anchor + pip_size, 5) if is_buy else round(entry_anchor - pip_size, 5)
-
-                            # Determina mapping ticket→TP livello (dal trade_log mt5_order_sent)
-                            ticket_tp_level = {}
-                            try:
-                                tl = _json.loads(sig.trade_log) if sig.trade_log else []
-                                for ev in tl:
-                                    if ev.get("event") == "mt5_order_sent":
-                                        det = ev.get("detail", "")
-                                        mt = _re.search(r'TP(\d):\s*ticket=(\d+)', det)
-                                        if mt:
-                                            ticket_tp_level[int(mt.group(2))] = int(mt.group(1))
-                            except Exception:
-                                pass
-
                             for t in tickets:
                                 orders = mt5_inst.orders_get(ticket=t)
                                 if orders:
-                                    # Pending order → cancella (entry mai filled)
+                                    # Pending order → cancella (entry mai filled).
+                                    # Il TG ha incassato il TP ma il nostro LIMIT/STOP
+                                    # non si e' mai attivato: trade perso, niente da fare.
                                     mt5_inst.order_send({"action": mt5_inst.TRADE_ACTION_REMOVE, "order": t})
                                     cancelled_pending += 1
                                     continue
                                 positions = mt5_inst.positions_get(ticket=t)
-                                if not positions:
-                                    continue
-                                # Posizione aperta: SOLO sposta SL a BE.
-                                # NON force-chiudere il ticket TP_n a market: il
-                                # broker ha gia' il TP server-side. Se TG annuncia
-                                # TP_n ma il ticket e' ancora aperto, il broker NON
-                                # ha raggiunto il livello (caso #368: trader vede
-                                # 4516, broker minimo 4516.58 - 5.8 pip short).
-                                # Force-chiudere a market prendeva +1.60$ near-entry
-                                # e poi gli altri ticket andavano in perdita su SL
-                                # originale (-34$). Meglio fidarsi del TP broker
-                                # server-side e cappare downside con BE.
-                                if be_sl is not None:
-                                    if mt5_trader.modify_sl(t, be_sl, sig.symbol):
-                                        sl_moved += 1
+                                if positions:
+                                    # Posizione aperta: NESSUNA azione sul broker.
+                                    # Il messaggio "target done" del TG comunica SOLO
+                                    # che il livello e' stato colpito, NON di fare trail.
+                                    # Lo SL resta com'e' (signal o ultimo SL Move del
+                                    # trader). Lo spostamento a BE avviene SOLO:
+                                    #  - via auto-trail su chiusura ticket (se
+                                    #    trail_stop_enabled) in sync_positions
+                                    #  - via messaggio TG esplicito di trail/riposiziona
+                                    #    SL (handler sl_move)
+                                    # Caso #405: forzare BE qui sovrascriveva lo SL 4521
+                                    # del trader e chiudeva i ticket residui su un
+                                    # retracement a BE invece di lasciarli correre.
+                                    open_found += 1
 
-                        if cancelled_pending and not closed_at_market and not sl_moved:
-                            # Tutto era pending → drop legacy
+                        # Marca cancelled SOLO se TUTTI i ticket erano pending non
+                        # filled (nessuna posizione aperta). Se anche solo un ticket
+                        # e' aperto, il trade e' vivo: non toccarlo.
+                        if cancelled_pending and open_found == 0:
                             sig.status = "cancelled"
                             sig.updated_at = datetime.utcnow()
                             sig.closed_at = datetime.utcnow()
@@ -822,27 +796,8 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 f"Target raggiunto da TG su trade ancora pending: {cancelled_pending} pending cancellati.",
                                 {"tickets": tickets, "cancelled": cancelled_pending, "trigger": "target_done"})
                             sigs_to_ema.append(sig)
-                        elif closed_at_market or sl_moved:
-                            if be_sl is not None and sl_moved > 0:
-                                sig.stoploss = be_sl
-                            # Avanza sig.status al livello TP dichiarato dal TG.
-                            # Il close al market avviene al prezzo broker corrente,
-                            # che puo' essere leggermente diverso dal TP esatto del
-                            # signal (per noise di spread/tick). Il completed branch
-                            # in sync_positions calcola lo status dai close_prices
-                            # vs tp_price e puo' sottostimare (caso #366).
-                            if tp_level_hit and tp_level_hit < 99:
-                                cur_lvl = {"tp1": 1, "tp2": 2, "tp3": 3}.get(sig.status or "", 0)
-                                if tp_level_hit > cur_lvl:
-                                    sig.status = f"tp{tp_level_hit}"
-                            sig.updated_at = datetime.utcnow()
-                            _append_trade_log(sig, "target_done_tg_action",
-                                f"TG '{parsed.status_text or 'TP'+str(tp_level_hit)+' done'}': "
-                                f"chiusi a market {closed_at_market}, SL→BE su {sl_moved}, cancellati {cancelled_pending}.",
-                                {"tp_level_hit": tp_level_hit, "closed_at_market": closed_at_market,
-                                 "sl_moved_to": be_sl, "cancelled_pending": cancelled_pending})
-                        db.add(sig)
-                        log(f"[TargetDone] #{sig.id} {sig.symbol}: close@mkt={closed_at_market} sl→BE={sl_moved} cancel_pend={cancelled_pending} (tp_lvl={tp_level_hit})")
+                            db.add(sig)
+                        log(f"[TargetDone] #{sig.id} {sig.symbol}: open={open_found} cancel_pend={cancelled_pending} (tp_lvl={tp_level_hit}) — nessun SL→BE forzato")
                     if affected_sigs:
                         db.commit()
                         for sig in sigs_to_ema:
