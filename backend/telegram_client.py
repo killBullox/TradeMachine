@@ -763,15 +763,27 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         cancelled_pending = 0
                         open_found = 0
                         sl_moved_to_be = 0
-                        # Calcola BE+1pip solo se serve (caso trail esplicito)
+                        # Calcola SL trail target in base al TP raggiunto:
+                        #   tp_level_hit=1 → SL = entry+1pip (BE)
+                        #   tp_level_hit=2 → SL = TP1+1pip (locka profitto di TP1)
+                        #   tp_level_hit=3 → SL = TP2+1pip (locka profitto di TP2)
+                        # Stesso schema dell'auto-trail in sync_positions.
                         be_sl = None
+                        trail_label = "BE+1pip"
                         if trail_explicit and mt5_inst:
                             try:
                                 from mt5_trader import MT5_SYMBOL_MAP as _MAP
                                 sym_info = mt5_inst.symbol_info(_MAP.get(sig.symbol.upper(), sig.symbol))
                                 pip_size = sym_info.point * 10 if sym_info else 0
                                 is_buy = (sig.direction or "").lower() == "buy"
-                                anchor = sig.actual_entry_price or sig.entry_price
+                                anchor = None
+                                if tp_level_hit >= 3 and sig.tp2:
+                                    anchor = float(sig.tp2); trail_label = "TP2+1pip"
+                                elif tp_level_hit >= 2 and sig.tp1:
+                                    anchor = float(sig.tp1); trail_label = "TP1+1pip"
+                                else:
+                                    anchor = sig.actual_entry_price or sig.entry_price
+                                    trail_label = "BE+1pip"
                                 if anchor and pip_size > 0:
                                     be_sl = round(anchor + pip_size, 5) if is_buy else round(anchor - pip_size, 5)
                             except Exception:
@@ -819,11 +831,11 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             sig.stoploss = be_sl
                             sig.updated_at = datetime.utcnow()
                             _append_trade_log(sig, "sl_move_trail_tg",
-                                f"TG ha richiesto trail esplicito ('Safe Trail in Profits' o simile) "
-                                f"insieme a target_done: SL spostato a BE+1pip {be_sl} su {sl_moved_to_be} ticket "
+                                f"TG trail esplicito ('Safe Trail in Profits' o simile) su TP{tp_level_hit}: "
+                                f"SL spostato a {be_sl} ({trail_label}) su {sl_moved_to_be} ticket "
                                 f"(DB stoploss {old_sl} → {be_sl})",
                                 {"new_sl": be_sl, "old_sl": old_sl, "tickets_modified": sl_moved_to_be,
-                                 "tp_level_hit": tp_level_hit, "trigger": "trail_explicit"})
+                                 "tp_level_hit": tp_level_hit, "trail_label": trail_label, "trigger": "trail_explicit"})
                             db.add(sig)
                         log(f"[TargetDone] #{sig.id} {sig.symbol}: open={open_found} cancel_pend={cancelled_pending} sl→BE={sl_moved_to_be} trail_explicit={trail_explicit} (tp_lvl={tp_level_hit})")
                     if affected_sigs:
