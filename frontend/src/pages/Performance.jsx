@@ -276,20 +276,15 @@ function SymbolHourHeatmap({ dateFrom, dateTo }) {
     return 0
   })
 
-  // Range P&L per colore
-  const allPnls = data.rows.map(r => r.pnl_usd)
-  const maxAbs = Math.max(...allPnls.map(Math.abs), 1)
-
-  const colorFor = (pnl) => {
+  // Colore per WR: <50% rosso, >=50% verde, null slate
+  const colorForWR = (wr) => {
+    if (wr == null) return 'bg-slate-800/40'
+    return wr >= 50 ? 'bg-emerald-700/70' : 'bg-rose-700/70'
+  }
+  // Colore riga totale per ora (basato su P&L)
+  const colorForPnl = (pnl) => {
     if (pnl == null || pnl === 0) return 'bg-slate-800/40'
-    const intensity = Math.min(Math.abs(pnl) / maxAbs, 1)
-    if (pnl > 0) {
-      const op = Math.round(20 + intensity * 70)
-      return `bg-emerald-500/${op > 90 ? 90 : op}`
-    } else {
-      const op = Math.round(20 + intensity * 70)
-      return `bg-rose-500/${op > 90 ? 90 : op}`
-    }
+    return pnl > 0 ? 'bg-emerald-700/60' : 'bg-rose-700/60'
   }
 
   const hours = Array.from({length: 24}, (_, i) => i)
@@ -317,16 +312,16 @@ function SymbolHourHeatmap({ dateFrom, dateTo }) {
       </div>
 
       <div className="overflow-x-auto">
-        <table className="text-xs border-collapse">
+        <table className="text-sm border-collapse">
           <thead>
             <tr>
-              <th className="text-left p-1 text-slate-500 sticky left-0 bg-slate-900 z-10">Simbolo</th>
+              <th className="text-left p-1 text-slate-400 text-sm sticky left-0 bg-slate-900 z-10">Simbolo</th>
               {hours.map(h => (
-                <th key={h} className="p-1 text-slate-500 font-normal w-9 text-center" title={`${h}:00-${h}:59 Roma`}>
+                <th key={h} className="p-1 text-slate-400 font-semibold w-16 text-center text-sm" title={`${h}:00-${h}:59 Roma`}>
                   {String(h).padStart(2,'0')}
                 </th>
               ))}
-              <th className="p-1 text-slate-500 font-normal text-right pl-3">Tot</th>
+              <th className="p-1 text-slate-400 font-semibold text-right pl-3 text-sm">Tot</th>
             </tr>
           </thead>
           <tbody>
@@ -334,21 +329,21 @@ function SymbolHourHeatmap({ dateFrom, dateTo }) {
               const symPnl = sym.pnl
               return (
                 <tr key={sym.symbol} className="border-t border-slate-800">
-                  <td className="p-1 text-white font-semibold pr-3 sticky left-0 bg-slate-900 z-10 whitespace-nowrap">{sym.symbol}</td>
+                  <td className="p-1 text-white font-semibold pr-3 sticky left-0 bg-slate-900 z-10 whitespace-nowrap text-base">{sym.symbol}</td>
                   {hours.map(h => {
                     const cell = cellMap[sym.symbol]?.[h]
-                    if (!cell) return <td key={h} className="p-0.5"><div className="h-9 w-9 rounded bg-slate-800/20" /></td>
+                    if (!cell) return <td key={h} className="p-0.5"><div className="h-16 w-16 rounded bg-slate-800/20" /></td>
                     return (
                       <td key={h} className="p-0.5"
                           title={`${sym.symbol} ${String(h).padStart(2,'0')}:00 Roma — ${cell.count} trade, ${cell.wins}W ${cell.losses}L, WR ${cell.win_rate_pct ?? '—'}%, P&L ${fmt$(cell.pnl_usd)} (avg ${fmt$(cell.avg_pnl_per_trade)})`}>
-                        <div className={`h-9 w-9 rounded flex flex-col items-center justify-center ${colorFor(cell.pnl_usd)}`}>
-                          <span className="text-[10px] text-white font-bold leading-tight">{cell.count}</span>
-                          <span className="text-[9px] text-white/80 leading-tight">{cell.win_rate_pct ?? '—'}%</span>
+                        <div className={`h-16 w-16 rounded flex flex-col items-center justify-center ${colorForWR(cell.win_rate_pct)}`}>
+                          <span className="text-lg text-white font-bold leading-tight">{cell.count}</span>
+                          <span className="text-sm text-white/90 leading-tight">{cell.win_rate_pct ?? '—'}%</span>
                         </div>
                       </td>
                     )
                   })}
-                  <td className={`p-1 text-right pl-3 font-semibold ${clr(symPnl)}`}>
+                  <td className={`p-1 text-right pl-3 font-semibold text-base ${clr(symPnl)}`}>
                     {fmt$(symPnl)}
                   </td>
                 </tr>
@@ -356,27 +351,27 @@ function SymbolHourHeatmap({ dateFrom, dateTo }) {
             })}
             {/* Totale per ora */}
             <tr className="border-t-2 border-slate-700 bg-slate-800/40">
-              <td className="p-1 text-slate-300 font-semibold pr-3 sticky left-0 bg-slate-800 z-10">Totale</td>
+              <td className="p-1 text-slate-200 font-semibold pr-3 sticky left-0 bg-slate-800 z-10 text-base">Totale</td>
               {hours.map(h => {
                 const hb = data.by_hour.find(x => x.hour === h)
-                if (!hb) return <td key={h} className="p-0.5"><div className="h-9 w-9" /></td>
+                if (!hb) return <td key={h} className="p-0.5"><div className="h-16 w-16" /></td>
                 return (
                   <td key={h} className="p-0.5"
                       title={`Ora ${String(h).padStart(2,'0')}:00 Roma totale — ${hb.count} trade, P&L ${fmt$(hb.pnl)}`}>
-                    <div className={`h-9 w-9 rounded flex flex-col items-center justify-center ${colorFor(hb.pnl)}`}>
-                      <span className="text-[10px] text-white font-bold leading-tight">{hb.count}</span>
+                    <div className={`h-16 w-16 rounded flex flex-col items-center justify-center ${colorForPnl(hb.pnl)}`}>
+                      <span className="text-lg text-white font-bold leading-tight">{hb.count}</span>
                     </div>
                   </td>
                 )
               })}
-              <td className={`p-1 text-right pl-3 font-bold ${clr(data.total_pnl)}`}>{fmt$(data.total_pnl)}</td>
+              <td className={`p-1 text-right pl-3 font-bold text-base ${clr(data.total_pnl)}`}>{fmt$(data.total_pnl)}</td>
             </tr>
           </tbody>
         </table>
       </div>
 
       <p className="text-xs text-slate-500 mt-3">
-        Cella: numero trade (alto) e win-rate (basso). Hover per dettaglio. Colore = intensità P&L vs max.
+        Cella: numero trade (alto) e win-rate (basso). Sfondo verde se WR ≥ 50%, rosso se &lt; 50%. Hover per dettaglio completo.
       </p>
     </div>
   )
@@ -589,6 +584,33 @@ export default function Performance() {
           sub="totali (gestiti)"
         />
         <KPI label="P&L Ultimi 7gg" value={fmt$(perf.pnl_last_7d)} color={clr(perf.pnl_last_7d)} />
+      </div>
+
+      {/* Terza riga KPI: Sharpe, Avg Win, Avg Loss */}
+      <div className="grid grid-cols-3 gap-4">
+        <KPI
+          label="Sharpe Ratio"
+          value={perf.sharpe_ratio != null ? perf.sharpe_ratio.toFixed(2) : '—'}
+          color={
+            perf.sharpe_ratio == null ? 'text-slate-400'
+            : perf.sharpe_ratio >= 2 ? 'text-emerald-400'
+            : perf.sharpe_ratio >= 1 ? 'text-sky-400'
+            : 'text-amber-400'
+          }
+          sub="annualizzato su P&L giornalieri"
+        />
+        <KPI
+          label="Avg Win"
+          value={fmt$(perf.avg_win_usd)}
+          color="text-emerald-400"
+          sub={`${perf.tp_hits ?? 0} TP hit`}
+        />
+        <KPI
+          label="Avg Loss"
+          value={fmt$(perf.avg_loss_usd)}
+          color="text-rose-400"
+          sub={`${perf.sl_hits ?? 0} SL hit`}
+        />
       </div>
 
       {/* Grafici */}
