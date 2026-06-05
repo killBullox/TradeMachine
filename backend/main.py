@@ -634,6 +634,57 @@ class RiskSettingsIn(BaseModel):
     max_margin_pct_per_trade: float = 50.0
 
 
+@app.get("/api/performance/equity-curve")
+def get_equity_curve(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Andamento P&L cumulativo nel tempo. Un punto per ogni trade chiuso,
+    ordinato per closed_at. Cumulativo parte da 0."""
+    q = db.query(Signal).filter(
+        Signal.is_archived == False,
+        Signal.pnl_usd.isnot(None),
+        Signal.closed_at.isnot(None),
+    )
+    if date_from:
+        try: q = q.filter(Signal.closed_at >= datetime.fromisoformat(date_from))
+        except: pass
+    if date_to:
+        try: q = q.filter(Signal.closed_at <= datetime.fromisoformat(date_to))
+        except: pass
+    sigs = q.order_by(Signal.closed_at).all()
+    points = []
+    cum = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for s in sigs:
+        cum += float(s.pnl_usd)
+        if cum > peak:
+            peak = cum
+        dd = peak - cum
+        if dd > max_dd:
+            max_dd = dd
+        points.append({
+            "id": s.id,
+            "ts": s.closed_at.isoformat(),
+            "ts_ms": int(s.closed_at.timestamp() * 1000),
+            "symbol": s.symbol,
+            "direction": s.direction,
+            "status": s.status,
+            "pnl": round(float(s.pnl_usd), 2),
+            "cum_pnl": round(cum, 2),
+            "drawdown": round(dd, 2),
+        })
+    return {
+        "points": points,
+        "total_pnl": round(cum, 2),
+        "max_drawdown": round(max_dd, 2),
+        "peak": round(peak, 2),
+        "count": len(points),
+    }
+
+
 @app.get("/api/performance/by-symbol-hour")
 def get_perf_by_symbol_hour(
     date_from: Optional[str] = Query(None),

@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, Cell
+  Tooltip, ResponsiveContainer, ReferenceLine, Cell, AreaChart, Area, Brush
 } from 'recharts'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -231,6 +231,130 @@ function SymbolTable({ bySymbol, untradeableSymbols = [] }) {
           )}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// ─── Equity Curve storica zoomabile ───────────────────────────────────────────
+
+function EquityCurveHistory({ dateFrom, dateTo }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    setLoading(true)
+    const params = new URLSearchParams()
+    if (dateFrom) params.append('date_from', dateFrom)
+    if (dateTo) params.append('date_to', dateTo)
+    fetch(`/api/performance/equity-curve?${params}`)
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [dateFrom, dateTo])
+
+  if (loading) return <div className="card text-slate-400 text-sm">Caricamento equity curve...</div>
+  if (!data || !data.points?.length) return <div className="card text-slate-400 text-sm">Nessun trade chiuso nel periodo.</div>
+
+  // Formatta data per asse X in ora Roma
+  const fmtDate = (ts_ms) => {
+    const d = new Date(ts_ms)
+    return d.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', year: '2-digit' })
+  }
+  const fmtDateTime = (ts_ms) => {
+    const d = new Date(ts_ms)
+    return d.toLocaleString('it-IT', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
+  }
+
+  const CustomTooltip = ({ active, payload }) => {
+    if (!active || !payload?.length) return null
+    const p = payload[0].payload
+    return (
+      <div className="bg-slate-900 border border-slate-700 rounded p-2 text-xs">
+        <div className="text-slate-400">{fmtDateTime(p.ts_ms)}</div>
+        <div className="text-white font-semibold">#{p.id} {p.symbol} {p.direction?.toUpperCase()} <span className="text-slate-400">({p.status})</span></div>
+        <div className={p.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+          Trade P&L: {fmt$(p.pnl)}
+        </div>
+        <div className={p.cum_pnl >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+          Cumulativo: {fmt$(p.cum_pnl)}
+        </div>
+        {p.drawdown > 0 && (
+          <div className="text-amber-400">Drawdown: -${p.drawdown.toFixed(2)}</div>
+        )}
+      </div>
+    )
+  }
+
+  // Sommari KPI
+  const finalCum = data.total_pnl
+  const wins = data.points.filter(p => p.pnl > 0).length
+  const losses = data.points.filter(p => p.pnl < 0).length
+
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wide">
+          Equity Curve — andamento storico P&L cumulativo
+        </h2>
+        <div className="text-xs text-slate-500">
+          {data.count} trade · finale <span className={`font-semibold ${finalCum >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{fmt$(finalCum)}</span> · max DD <span className="text-rose-400 font-semibold">-${data.max_drawdown.toFixed(2)}</span> · peak <span className="text-emerald-400">{fmt$(data.peak)}</span>
+        </div>
+      </div>
+
+      <ResponsiveContainer width="100%" height={360}>
+        <AreaChart data={data.points} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id="eqGradPos" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#10b981" stopOpacity={0.45} />
+              <stop offset="100%" stopColor="#10b981" stopOpacity={0.02} />
+            </linearGradient>
+            <linearGradient id="eqGradNeg" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#f43f5e" stopOpacity={0.45} />
+              <stop offset="100%" stopColor="#f43f5e" stopOpacity={0.02} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+          <XAxis
+            dataKey="ts_ms"
+            type="number"
+            domain={['dataMin', 'dataMax']}
+            scale="time"
+            tickFormatter={fmtDate}
+            tick={{ fill: '#94a3b8', fontSize: 11 }}
+            axisLine={false}
+            tickLine={false}
+          />
+          <YAxis
+            tick={{ fill: '#94a3b8', fontSize: 11 }}
+            axisLine={false}
+            tickLine={false}
+            tickFormatter={v => `$${v}`}
+          />
+          <Tooltip content={<CustomTooltip />} />
+          <ReferenceLine y={0} stroke="#475569" strokeDasharray="3 3" />
+          <Area
+            type="monotone"
+            dataKey="cum_pnl"
+            stroke={finalCum >= 0 ? '#10b981' : '#f43f5e'}
+            strokeWidth={2}
+            fill={finalCum >= 0 ? 'url(#eqGradPos)' : 'url(#eqGradNeg)'}
+            dot={false}
+            activeDot={{ r: 4 }}
+          />
+          <Brush
+            dataKey="ts_ms"
+            height={28}
+            stroke="#475569"
+            fill="#1e293b"
+            tickFormatter={fmtDate}
+            travellerWidth={10}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+
+      <p className="text-xs text-slate-500 mt-2">
+        Trascina le maniglie del riquadro in basso per zoomare su un intervallo. Hover sui punti per il dettaglio trade. {wins} wins, {losses} losses.
+      </p>
     </div>
   )
 }
@@ -640,6 +764,9 @@ export default function Performance() {
           </div>
         </div>
       </div>
+
+      {/* Equity curve storica zoomabile */}
+      <EquityCurveHistory dateFrom={dateFrom} dateTo={dateTo} />
 
       {/* Tabella per simbolo */}
       <SymbolTable bySymbol={perf.by_symbol || []} untradeableSymbols={perf.untradeable_symbols || []} />
