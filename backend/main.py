@@ -634,6 +634,94 @@ class RiskSettingsIn(BaseModel):
     max_margin_pct_per_trade: float = 50.0
 
 
+@app.get("/api/performance/by-symbol-hour")
+def get_perf_by_symbol_hour(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Stats raggruppate per (symbol, ora di ingresso Roma).
+    Ora calcolata su entered_at se valorizzato (trade davvero entrato), altrimenti
+    created_at. UTC -> Europe/Rome (CET/CEST gestita)."""
+    from zoneinfo import ZoneInfo
+    rome_tz = ZoneInfo("Europe/Rome")
+    utc_tz = ZoneInfo("UTC")
+
+    q = db.query(Signal).filter(
+        Signal.is_archived == False,
+        Signal.status.in_(("tp1", "tp2", "tp3", "sl_hit", "closed")),
+        Signal.pnl_usd.isnot(None),
+    )
+    if date_from:
+        try: q = q.filter(Signal.created_at >= datetime.fromisoformat(date_from))
+        except: pass
+    if date_to:
+        try: q = q.filter(Signal.created_at <= datetime.fromisoformat(date_to))
+        except: pass
+    sigs = q.all()
+
+    # Aggrega per (symbol, hour_roma)
+    buckets = {}  # (sym, hour) -> {count, wins, losses, pnl, ids}
+    for s in sigs:
+        ts = s.entered_at or s.created_at
+        if not ts:
+            continue
+        ts_utc = ts.replace(tzinfo=utc_tz) if ts.tzinfo is None else ts
+        ts_rome = ts_utc.astimezone(rome_tz)
+        hour = ts_rome.hour
+        key = (s.symbol, hour)
+        b = buckets.setdefault(key, {"count": 0, "wins": 0, "losses": 0, "pnl": 0.0, "ids": []})
+        b["count"] += 1
+        b["ids"].append(s.id)
+        if s.pnl_usd is not None:
+            b["pnl"] += s.pnl_usd
+            if s.pnl_usd > 0:
+                b["wins"] += 1
+            elif s.pnl_usd < 0:
+                b["losses"] += 1
+
+    rows = []
+    for (sym, hour), b in buckets.items():
+        closed = b["wins"] + b["losses"]
+        wr = round(b["wins"] / closed * 100, 1) if closed > 0 else None
+        rows.append({
+            "symbol": sym, "hour": hour,
+            "count": b["count"], "wins": b["wins"], "losses": b["losses"],
+            "win_rate_pct": wr, "pnl_usd": round(b["pnl"], 2),
+            "avg_pnl_per_trade": round(b["pnl"] / b["count"], 2) if b["count"] else 0,
+            "signal_ids": b["ids"][:10],  # primi 10 per drill-down
+        })
+    # Ordina per pnl decrescente
+    rows.sort(key=lambda r: -r["pnl_usd"])
+
+    # Riepilogo aggregato per simbolo (somma tutte le ore)
+    by_symbol = {}
+    for r in rows:
+        s = r["symbol"]
+        bs = by_symbol.setdefault(s, {"symbol": s, "count": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+        bs["count"] += r["count"]; bs["wins"] += r["wins"]; bs["losses"] += r["losses"]
+        bs["pnl"] += r["pnl_usd"]
+    by_symbol_list = sorted(by_symbol.values(), key=lambda x: -x["pnl"])
+
+    # Riepilogo aggregato per ora (somma tutti i simboli)
+    by_hour = {}
+    for r in rows:
+        h = r["hour"]
+        bh = by_hour.setdefault(h, {"hour": h, "count": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+        bh["count"] += r["count"]; bh["wins"] += r["wins"]; bh["losses"] += r["losses"]
+        bh["pnl"] += r["pnl_usd"]
+    by_hour_list = sorted(by_hour.values(), key=lambda x: x["hour"])
+
+    return {
+        "rows": rows,
+        "by_symbol": by_symbol_list,
+        "by_hour": by_hour_list,
+        "total_trades": sum(r["count"] for r in rows),
+        "total_pnl": round(sum(r["pnl_usd"] for r in rows), 2),
+        "timezone": "Europe/Rome",
+    }
+
+
 @app.get("/api/performance/calendar")
 def get_calendar(year: int, month: int, db: Session = Depends(get_db)):
     """Ritorna P&L giornaliero e win-rate per un mese."""

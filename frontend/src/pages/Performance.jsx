@@ -235,6 +235,153 @@ function SymbolTable({ bySymbol, untradeableSymbols = [] }) {
   )
 }
 
+// ─── Heatmap Simbolo x Ora Roma ───────────────────────────────────────────────
+
+function SymbolHourHeatmap({ dateFrom, dateTo }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [sortBy, setSortBy] = useState('pnl') // 'pnl' | 'count' | 'wr'
+
+  useEffect(() => {
+    setLoading(true)
+    const params = new URLSearchParams()
+    if (dateFrom) params.append('date_from', dateFrom)
+    if (dateTo) params.append('date_to', dateTo)
+    fetch(`/api/performance/by-symbol-hour?${params}`)
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [dateFrom, dateTo])
+
+  if (loading) return <div className="card text-slate-400 text-sm">Caricamento heatmap...</div>
+  if (!data || !data.rows?.length) return <div className="card text-slate-400 text-sm">Nessun trade chiuso nel periodo.</div>
+
+  // Costruisci matrice [symbol][hour] = riga
+  const cellMap = {}
+  data.rows.forEach(r => {
+    cellMap[r.symbol] = cellMap[r.symbol] || {}
+    cellMap[r.symbol][r.hour] = r
+  })
+
+  // Ordina simboli (rows del heatmap)
+  const symbolStats = data.by_symbol || []
+  const sortedSymbols = [...symbolStats].sort((a, b) => {
+    if (sortBy === 'pnl') return b.pnl - a.pnl
+    if (sortBy === 'count') return b.count - a.count
+    if (sortBy === 'wr') {
+      const wrA = a.wins + a.losses > 0 ? a.wins / (a.wins + a.losses) : 0
+      const wrB = b.wins + b.losses > 0 ? b.wins / (b.wins + b.losses) : 0
+      return wrB - wrA
+    }
+    return 0
+  })
+
+  // Range P&L per colore
+  const allPnls = data.rows.map(r => r.pnl_usd)
+  const maxAbs = Math.max(...allPnls.map(Math.abs), 1)
+
+  const colorFor = (pnl) => {
+    if (pnl == null || pnl === 0) return 'bg-slate-800/40'
+    const intensity = Math.min(Math.abs(pnl) / maxAbs, 1)
+    if (pnl > 0) {
+      const op = Math.round(20 + intensity * 70)
+      return `bg-emerald-500/${op > 90 ? 90 : op}`
+    } else {
+      const op = Math.round(20 + intensity * 70)
+      return `bg-rose-500/${op > 90 ? 90 : op}`
+    }
+  }
+
+  const hours = Array.from({length: 24}, (_, i) => i)
+
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wide">
+            Performance per simbolo × ora ingresso (Roma)
+          </h2>
+          <p className="text-xs text-slate-500 mt-1">
+            {data.total_trades} trade · P&L totale {fmt$(data.total_pnl)}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-slate-500">Ordina simboli per:</span>
+          {['pnl', 'count', 'wr'].map(opt => (
+            <button key={opt} onClick={() => setSortBy(opt)}
+              className={`px-2 py-1 rounded ${sortBy === opt ? 'bg-brand-700 text-white' : 'text-slate-400 hover:text-white border border-slate-700'}`}>
+              {opt === 'pnl' ? 'P&L' : opt === 'count' ? 'N. trade' : 'Win rate'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="text-xs border-collapse">
+          <thead>
+            <tr>
+              <th className="text-left p-1 text-slate-500 sticky left-0 bg-slate-900 z-10">Simbolo</th>
+              {hours.map(h => (
+                <th key={h} className="p-1 text-slate-500 font-normal w-9 text-center" title={`${h}:00-${h}:59 Roma`}>
+                  {String(h).padStart(2,'0')}
+                </th>
+              ))}
+              <th className="p-1 text-slate-500 font-normal text-right pl-3">Tot</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedSymbols.map(sym => {
+              const symPnl = sym.pnl
+              return (
+                <tr key={sym.symbol} className="border-t border-slate-800">
+                  <td className="p-1 text-white font-semibold pr-3 sticky left-0 bg-slate-900 z-10 whitespace-nowrap">{sym.symbol}</td>
+                  {hours.map(h => {
+                    const cell = cellMap[sym.symbol]?.[h]
+                    if (!cell) return <td key={h} className="p-0.5"><div className="h-9 w-9 rounded bg-slate-800/20" /></td>
+                    return (
+                      <td key={h} className="p-0.5"
+                          title={`${sym.symbol} ${String(h).padStart(2,'0')}:00 Roma — ${cell.count} trade, ${cell.wins}W ${cell.losses}L, WR ${cell.win_rate_pct ?? '—'}%, P&L ${fmt$(cell.pnl_usd)} (avg ${fmt$(cell.avg_pnl_per_trade)})`}>
+                        <div className={`h-9 w-9 rounded flex flex-col items-center justify-center ${colorFor(cell.pnl_usd)}`}>
+                          <span className="text-[10px] text-white font-bold leading-tight">{cell.count}</span>
+                          <span className="text-[9px] text-white/80 leading-tight">{cell.win_rate_pct ?? '—'}%</span>
+                        </div>
+                      </td>
+                    )
+                  })}
+                  <td className={`p-1 text-right pl-3 font-semibold ${clr(symPnl)}`}>
+                    {fmt$(symPnl)}
+                  </td>
+                </tr>
+              )
+            })}
+            {/* Totale per ora */}
+            <tr className="border-t-2 border-slate-700 bg-slate-800/40">
+              <td className="p-1 text-slate-300 font-semibold pr-3 sticky left-0 bg-slate-800 z-10">Totale</td>
+              {hours.map(h => {
+                const hb = data.by_hour.find(x => x.hour === h)
+                if (!hb) return <td key={h} className="p-0.5"><div className="h-9 w-9" /></td>
+                return (
+                  <td key={h} className="p-0.5"
+                      title={`Ora ${String(h).padStart(2,'0')}:00 Roma totale — ${hb.count} trade, P&L ${fmt$(hb.pnl)}`}>
+                    <div className={`h-9 w-9 rounded flex flex-col items-center justify-center ${colorFor(hb.pnl)}`}>
+                      <span className="text-[10px] text-white font-bold leading-tight">{hb.count}</span>
+                    </div>
+                  </td>
+                )
+              })}
+              <td className={`p-1 text-right pl-3 font-bold ${clr(data.total_pnl)}`}>{fmt$(data.total_pnl)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p className="text-xs text-slate-500 mt-3">
+        Cella: numero trade (alto) e win-rate (basso). Hover per dettaglio. Colore = intensità P&L vs max.
+      </p>
+    </div>
+  )
+}
+
 // ─── Trading Calendar ─────────────────────────────────────────────────────────
 
 const MONTHS_IT = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
@@ -470,6 +617,9 @@ export default function Performance() {
 
       {/* Tabella per simbolo */}
       <SymbolTable bySymbol={perf.by_symbol || []} untradeableSymbols={perf.untradeable_symbols || []} />
+
+      {/* Heatmap simbolo x ora di ingresso */}
+      <SymbolHourHeatmap dateFrom={dateFrom} dateTo={dateTo} />
 
       {/* Calendario P&L */}
       <TradingCalendar />
