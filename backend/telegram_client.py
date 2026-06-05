@@ -1301,7 +1301,38 @@ async def load_history(limit: int = 500, since: datetime = None):
                             status="pending", raw_message=parsed.raw,
                             created_at=ts, updated_at=ts,
                         )
+                        _append_trade_log(sig, "received",
+                            f"Replay: signal recuperato (msg_date={ts}). {parsed.symbol} {parsed.direction} entry={parsed.entry_price}-{parsed.entry_price_high} sl={parsed.stoploss} tp1={parsed.tp1}",
+                            {"msg_id": msg_id, "via": "history_replay"})
                         db.add(sig)
+                        db.commit()
+                        db.refresh(sig)
+                        # Se il signal e' "recente" (<30 min) e MT5 abilitato, tenta
+                        # comunque il place_orders con catch_origin='replay'. Il
+                        # pre-check tick di late-catch decidera' MARKET/LIMIT/CANCEL.
+                        # Senza questo, signal arrivati durante un restart breve del
+                        # backend venivano persi (caso #425: backend killato per deploy
+                        # del fix #424 proprio nel minuto del signal arrivo).
+                        try:
+                            import mt5_trader as _mt5t
+                            delay_sec = (datetime.utcnow() - ts).total_seconds()
+                            if delay_sec < 1800 and _mt5t.is_enabled():
+                                log(f"[Replay] #{sig.id} signal recente (delay {int(delay_sec)}s): tentativo place_orders con catch_origin=replay")
+                                tickets = _mt5t.place_orders(sig, catch_origin="replay",
+                                    catch_reason=f"recuperato da history replay, delay {int(delay_sec)}s",
+                                    signal_ts=ts)
+                                if tickets:
+                                    import json as _jl
+                                    db.refresh(sig)
+                                    sig.mt5_tickets = _jl.dumps(tickets) if len(tickets) > 1 else None
+                                    sig.mt5_ticket = tickets[0]
+                                    db.add(sig)
+                                    db.commit()
+                                    log(f"[Replay] #{sig.id} piazzato OK tickets={tickets}")
+                                else:
+                                    log(f"[Replay] #{sig.id} place_orders ha ritornato vuoto (pre-check / broker reject)")
+                        except Exception as _e:
+                            log(f"[Replay] #{sig.id} errore place_orders: {str(_e)[:120]}")
 
                 elif msg_type == "update" and parsed:
                     upd = TradeUpdate(
