@@ -317,7 +317,7 @@ function SymbolHourHeatmap({ dateFrom, dateTo }) {
             <tr>
               <th className="text-left p-1 text-slate-400 text-sm sticky left-0 bg-slate-900 z-10">Simbolo</th>
               {hours.map(h => (
-                <th key={h} className="p-1 text-slate-400 font-semibold w-16 text-center text-sm" title={`${h}:00-${h}:59 Roma`}>
+                <th key={h} className="p-1 text-slate-400 font-semibold w-20 text-center text-sm" title={`${h}:00-${h}:59 Roma`}>
                   {String(h).padStart(2,'0')}
                 </th>
               ))}
@@ -332,13 +332,15 @@ function SymbolHourHeatmap({ dateFrom, dateTo }) {
                   <td className="p-1 text-white font-semibold pr-3 sticky left-0 bg-slate-900 z-10 whitespace-nowrap text-base">{sym.symbol}</td>
                   {hours.map(h => {
                     const cell = cellMap[sym.symbol]?.[h]
-                    if (!cell) return <td key={h} className="p-0.5"><div className="h-16 w-16 rounded bg-slate-800/20" /></td>
+                    if (!cell) return <td key={h} className="p-0.5"><div className="h-20 w-20 rounded bg-slate-800/20" /></td>
+                    const pnlCompact = (cell.pnl_usd >= 0 ? '+' : '-') + '$' + Math.abs(cell.pnl_usd).toFixed(0)
                     return (
                       <td key={h} className="p-0.5"
                           title={`${sym.symbol} ${String(h).padStart(2,'0')}:00 Roma — ${cell.count} trade, ${cell.wins}W ${cell.losses}L, WR ${cell.win_rate_pct ?? '—'}%, P&L ${fmt$(cell.pnl_usd)} (avg ${fmt$(cell.avg_pnl_per_trade)})`}>
-                        <div className={`h-16 w-16 rounded flex flex-col items-center justify-center ${colorForWR(cell.win_rate_pct)}`}>
-                          <span className="text-lg text-white font-bold leading-tight">{cell.count}</span>
-                          <span className="text-sm text-white/90 leading-tight">{cell.win_rate_pct ?? '—'}%</span>
+                        <div className={`h-20 w-20 rounded flex flex-col items-center justify-center ${colorForWR(cell.win_rate_pct)}`}>
+                          <span className="text-lg text-white font-bold leading-none">{cell.count}</span>
+                          <span className="text-sm text-white/90 leading-none mt-0.5">{cell.win_rate_pct ?? '—'}%</span>
+                          <span className="text-sm text-white font-semibold leading-none mt-1">{pnlCompact}</span>
                         </div>
                       </td>
                     )
@@ -354,12 +356,14 @@ function SymbolHourHeatmap({ dateFrom, dateTo }) {
               <td className="p-1 text-slate-200 font-semibold pr-3 sticky left-0 bg-slate-800 z-10 text-base">Totale</td>
               {hours.map(h => {
                 const hb = data.by_hour.find(x => x.hour === h)
-                if (!hb) return <td key={h} className="p-0.5"><div className="h-16 w-16" /></td>
+                if (!hb) return <td key={h} className="p-0.5"><div className="h-20 w-20" /></td>
+                const pnlCompact = (hb.pnl >= 0 ? '+' : '-') + '$' + Math.abs(hb.pnl).toFixed(0)
                 return (
                   <td key={h} className="p-0.5"
                       title={`Ora ${String(h).padStart(2,'0')}:00 Roma totale — ${hb.count} trade, P&L ${fmt$(hb.pnl)}`}>
-                    <div className={`h-16 w-16 rounded flex flex-col items-center justify-center ${colorForPnl(hb.pnl)}`}>
-                      <span className="text-lg text-white font-bold leading-tight">{hb.count}</span>
+                    <div className={`h-20 w-20 rounded flex flex-col items-center justify-center ${colorForPnl(hb.pnl)}`}>
+                      <span className="text-lg text-white font-bold leading-none">{hb.count}</span>
+                      <span className="text-sm text-white font-semibold leading-none mt-1">{pnlCompact}</span>
                     </div>
                   </td>
                 )
@@ -371,7 +375,7 @@ function SymbolHourHeatmap({ dateFrom, dateTo }) {
       </div>
 
       <p className="text-xs text-slate-500 mt-3">
-        Cella: numero trade (alto) e win-rate (basso). Sfondo verde se WR ≥ 50%, rosso se &lt; 50%. Hover per dettaglio completo.
+        Cella (3 righe): numero trade · win-rate% · P&L USD assoluto. Sfondo verde se WR ≥ 50%, rosso se &lt; 50%. Hover per dettaglio completo.
       </p>
     </div>
   )
