@@ -742,6 +742,13 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     sm = _re.search(r'#([A-Z]{3,10})', text.upper())
                     if sm:
                         detected_symbol = sm.group(1)
+                # Detect istruzione esplicita di trail nel messaggio (oltre al "target done").
+                # Es: "First Target Done, Safe Trail in Profits" -> il trader vuole
+                # esplicitamente che spostiamo SL a BE per proteggere il profitto.
+                # Senza questo, ignoriamo "target done" come pura notifica (regola
+                # decisa dopo #405) e lasciamo SL invariato. Con keyword "trail"
+                # nello stesso msg, applichiamo SL->BE sui residui aperti.
+                trail_explicit = bool(_re.search(r'\b(trail|trailing)\b', normalized))
                 if is_target_hit and detected_symbol and mt5_trader.is_enabled():
                     # Tutti i signal del simbolo non ancora chiusi (pending o open/tp1/tp2)
                     affected_sigs = db.query(Signal).filter(
@@ -755,31 +762,41 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
                         cancelled_pending = 0
                         open_found = 0
+                        sl_moved_to_be = 0
+                        # Calcola BE+1pip solo se serve (caso trail esplicito)
+                        be_sl = None
+                        if trail_explicit and mt5_inst:
+                            try:
+                                from mt5_trader import MT5_SYMBOL_MAP as _MAP
+                                sym_info = mt5_inst.symbol_info(_MAP.get(sig.symbol.upper(), sig.symbol))
+                                pip_size = sym_info.point * 10 if sym_info else 0
+                                is_buy = (sig.direction or "").lower() == "buy"
+                                anchor = sig.actual_entry_price or sig.entry_price
+                                if anchor and pip_size > 0:
+                                    be_sl = round(anchor + pip_size, 5) if is_buy else round(anchor - pip_size, 5)
+                            except Exception:
+                                be_sl = None
                         if mt5_inst:
                             for t in tickets:
                                 orders = mt5_inst.orders_get(ticket=t)
                                 if orders:
                                     # Pending order → cancella (entry mai filled).
-                                    # Il TG ha incassato il TP ma il nostro LIMIT/STOP
-                                    # non si e' mai attivato: trade perso, niente da fare.
                                     mt5_inst.order_send({"action": mt5_inst.TRADE_ACTION_REMOVE, "order": t})
                                     cancelled_pending += 1
                                     continue
                                 positions = mt5_inst.positions_get(ticket=t)
                                 if positions:
-                                    # Posizione aperta: NESSUNA azione sul broker.
-                                    # Il messaggio "target done" del TG comunica SOLO
-                                    # che il livello e' stato colpito, NON di fare trail.
-                                    # Lo SL resta com'e' (signal o ultimo SL Move del
-                                    # trader). Lo spostamento a BE avviene SOLO:
-                                    #  - via auto-trail su chiusura ticket (se
-                                    #    trail_stop_enabled) in sync_positions
-                                    #  - via messaggio TG esplicito di trail/riposiziona
-                                    #    SL (handler sl_move)
-                                    # Caso #405: forzare BE qui sovrascriveva lo SL 4521
-                                    # del trader e chiudeva i ticket residui su un
-                                    # retracement a BE invece di lasciarli correre.
                                     open_found += 1
+                                    # Posizione aperta:
+                                    # - Se il msg e' SOLO "target done" (notifica): NESSUNA azione,
+                                    #   lascia SL com'e' e lascia gestire i TP al broker (regola #405).
+                                    # - Se il msg contiene ANCHE keyword di trail esplicito
+                                    #   ("Safe Trail in Profits", "Trail in profit", ecc.),
+                                    #   sposta SL a BE+1pip sui residui per proteggere il profitto
+                                    #   (caso #424 GBPJPY: "First Target Done, Safe Trail in Profits").
+                                    if trail_explicit and be_sl is not None:
+                                        if mt5_trader.modify_sl(t, be_sl, sig.symbol):
+                                            sl_moved_to_be += 1
 
                         # Marca cancelled SOLO se TUTTI i ticket erano pending non
                         # filled (nessuna posizione aperta). Se anche solo un ticket
@@ -797,7 +814,18 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 {"tickets": tickets, "cancelled": cancelled_pending, "trigger": "target_done"})
                             sigs_to_ema.append(sig)
                             db.add(sig)
-                        log(f"[TargetDone] #{sig.id} {sig.symbol}: open={open_found} cancel_pend={cancelled_pending} (tp_lvl={tp_level_hit}) — nessun SL→BE forzato")
+                        elif sl_moved_to_be > 0 and be_sl is not None:
+                            old_sl = sig.stoploss
+                            sig.stoploss = be_sl
+                            sig.updated_at = datetime.utcnow()
+                            _append_trade_log(sig, "sl_move_trail_tg",
+                                f"TG ha richiesto trail esplicito ('Safe Trail in Profits' o simile) "
+                                f"insieme a target_done: SL spostato a BE+1pip {be_sl} su {sl_moved_to_be} ticket "
+                                f"(DB stoploss {old_sl} → {be_sl})",
+                                {"new_sl": be_sl, "old_sl": old_sl, "tickets_modified": sl_moved_to_be,
+                                 "tp_level_hit": tp_level_hit, "trigger": "trail_explicit"})
+                            db.add(sig)
+                        log(f"[TargetDone] #{sig.id} {sig.symbol}: open={open_found} cancel_pend={cancelled_pending} sl→BE={sl_moved_to_be} trail_explicit={trail_explicit} (tp_lvl={tp_level_hit})")
                     if affected_sigs:
                         db.commit()
                         for sig in sigs_to_ema:
