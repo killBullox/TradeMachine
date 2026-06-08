@@ -237,7 +237,7 @@ function SymbolTable({ bySymbol, untradeableSymbols = [] }) {
 
 // ─── Equity Curve storica zoomabile ───────────────────────────────────────────
 
-function EquityCurveHistory({ dateFrom, dateTo }) {
+function EquityCurveHistory({ dateFrom, dateTo, symbolsCsv, hoursCsv }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
 
@@ -246,11 +246,13 @@ function EquityCurveHistory({ dateFrom, dateTo }) {
     const params = new URLSearchParams()
     if (dateFrom) params.append('date_from', dateFrom)
     if (dateTo) params.append('date_to', dateTo)
+    if (symbolsCsv) params.append('symbols', symbolsCsv)
+    if (hoursCsv) params.append('hours', hoursCsv)
     fetch(`/api/performance/equity-curve?${params}`)
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false) })
       .catch(() => setLoading(false))
-  }, [dateFrom, dateTo])
+  }, [dateFrom, dateTo, symbolsCsv, hoursCsv])
 
   if (loading) return <div className="card text-slate-400 text-sm">Caricamento equity curve...</div>
   if (!data || !data.points?.length) return <div className="card text-slate-400 text-sm">Nessun trade chiuso nel periodo.</div>
@@ -361,7 +363,7 @@ function EquityCurveHistory({ dateFrom, dateTo }) {
 
 // ─── Heatmap Simbolo x Ora Roma ───────────────────────────────────────────────
 
-function SymbolHourHeatmap({ dateFrom, dateTo }) {
+function SymbolHourHeatmap({ dateFrom, dateTo, symbolsCsv, hoursCsv }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [sortBy, setSortBy] = useState('pnl') // 'pnl' | 'count' | 'wr'
@@ -371,11 +373,13 @@ function SymbolHourHeatmap({ dateFrom, dateTo }) {
     const params = new URLSearchParams()
     if (dateFrom) params.append('date_from', dateFrom)
     if (dateTo) params.append('date_to', dateTo)
+    if (symbolsCsv) params.append('symbols', symbolsCsv)
+    if (hoursCsv) params.append('hours', hoursCsv)
     fetch(`/api/performance/by-symbol-hour?${params}`)
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false) })
       .catch(() => setLoading(false))
-  }, [dateFrom, dateTo])
+  }, [dateFrom, dateTo, symbolsCsv, hoursCsv])
 
   if (loading) return <div className="card text-slate-400 text-sm">Caricamento heatmap...</div>
   if (!data || !data.rows?.length) return <div className="card text-slate-400 text-sm">Nessun trade chiuso nel periodo.</div>
@@ -610,16 +614,31 @@ export default function Performance() {
   const [loading, setLoading] = useState(true)
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [selectedSymbols, setSelectedSymbols] = useState([])  // array di string
+  const [selectedHours, setSelectedHours] = useState([])      // array di int (0-23)
+  const [allSymbols, setAllSymbols] = useState([])
+
+  // Carica simboli disponibili una volta sola
+  useEffect(() => {
+    fetch('/api/performance/symbols').then(r => r.json()).then(d => setAllSymbols(d.symbols || [])).catch(() => {})
+  }, [])
 
   const load = useCallback(() => {
     setLoading(true)
     const params = {}
     if (dateFrom) params.date_from = dateFrom
     if (dateTo) params.date_to = dateTo
+    if (selectedSymbols.length) params.symbols = selectedSymbols.join(',')
+    if (selectedHours.length) params.hours = selectedHours.join(',')
     api.getPerformance(params).then(d => { setPerf(d); setLoading(false) })
-  }, [dateFrom, dateTo])
+  }, [dateFrom, dateTo, selectedSymbols, selectedHours])
 
   useEffect(() => { load() }, [load])
+
+  const symbolsCsv = selectedSymbols.length ? selectedSymbols.join(',') : ''
+  const hoursCsv = selectedHours.length ? selectedHours.join(',') : ''
+  const toggleSymbol = (s) => setSelectedSymbols(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s])
+  const toggleHour = (h) => setSelectedHours(prev => prev.includes(h) ? prev.filter(x => x !== h) : [...prev, h])
 
   if (loading || !perf) return <div className="p-6 text-slate-400">Caricamento...</div>
 
@@ -657,11 +676,68 @@ export default function Performance() {
           </button>
         </div>
       </div>
-      {(dateFrom || dateTo) && (
-        <div className="text-xs text-amber-400 bg-amber-900/20 border border-amber-800/40 rounded px-3 py-2">
-          Statistiche filtrate: {dateFrom ? `dal ${dateFrom.replace('T',' ')}` : ''}{dateTo ? ` al ${dateTo.replace('T',' ')}` : ''}
+      {(dateFrom || dateTo || selectedSymbols.length > 0 || selectedHours.length > 0) && (
+        <div className="text-xs text-amber-400 bg-amber-900/20 border border-amber-800/40 rounded px-3 py-2 space-y-1">
+          {(dateFrom || dateTo) && (
+            <div>Periodo: {dateFrom ? `dal ${dateFrom.replace('T',' ')}` : ''}{dateTo ? ` al ${dateTo.replace('T',' ')}` : ''}</div>
+          )}
+          {selectedSymbols.length > 0 && <div>Simboli: {selectedSymbols.join(', ')}</div>}
+          {selectedHours.length > 0 && <div>Fasce orarie (Roma): {[...selectedHours].sort((a,b)=>a-b).map(h => `${String(h).padStart(2,'0')}:00`).join(', ')}</div>}
         </div>
       )}
+
+      {/* Filtri simboli e ore */}
+      <div className="card border border-slate-700 space-y-3">
+        {/* Simboli */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs text-slate-400 uppercase tracking-wide">Filtra per simbolo</p>
+            {selectedSymbols.length > 0 && (
+              <button onClick={() => setSelectedSymbols([])} className="text-xs text-slate-500 hover:text-slate-300">Pulisci ({selectedSymbols.length})</button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {allSymbols.map(sym => {
+              const active = selectedSymbols.includes(sym)
+              return (
+                <button key={sym} onClick={() => toggleSymbol(sym)}
+                  className={`px-3 py-1 rounded text-xs font-mono ${active ? 'bg-brand-700 text-white' : 'bg-slate-800 text-slate-400 hover:text-white border border-slate-700'}`}>
+                  {sym}
+                </button>
+              )
+            })}
+            {allSymbols.length === 0 && <span className="text-xs text-slate-600">Nessun simbolo disponibile</span>}
+          </div>
+        </div>
+
+        {/* Fasce orarie */}
+        <div className="border-t border-slate-800 pt-3">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs text-slate-400 uppercase tracking-wide">Filtra per fascia oraria (Roma)</p>
+            <div className="flex items-center gap-2">
+              {selectedHours.length > 0 && (
+                <button onClick={() => setSelectedHours([])} className="text-xs text-slate-500 hover:text-slate-300">Pulisci ({selectedHours.length})</button>
+              )}
+              <button onClick={() => setSelectedHours(Array.from({length: 8}, (_, i) => 8 + i))}
+                className="text-xs text-slate-500 hover:text-emerald-400">Sessione EU (08-15)</button>
+              <button onClick={() => setSelectedHours(Array.from({length: 8}, (_, i) => 14 + i))}
+                className="text-xs text-slate-500 hover:text-emerald-400">Sessione US (14-21)</button>
+            </div>
+          </div>
+          <div className="grid grid-cols-12 gap-1">
+            {Array.from({length: 24}, (_, h) => {
+              const active = selectedHours.includes(h)
+              return (
+                <button key={h} onClick={() => toggleHour(h)}
+                  className={`py-1 rounded text-xs font-mono ${active ? 'bg-brand-700 text-white' : 'bg-slate-800 text-slate-400 hover:text-white border border-slate-700'}`}
+                  title={`${String(h).padStart(2,'0')}:00-${String(h).padStart(2,'0')}:59 Roma`}>
+                  {String(h).padStart(2,'0')}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      </div>
 
       {/* Risk Settings */}
       <RiskPanel settings={rs} onSaved={load} />
@@ -766,13 +842,13 @@ export default function Performance() {
       </div>
 
       {/* Equity curve storica zoomabile */}
-      <EquityCurveHistory dateFrom={dateFrom} dateTo={dateTo} />
+      <EquityCurveHistory dateFrom={dateFrom} dateTo={dateTo} symbolsCsv={symbolsCsv} hoursCsv={hoursCsv} />
 
       {/* Tabella per simbolo */}
       <SymbolTable bySymbol={perf.by_symbol || []} untradeableSymbols={perf.untradeable_symbols || []} />
 
       {/* Heatmap simbolo x ora di ingresso */}
-      <SymbolHourHeatmap dateFrom={dateFrom} dateTo={dateTo} />
+      <SymbolHourHeatmap dateFrom={dateFrom} dateTo={dateTo} symbolsCsv={symbolsCsv} hoursCsv={hoursCsv} />
 
       {/* Calendario P&L */}
       <TradingCalendar />

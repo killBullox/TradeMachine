@@ -40,9 +40,12 @@ export const api = {
     const q = new URLSearchParams()
     if (params.date_from) q.set('date_from', params.date_from)
     if (params.date_to) q.set('date_to', params.date_to)
+    if (params.symbols) q.set('symbols', params.symbols)
+    if (params.hours) q.set('hours', params.hours)
     const qs = q.toString()
     return request(`/performance${qs ? '?' + qs : ''}`)
   },
+  getPerformanceSymbols: () => request('/performance/symbols'),
 
   // Risk settings
   getRiskSettings: () => request('/risk-settings'),

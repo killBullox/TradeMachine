@@ -433,10 +433,64 @@ def delete_journal(entry_id: int, db: Session = Depends(get_db)):
 
 # ─── Endpoints: Performance ───────────────────────────────────────────────────
 
+def _parse_csv_param(v: Optional[str]) -> Optional[list]:
+    if not v:
+        return None
+    parts = [p.strip() for p in v.split(",") if p.strip()]
+    return parts or None
+
+
+def _apply_perf_filters(signals: list, symbols_csv: Optional[str], hours_csv: Optional[str]) -> list:
+    """Filtra signal in Python per symbols (CSV) e fasce orarie (CSV di interi 0-23)
+    sull'orario di ingresso in Roma timezone. Usa entered_at se disponibile,
+    altrimenti created_at."""
+    from zoneinfo import ZoneInfo
+    syms = _parse_csv_param(symbols_csv)
+    hours_list = _parse_csv_param(hours_csv)
+    hours_set = None
+    if hours_list:
+        try:
+            hours_set = {int(h) for h in hours_list}
+        except Exception:
+            hours_set = None
+    if not syms and not hours_set:
+        return signals
+    syms_upper = {s.upper() for s in syms} if syms else None
+    rome_tz = ZoneInfo("Europe/Rome")
+    utc_tz = ZoneInfo("UTC")
+    out = []
+    for s in signals:
+        if syms_upper and (s.symbol or "").upper() not in syms_upper:
+            continue
+        if hours_set is not None:
+            ts = s.entered_at or s.created_at
+            if not ts:
+                continue
+            tsu = ts.replace(tzinfo=utc_tz) if ts.tzinfo is None else ts
+            if tsu.astimezone(rome_tz).hour not in hours_set:
+                continue
+        out.append(s)
+    return out
+
+
+@app.get("/api/performance/symbols")
+def get_perf_symbols(db: Session = Depends(get_db)):
+    """Lista simboli distinti presenti nei signal (per popolare il filtro UI)."""
+    from sqlalchemy import distinct
+    rows = db.query(distinct(Signal.symbol)).filter(
+        Signal.is_archived == False,
+        Signal.symbol.isnot(None),
+    ).all()
+    syms = sorted({r[0] for r in rows if r[0]})
+    return {"symbols": syms}
+
+
 @app.get("/api/performance")
 def get_performance(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    symbols: Optional[str] = Query(None),
+    hours: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
     q = db.query(Signal).filter(Signal.is_archived == False)
@@ -454,7 +508,7 @@ def get_performance(
             q = q.filter(Signal.created_at <= dt_to)
         except Exception:
             pass
-    signals = q.all()
+    signals = _apply_perf_filters(q.all(), symbols, hours)
     total = len(signals)
 
     status_counts = {}
@@ -638,6 +692,8 @@ class RiskSettingsIn(BaseModel):
 def get_equity_curve(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    symbols: Optional[str] = Query(None),
+    hours: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     """Andamento P&L cumulativo nel tempo. Un punto per ogni trade chiuso,
@@ -653,7 +709,8 @@ def get_equity_curve(
     if date_to:
         try: q = q.filter(Signal.closed_at <= datetime.fromisoformat(date_to))
         except: pass
-    sigs = q.order_by(Signal.closed_at).all()
+    sigs = _apply_perf_filters(q.all(), symbols, hours)
+    sigs.sort(key=lambda s: s.closed_at)
     points = []
     cum = 0.0
     peak = 0.0
@@ -689,6 +746,8 @@ def get_equity_curve(
 def get_perf_by_symbol_hour(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    symbols: Optional[str] = Query(None),
+    hours: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     """Stats raggruppate per (symbol, ora di ingresso Roma).
@@ -709,7 +768,7 @@ def get_perf_by_symbol_hour(
     if date_to:
         try: q = q.filter(Signal.created_at <= datetime.fromisoformat(date_to))
         except: pass
-    sigs = q.all()
+    sigs = _apply_perf_filters(q.all(), symbols, hours)
 
     # Aggrega per (symbol, hour_roma)
     buckets = {}  # (sym, hour) -> {count, wins, losses, pnl, ids}
