@@ -848,6 +848,92 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
             except Exception as e:
                 log(f"[TargetDone] Errore drop pending: {str(e)[:120]}")
 
+            # Handler "trail standalone": messaggi tipo "Everyone Hold Book Or
+            # Trail Accordingly" / "Trail in profits" che arrivano SENZA un
+            # esplicito "Nth Target Done". Il trader sta dicendo di proteggere
+            # il profitto. Trail target scalato sul livello TP gia' raggiunto
+            # (status sig): tp1 -> TP1+1pip, tp2 -> TP2+1pip, altrimenti BE+1pip.
+            # Caso #428 (08/06/2026): TP1 broker gia' colpito, msg standalone
+            # "Hold Book Or Trail Accordingly" -> il bot lo ignorava perche'
+            # cercava trail keyword solo dentro target_done. L'utente ha
+            # dovuto fare lock_profit manuale.
+            if not is_target_hit and trail_explicit and mt5_trader.is_enabled():
+                try:
+                    # Risoluzione simbolo per trail standalone:
+                    # 1) parsed.symbol o detected_symbol via regex #SYMBOL
+                    # 2) reply_to_msg_id → signal originale del trader
+                    # 3) ultimo signal aperto del simbolo piu' attivo (fallback)
+                    target_symbol = detected_symbol
+                    if not target_symbol and reply_to_msg_id:
+                        ref_sig = db.query(Signal).filter(Signal.telegram_msg_id == reply_to_msg_id).first()
+                        if ref_sig:
+                            target_symbol = ref_sig.symbol
+                            log(f"[TrailStandalone] simbolo {target_symbol} risolto via reply a msg={reply_to_msg_id} (sig #{ref_sig.id})")
+                    if not target_symbol:
+                        # Fallback: signal aperto piu' recente
+                        recent_open = db.query(Signal).filter(
+                            Signal.status.in_(("open", "tp1", "tp2")),
+                            Signal.mt5_tickets.isnot(None),
+                            Signal.closed_at.is_(None),
+                        ).order_by(Signal.created_at.desc()).first()
+                        if recent_open:
+                            target_symbol = recent_open.symbol
+                            log(f"[TrailStandalone] simbolo non risolto, fallback a ultimo aperto: {target_symbol} (sig #{recent_open.id})")
+                    if not target_symbol:
+                        log(f"[TrailStandalone] nessun simbolo risolvibile, skip")
+                        raise StopIteration
+                    affected_sigs2 = db.query(Signal).filter(
+                        Signal.status.in_(("open", "tp1", "tp2")),
+                        Signal.mt5_tickets.isnot(None),
+                        Signal.symbol == target_symbol,
+                        Signal.closed_at.is_(None),
+                    ).all()
+                    mt5_inst2 = mt5_trader._get_mt5()
+                    for sig in affected_sigs2:
+                        from mt5_trader import MT5_SYMBOL_MAP as _MAP2
+                        sym_info2 = mt5_inst2.symbol_info(_MAP2.get(sig.symbol.upper(), sig.symbol)) if mt5_inst2 else None
+                        pip2 = (sym_info2.point * 10) if sym_info2 else 0
+                        if pip2 <= 0:
+                            continue
+                        is_buy2 = (sig.direction or "").lower() == "buy"
+                        # Anchor in base a status
+                        if sig.status == "tp2" and sig.tp2:
+                            anchor2 = float(sig.tp2); label2 = "TP2+1pip"
+                        elif sig.status == "tp1" and sig.tp1:
+                            anchor2 = float(sig.tp1); label2 = "TP1+1pip"
+                        else:
+                            anchor2 = sig.actual_entry_price or sig.entry_price
+                            label2 = "BE+1pip"
+                        if not anchor2:
+                            continue
+                        target_sl2 = round(anchor2 + pip2, 5) if is_buy2 else round(anchor2 - pip2, 5)
+                        # Per BUY non degradare: solo se nuovo SL > corrente
+                        cur_sl2 = sig.stoploss
+                        if cur_sl2 is not None:
+                            if is_buy2 and target_sl2 <= cur_sl2: continue
+                            if not is_buy2 and target_sl2 >= cur_sl2: continue
+                        tickets2 = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
+                        moved2 = 0
+                        for t in tickets2:
+                            if mt5_inst2 and mt5_inst2.positions_get(ticket=t):
+                                if mt5_trader.modify_sl(t, target_sl2, sig.symbol):
+                                    moved2 += 1
+                        if moved2 > 0:
+                            old2 = sig.stoploss
+                            sig.stoploss = target_sl2
+                            sig.updated_at = datetime.utcnow()
+                            _append_trade_log(sig, "sl_move_trail_standalone",
+                                f"TG trail standalone ('{(text or '')[:80]}'): SL spostato a {target_sl2} ({label2}) su {moved2} ticket "
+                                f"(DB stoploss {old2} → {target_sl2})",
+                                {"new_sl": target_sl2, "old_sl": old2, "tickets_modified": moved2,
+                                 "trail_label": label2, "trigger": "trail_standalone", "status_at_trail": sig.status})
+                            db.add(sig)
+                            log(f"[TrailStandalone] #{sig.id} {sig.symbol} SL→{target_sl2} ({label2}) su {moved2} ticket")
+                    if affected_sigs2:
+                        db.commit()
+                except Exception as _e:
+                    log(f"[TrailStandalone] errore: {str(_e)[:120]}")
+
             await broadcast_ws({
                 "event": "trade_update",
                 "data": {
