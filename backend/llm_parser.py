@@ -78,7 +78,11 @@ CLASSIFICAZIONE TYPE:
   "3rd/Third/Last Target Done" → status_text="third_target_hit"
   "All Targets Done" → status_text="all_targets_done"
   "Near First Target" / "Approaching Target" → status_text="near_target"
-  "Safe Trail in Profits" / "Running in profits" → status_text="trail_active"
+  "Safe Trail in Profits" / "Running in profits" / "Hold Book Or Trail Accordingly" /
+    "Hold And Trail" / "Book or Trail" / "Trail Accordingly" / "Trail your SL" /
+    qualunque istruzione esplicita a fare trail dello stop loss → status_text="trail_active".
+    IMPORTANTE: questa categoria deve catturare TUTTE le variazioni linguistiche con cui
+    il trader chiede di muovere lo SL in profitto, non solo i pattern letterali sopra.
   "$XXX Profit Running" → status_text="in_profit"
   Solo "XAUUSD | 4550 To 4555" senza altro → status_text="price_update"
   Altrimenti → status_text="general"

@@ -742,13 +742,16 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     sm = _re.search(r'#([A-Z]{3,10})', text.upper())
                     if sm:
                         detected_symbol = sm.group(1)
-                # Detect istruzione esplicita di trail nel messaggio (oltre al "target done").
-                # Es: "First Target Done, Safe Trail in Profits" -> il trader vuole
-                # esplicitamente che spostiamo SL a BE per proteggere il profitto.
+                # Detect istruzione esplicita di trail nel messaggio.
+                # Doppio trigger:
+                #  (a) LLM ha classificato il msg come status_text="trail_active"
+                #      (cattura variazioni linguistiche del trader)
+                #  (b) Fallback regex su keyword "trail"/"trailing" nel testo normalizzato
                 # Senza questo, ignoriamo "target done" come pura notifica (regola
-                # decisa dopo #405) e lasciamo SL invariato. Con keyword "trail"
-                # nello stesso msg, applichiamo SL->BE sui residui aperti.
-                trail_explicit = bool(_re.search(r'\b(trail|trailing)\b', normalized))
+                # decisa dopo #405) e lasciamo SL invariato.
+                trail_explicit_llm = (parsed.status_text == "trail_active")
+                trail_explicit_regex = bool(_re.search(r'\b(trail|trailing)\b', normalized))
+                trail_explicit = trail_explicit_llm or trail_explicit_regex
                 if is_target_hit and detected_symbol and mt5_trader.is_enabled():
                     # Tutti i signal del simbolo non ancora chiusi (pending o open/tp1/tp2)
                     affected_sigs = db.query(Signal).filter(
@@ -896,10 +899,11 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         if pip2 <= 0:
                             continue
                         is_buy2 = (sig.direction or "").lower() == "buy"
-                        # Anchor in base a status
-                        if sig.status == "tp2" and sig.tp2:
-                            anchor2 = float(sig.tp2); label2 = "TP2+1pip"
-                        elif sig.status == "tp1" and sig.tp1:
+                        # Trail = lock del TP PRECEDENTE (passo indietro).
+                        # status=tp2 (TP2 hit) → SL = TP1+1pip (locka TP1)
+                        # status=tp1 (TP1 hit) → SL = entry+1pip (BE+1pip)
+                        # status=open → SL = entry+1pip (BE+1pip) come fallback
+                        if sig.status == "tp2" and sig.tp1:
                             anchor2 = float(sig.tp1); label2 = "TP1+1pip"
                         else:
                             anchor2 = sig.actual_entry_price or sig.entry_price
