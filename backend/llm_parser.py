@@ -101,9 +101,11 @@ CLASSIFICAZIONE TYPE:
     (il "Sl hit" e' contesto, l'azione e' "Re enter ... With Same Sl")
   - "SL hit but re-enter at same levels" → reenter
   - "Stop loss hit, you can re-enter here" → reenter
-  REGOLA CRITICA: un messaggio breve che dice "enter now" o "enter again" SENZA
-  specificare entry zone + TP + SL non e' MAI un signal nuovo (un signal completo
-  ha sempre i 3 livelli TP + SL). E' sempre un reenter.
+  REGOLA CRITICA: un messaggio breve che dice "enter now" / "enter again" / "enter
+  again now" / "risky enter now" SENZA specificare almeno SL + TP1 non e' MAI un
+  signal nuovo (un signal reale ha sempre almeno SL + TP1; alcuni hanno anche TP2
+  e/o TP3 ma il minimo e' SL + TP1). E' sempre un reenter o un'istruzione di
+  market-entry sul signal precedente.
 
 ▸ "risky_flag" — segnala rischio elevato: "highly risky", "#risky", "aggressive", "#RiskyTrade"
 

@@ -578,15 +578,109 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
         _save_raw(db, msg_id, sender, text, msg_type)
 
         if msg_type == "signal" and parsed:
-            # Guard anti-misclass LLM: un signal completo ha SEMPRE almeno l'SL
-            # o un TP. Se mancano tutti, e' quasi certamente un msg breve tipo
-            # "Everyone Enter Now Cmp 4341" mal classificato come signal invece
-            # di reenter. NON salvare il signal fasullo: meglio perdere il
-            # reenter (raro) che aprire un trade con direzione arbitraria
-            # senza SL/TP. Caso #436 09/06/2026: LLM ha messo direction=buy
-            # mentre era reenter di un signal SELL.
-            if parsed.stoploss is None and parsed.tp1 is None and parsed.tp2 is None and parsed.tp3 is None:
-                log(f"[Signal-skip] msg={msg_id} '{text[:60]}' classificato signal MA manca SL+TP1+TP2+TP3 → quasi certamente reenter mal-classificato, SKIP")
+            # Anti-misclass LLM: signal reale richiede almeno SL + TP1.
+            # Se entrambi mancano = msg interpretabile come istruzione sul signal
+            # piu' recente (caso #436 09/06: "Everyone Enter Now Cmp 4341").
+            # Routing:
+            #  - trade originale gia' fillato → IGNORA (siamo dentro)
+            #  - trade pending non filled + msg "cmp/enter now" → MARKET sul ref
+            #  - trade pending non filled + msg con "at X" → MODIFY entry range
+            #  - trade gia' chiuso/cancellato → IGNORA (no trade da modificare)
+            if parsed.stoploss is None and parsed.tp1 is None:
+                import re as _re_me, json as _jl_me, mt5_trader as _mt5t
+                ref = None
+                if parsed.symbol:
+                    ref = db.query(Signal).filter(Signal.symbol == parsed.symbol).order_by(Signal.created_at.desc()).first()
+                if not ref:
+                    log(f"[MarketEntry] msg={msg_id} '{text[:60]}' nessun signal di riferimento → ignore")
+                    return
+                tickets_ref = []
+                if ref.mt5_tickets:
+                    try: tickets_ref = _jl_me.loads(ref.mt5_tickets)
+                    except Exception: tickets_ref = []
+                elif ref.mt5_ticket:
+                    tickets_ref = [ref.mt5_ticket]
+                mt5_inst = _mt5t._get_mt5() if _mt5t.is_enabled() else None
+                has_open_pos = False
+                has_pending_orders = False
+                if mt5_inst and tickets_ref:
+                    for t in tickets_ref:
+                        if mt5_inst.positions_get(ticket=t): has_open_pos = True
+                        elif mt5_inst.orders_get(ticket=t): has_pending_orders = True
+
+                # CASO A: trade gia' fillato (siamo dentro)
+                if has_open_pos:
+                    log(f"[MarketEntry] #{ref.id} {ref.symbol} {ref.direction} gia' fillato → IGNORE msg '{text[:60]}'")
+                    return
+
+                # CASO B: trade pending non filled → market o modify entry
+                if has_pending_orders and ref.status == "pending":
+                    txt_low = (text or "").lower()
+                    wants_market = bool(_re_me.search(r'\b(cmp|enter\s+now|now)\b', txt_low))
+                    # Cerca "at X" / "@X" / "to X" per modify entry
+                    modify_match = _re_me.search(r'(?:enter|move|modify|change|@|at|to)\s+(\d+(?:\.\d+)?)', txt_low)
+                    if not wants_market and modify_match:
+                        new_entry = float(modify_match.group(1))
+                        log(f"[ModifyEntry] #{ref.id} {ref.symbol}: modifica entry range → {new_entry} (msg: '{text[:60]}')")
+                        if mt5_inst:
+                            for t in tickets_ref:
+                                if mt5_inst.orders_get(ticket=t):
+                                    mt5_inst.order_send({"action": mt5_inst.TRADE_ACTION_REMOVE, "order": t})
+                        old_low, old_high = ref.entry_price, ref.entry_price_high
+                        ref.entry_price = new_entry
+                        ref.entry_price_high = new_entry
+                        ref.mt5_ticket = None
+                        ref.mt5_tickets = None
+                        _append_trade_log(ref, "entry_modified",
+                            f"TG '{text[:80]}': entry range {old_low}-{old_high} → {new_entry}, pending cancellati e ripiazzati.",
+                            {"trigger_msg_id": msg_id, "old_low": old_low, "old_high": old_high, "new": new_entry})
+                        db.add(ref); db.commit(); db.refresh(ref)
+                        try:
+                            tickets_new = _mt5t.place_orders(ref, catch_origin="realtime",
+                                catch_reason=f"trader: modifica entry {new_entry}",
+                                signal_ts=ref.created_at)
+                            if tickets_new:
+                                ref.mt5_tickets = _jl_me.dumps(tickets_new) if len(tickets_new) > 1 else None
+                                ref.mt5_ticket = tickets_new[0]
+                                db.add(ref); db.commit()
+                                log(f"[ModifyEntry] #{ref.id} pending ripiazzati tickets={tickets_new}")
+                            else:
+                                log(f"[ModifyEntry] #{ref.id} place_orders vuoto")
+                        except Exception as _e:
+                            log(f"[ModifyEntry] #{ref.id} errore: {str(_e)[:120]}")
+                        return
+                    if wants_market:
+                        log(f"[MarketEntry] #{ref.id} {ref.symbol}: MARKET entry su pending non filled (msg: '{text[:60]}')")
+                        if mt5_inst:
+                            for t in tickets_ref:
+                                if mt5_inst.orders_get(ticket=t):
+                                    mt5_inst.order_send({"action": mt5_inst.TRADE_ACTION_REMOVE, "order": t})
+                        ref.mt5_ticket = None
+                        ref.mt5_tickets = None
+                        ref.entry_type = "market"  # forza MARKET nel place_orders
+                        _append_trade_log(ref, "market_entry_forced",
+                            f"TG '{text[:80]}': pending cancellati, ripiazzo MARKET (cmp/enter now).",
+                            {"trigger_msg_id": msg_id})
+                        db.add(ref); db.commit(); db.refresh(ref)
+                        try:
+                            tickets_new = _mt5t.place_orders(ref, catch_origin="realtime",
+                                catch_reason="trader: market entry su signal pending",
+                                signal_ts=ref.created_at)
+                            if tickets_new:
+                                ref.mt5_tickets = _jl_me.dumps(tickets_new) if len(tickets_new) > 1 else None
+                                ref.mt5_ticket = tickets_new[0]
+                                db.add(ref); db.commit()
+                                log(f"[MarketEntry] #{ref.id} ripiazzato OK tickets={tickets_new}")
+                            else:
+                                log(f"[MarketEntry] #{ref.id} place_orders vuoto")
+                        except Exception as _e:
+                            log(f"[MarketEntry] #{ref.id} errore: {str(_e)[:120]}")
+                        return
+                    log(f"[MarketEntry] #{ref.id} pending ma msg ambiguo (no cmp/now, no 'at X'): IGNORE → '{text[:60]}'")
+                    return
+
+                # CASO C: trade gia' chiuso/cancellato → ignora
+                log(f"[MarketEntry] #{ref.id} status={ref.status} (no pending, no open) → IGNORE msg '{text[:60]}'")
                 return
             sig = _save_signal(db, parsed, msg_id)
             # Auto-trading: piazza ordine MT5 se abilitato
