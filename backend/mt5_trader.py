@@ -1131,6 +1131,9 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     # voleva 4545). SL_dist=25 vs TP1_dist=5 → ratio 5 → fuori scala.
     # Vincoli: candidato deve essere su lato giusto (sotto entry per BUY),
     # con SL_dist nuovo in (0.3x, 3x) della TP1_dist.
+    # Variante 2: INSERZIONE di una cifra (caso #431: trader scrive "448" invece
+    # di "4348", parser normalizza a 4480 perdendo una posizione). Si prova a
+    # inserire ogni cifra in ogni posizione del raw "short" (4480 → 448 + insert).
     if sl_raw and tps_raw:
         e_f0 = float(entry)
         sl_f = float(sl_raw)
@@ -1143,38 +1146,51 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
             ratio = sl_dist0 / tp1_dist0
             # Anomalo se SL distance >5x TP1 distance o <0.2x
             if ratio > 5 or ratio < 0.2:
-                sl_str = f"{sl_f:.{digits}f}" if digits else f"{int(sl_f)}"
                 cands_sl = []
                 seen_sl = set()
+                # Genera tutti i candidati (sostituzione + inserzione) e filtra
+                # sul lato giusto + ratio plausibile.
+                def _add_cand(cv):
+                    if cv <= 0 or cv in seen_sl:
+                        return
+                    seen_sl.add(cv)
+                    if (is_buy and cv >= e_f0) or (not is_buy and cv <= e_f0):
+                        return  # lato sbagliato
+                    new_dist = abs(e_f0 - cv)
+                    if new_dist <= 0:
+                        return
+                    new_ratio = new_dist / tp1_dist0
+                    if 0.3 <= new_ratio <= 3:
+                        cands_sl.append(cv)
+                # Variante A: sostituzione single-digit
+                sl_str = f"{sl_f:.{digits}f}" if digits else f"{int(sl_f)}"
                 for ip, ch in enumerate(sl_str):
-                    if not ch.isdigit():
-                        continue
+                    if not ch.isdigit(): continue
                     for d in "0123456789":
-                        if d == ch:
-                            continue
-                        cs = sl_str[:ip] + d + sl_str[ip+1:]
-                        try:
-                            cv = float(cs)
-                        except ValueError:
-                            continue
-                        if cv in seen_sl or cv <= 0:
-                            continue
-                        seen_sl.add(cv)
-                        # Lato corretto + nuovo SL_dist in range plausibile
-                        new_side_ok = (is_buy and cv < e_f0) or (not is_buy and cv > e_f0)
-                        if not new_side_ok:
-                            continue
-                        new_dist = abs(e_f0 - cv)
-                        if new_dist <= 0:
-                            continue
-                        new_ratio = new_dist / tp1_dist0
-                        if 0.3 <= new_ratio <= 3:
-                            cands_sl.append(cv)
+                        if d == ch: continue
+                        try: cv = float(sl_str[:ip] + d + sl_str[ip+1:])
+                        except ValueError: continue
+                        _add_cand(cv)
+                # Variante B: inserzione di una cifra in mancante (#431)
+                # Lavora sulla parte intera, prova anche rimuovendo zeri finali
+                int_str = str(int(sl_f))
+                shorts = {int_str}
+                if int_str.endswith("0") and len(int_str) > 1:
+                    shorts.add(int_str[:-1])
+                for short in shorts:
+                    if len(short) < 2: continue
+                    for ip in range(len(short) + 1):
+                        for d in "0123456789":
+                            cs = short[:ip] + d + short[ip:]
+                            if cs.startswith("0"): continue
+                            try: cv = float(cs)
+                            except ValueError: continue
+                            _add_cand(cv)
                 if len(cands_sl) == 1:
                     fix = round(cands_sl[0], digits)
-                    log(f"#{sig.id} SL={sl_f} typo single-digit (dist anomala vs TP1) → corretto a {fix}")
+                    log(f"#{sig.id} SL={sl_f} typo (dist anomala vs TP1) → corretto a {fix}")
                     _append_trade_log_mt5(sig, "mt5_sl_autocorrect",
-                        f"SL corretto da {sl_f} a {fix} (single-digit, dist anomala vs TP1)")
+                        f"SL corretto da {sl_f} a {fix} (single-digit / insert-digit, dist anomala vs TP1)")
                     sig.notes = (sig.notes or "") + f" [SL auto-corretto: {sl_f} -> {fix}]"
                     sl_raw = fix
                     sl = fix
@@ -1894,7 +1910,8 @@ def fix_price_typo(value: float, anchor_price: float, digits: int = 2,
 
     val_str = f"{value:.{digits}f}" if digits else f"{int(value)}"
     seen = set()
-    cands = []
+    cands = []  # (candidate_value, fix_kind)
+    # Variante 1: SOSTITUZIONE single-digit (un carattere → un altro)
     for ip, ch in enumerate(val_str):
         if not ch.isdigit():
             continue
@@ -1910,11 +1927,39 @@ def fix_price_typo(value: float, anchor_price: float, digits: int = 2,
                 continue
             seen.add(cv)
             if abs(cv - anchor_price) <= anchor_price * anchor_tol_pct and _in_bounds(cv):
-                cands.append(cv)
+                cands.append((cv, "substitute"))
+    # Variante 2: INSERZIONE digit (caso #431: trader scrive "448" invece di "4348",
+    # parser normalizza a 4480 perdendo una posizione). Si genera il valore "raw
+    # short" rimuovendo eventuali zeri trailing e si prova a inserire ogni cifra
+    # in ogni posizione. Funziona quando il valore parsato e' stato gonfiato di
+    # un ordine di magnitudine da una normalizzazione automatica.
+    # Usa la parte intera per evitare di interferire con i decimali.
+    int_part_str = str(int(value))
+    # Genera anche le versioni "ridotte" rimuovendo 1 zero finale (la normalizzazione tipica)
+    candidates_short = {int_part_str}
+    if int_part_str.endswith("0") and len(int_part_str) > 1:
+        candidates_short.add(int_part_str[:-1])
+    for short_str in candidates_short:
+        if len(short_str) < 2:
+            continue
+        for ip in range(len(short_str) + 1):
+            for d in "0123456789":
+                cs = short_str[:ip] + d + short_str[ip:]
+                if cs.startswith("0"):  # niente leading zero
+                    continue
+                try:
+                    cv = float(cs)
+                except ValueError:
+                    continue
+                if cv <= 0 or cv in seen:
+                    continue
+                seen.add(cv)
+                if abs(cv - anchor_price) <= anchor_price * anchor_tol_pct and _in_bounds(cv):
+                    cands.append((cv, "insert"))
     if not cands:
         return value, False, "no_fix"
-    best = min(cands, key=lambda c: abs(c - anchor_price))
-    return round(best, digits), True, f"single_digit_fix: {value} -> {best}"
+    best, kind = min(cands, key=lambda x: abs(x[0] - anchor_price))
+    return round(best, digits), True, f"{kind}_digit_fix: {value} -> {best}"
 
 
 def modify_sl(ticket: int, new_sl: float, symbol: str) -> bool:
