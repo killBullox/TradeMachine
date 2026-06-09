@@ -893,6 +893,26 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     ).all()
                     mt5_inst2 = mt5_trader._get_mt5()
                     for sig in affected_sigs2:
+                        # CASO A: signal ancora "open" (TP1 broker NON hit) →
+                        # NON muovere SL ora, ARMA invece trail_stop_enabled.
+                        # Cosi' quando il broker tocca davvero TP1, l'auto-trail
+                        # in sync_positions sposta SL a BE+1pip al momento giusto.
+                        # Caso #432 (09/06): "Near First Target, Safe Trail in Profits"
+                        # arrivato col prezzo a 214.150, TP1 broker 214.200 non ancora hit.
+                        if sig.status == "open":
+                            if not sig.trail_stop_enabled:
+                                sig.trail_stop_enabled = True
+                                sig.updated_at = datetime.utcnow()
+                                _append_trade_log(sig, "trail_armed_pre_tp",
+                                    f"TG trail standalone con TP1 broker NON ancora hit ('{(text or '')[:80]}'): "
+                                    f"armato trail_stop_enabled=True. SL invariato, scattera' alla chiusura TP1 reale via sync_positions.",
+                                    {"status": sig.status, "trigger": "trail_standalone_pre_tp"})
+                                db.add(sig)
+                                log(f"[TrailStandalone] #{sig.id} {sig.symbol} status=open → armato trail_stop_enabled (TP1 broker non hit)")
+                            else:
+                                log(f"[TrailStandalone] #{sig.id} {sig.symbol} trail gia' armato, skip")
+                            continue
+                        # CASO B: signal gia' tp1/tp2 → sposta SL trail subito.
                         from mt5_trader import MT5_SYMBOL_MAP as _MAP2
                         sym_info2 = mt5_inst2.symbol_info(_MAP2.get(sig.symbol.upper(), sig.symbol)) if mt5_inst2 else None
                         pip2 = (sym_info2.point * 10) if sym_info2 else 0
@@ -902,7 +922,6 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         # Trail = lock del TP PRECEDENTE (passo indietro).
                         # status=tp2 (TP2 hit) → SL = TP1+1pip (locka TP1)
                         # status=tp1 (TP1 hit) → SL = entry+1pip (BE+1pip)
-                        # status=open → SL = entry+1pip (BE+1pip) come fallback
                         if sig.status == "tp2" and sig.tp1:
                             anchor2 = float(sig.tp1); label2 = "TP1+1pip"
                         else:
