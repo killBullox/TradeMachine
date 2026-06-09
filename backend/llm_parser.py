@@ -93,10 +93,17 @@ CLASSIFICAZIONE TYPE:
   - "enter again", "everyone enter again now"
   - "re-enter", "reenter", "Re enter" (con spazio), "RE-ENTER"
   - "open again", "open again now"
+  - "everyone enter now", "enter now", "enter now cmp X" (cmp = current market price)
+    → questi sono SEMPRE reenter del signal piu' recente, MAI un nuovo signal.
+    Es: "Everyone Enter Now Cmp 4341" subito dopo un signal XAUUSD = reenter di quel signal.
+  - "Risky enter now", "Risky entry now" → reenter (il "now" implica entrata a market sul signal corrente)
   - "Sl hit In Sudden Spike Risky Can Re enter Here With Same Sl" → reenter
     (il "Sl hit" e' contesto, l'azione e' "Re enter ... With Same Sl")
   - "SL hit but re-enter at same levels" → reenter
   - "Stop loss hit, you can re-enter here" → reenter
+  REGOLA CRITICA: un messaggio breve che dice "enter now" o "enter again" SENZA
+  specificare entry zone + TP + SL non e' MAI un signal nuovo (un signal completo
+  ha sempre i 3 livelli TP + SL). E' sempre un reenter.
 
 ▸ "risky_flag" — segnala rischio elevato: "highly risky", "#risky", "aggressive", "#RiskyTrade"
 

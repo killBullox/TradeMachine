@@ -578,6 +578,16 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
         _save_raw(db, msg_id, sender, text, msg_type)
 
         if msg_type == "signal" and parsed:
+            # Guard anti-misclass LLM: un signal completo ha SEMPRE almeno l'SL
+            # o un TP. Se mancano tutti, e' quasi certamente un msg breve tipo
+            # "Everyone Enter Now Cmp 4341" mal classificato come signal invece
+            # di reenter. NON salvare il signal fasullo: meglio perdere il
+            # reenter (raro) che aprire un trade con direzione arbitraria
+            # senza SL/TP. Caso #436 09/06/2026: LLM ha messo direction=buy
+            # mentre era reenter di un signal SELL.
+            if parsed.stoploss is None and parsed.tp1 is None and parsed.tp2 is None and parsed.tp3 is None:
+                log(f"[Signal-skip] msg={msg_id} '{text[:60]}' classificato signal MA manca SL+TP1+TP2+TP3 → quasi certamente reenter mal-classificato, SKIP")
+                return
             sig = _save_signal(db, parsed, msg_id)
             # Auto-trading: piazza ordine MT5 se abilitato
             if sig:
