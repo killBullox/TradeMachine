@@ -117,6 +117,22 @@ CLASSIFICAZIONE TYPE:
   MAI un signal nuovo (un signal reale ha sempre almeno SL + TP1). E' SEMPRE
   enter_now (se manca "again") o reenter (se c'e' "again" / "re-").
 
+  PRINCIPIO SEMANTICO per casi NON coperti dagli esempi sopra (linguaggio nuovo
+  o variato del trader). Distinguere reenter vs enter_now chiedendoti:
+    "Il trader sta dicendo 'il trade e' uscito, torna dentro' (reenter)
+     oppure 'il trade e' ancora aperto, sbrigati a entrare' (enter_now)?"
+  Indicatori di reenter (ritorno post-chiusura): parole tipo "again", "back",
+  "re-", oppure riferimento esplicito a un'uscita precedente ("SL hit", "took
+  exit", "closed", "exited", "stopped out") prima dell'azione di rientro.
+  Indicatori di enter_now (catch-up su trade vivo): urgenza al presente ("now",
+  "immediately", "fast", "quickly"), reference al prezzo corrente ("cmp",
+  "current price"), assenza totale di "again"/"re-"/uscite menzionate.
+  Se ambiguo, usa il CONTESTO fornito (TRADE ATTIVI / TRADE RECENTI CHIUSI):
+    - C'e' un trade ATTIVO dello stesso simbolo → enter_now
+    - L'ultimo trade dello stesso simbolo era chiuso/SL hit → reenter
+  Questo principio copre wording futuri non listati negli esempi (es.
+  "Catch up now", "Get in fast", "Jump in", "Hop on", "Late entry ok").
+
 ▸ "risky_flag" — segnala rischio elevato: "highly risky", "#risky", "aggressive", "#RiskyTrade"
 
 ▸ "ignore" — watchlist ("add X to watchlist"), livelli giornalieri ("Support: ..."),
