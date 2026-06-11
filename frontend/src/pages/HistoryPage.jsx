@@ -6,11 +6,13 @@ import { it } from 'date-fns/locale'
 const STATUS_COLORS = {
   pending: 'text-yellow-400', open: 'text-blue-400',
   tp1: 'text-emerald-400', tp2: 'text-emerald-300', tp3: 'text-emerald-200',
+  trail_out: 'text-sky-400',
   closed: 'text-slate-400', sl_hit: 'text-rose-400', cancelled: 'text-slate-500', cancelled_timing: 'text-amber-600',
 }
 const STATUS_LABELS = {
   pending: 'In attesa', open: 'Aperto', tp1: 'TP1 ✓', tp2: 'TP2 ✓',
-  tp3: 'TP3 ✓', closed: 'Chiuso', sl_hit: 'SL Hit', cancelled: 'Annullato', cancelled_timing: 'Timing mancato',
+  tp3: 'TP3 ✓', trail_out: 'Trail-out 🎯',
+  closed: 'Chiuso', sl_hit: 'SL Hit', cancelled: 'Annullato', cancelled_timing: 'Timing mancato',
 }
 const EVENT_CFG = {
   // Trade events

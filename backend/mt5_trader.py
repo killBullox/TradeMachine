@@ -3133,7 +3133,14 @@ def sync_positions() -> list:
                 close_price = last_close[1]
                 close_time  = last_close[3]  # timestamp UTC reale del deal
 
-                # Determina status dal TP più alto raggiunto
+                # Determina status dal TP più alto raggiunto.
+                # Distinzione "sl_hit" vs "trail_out": se nessun TP e' stato raggiunto
+                # ma il prezzo di chiusura e' sul lato FAVOREVOLE rispetto all'entry
+                # reale (per BUY: close > entry, per SELL: close < entry), significa
+                # che lo SL e' stato spostato dal trail (BE+1pip / TP1+1pip ecc.) e
+                # ha agganciato in profitto: "trail_out". Altrimenti perdita vera =
+                # "sl_hit". Caso #442 GBPJPY 11/06: entry 214.836, trail TG sposta SL
+                # a 214.845, close 214.845 → profit +5.45$ ma status era "sl_hit".
                 new_status = "sl_hit"
                 for tp_num, tp_price in [(3, sig.tp3), (2, sig.tp2), (1, sig.tp1)]:
                     if tp_price is None:
@@ -3142,6 +3149,16 @@ def sync_positions() -> list:
                            for _, cp, _, _ in closed_tickets):
                         new_status = f"tp{tp_num}"
                         break
+                if new_status == "sl_hit" and sig.actual_entry_price and closed_tickets:
+                    entry_anchor = float(sig.actual_entry_price)
+                    favorable_closes = sum(
+                        1 for _, cp, _, _ in closed_tickets
+                        if (is_buy and cp > entry_anchor) or (not is_buy and cp < entry_anchor)
+                    )
+                    # Se la MAGGIORANZA dei ticket si e' chiusa in zona favorevole
+                    # o il P&L totale e' positivo, e' un trail_out non un sl_hit.
+                    if favorable_closes >= len(closed_tickets) / 2 or total_profit > 0:
+                        new_status = "trail_out"
 
                 # Log dell'evento "completato" nel trade_log (idempotente)
                 import json as _jsonlib

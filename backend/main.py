@@ -515,7 +515,9 @@ def get_performance(
     for s in signals:
         status_counts[s.status] = status_counts.get(s.status, 0) + 1
 
-    closed_statuses = {"tp1", "tp2", "tp3", "closed"}
+    # trail_out = SL spostato dal trail e' stato hit ma in profit (caso #442):
+    # conta come "win" perche' e' una chiusura favorevole.
+    closed_statuses = {"tp1", "tp2", "tp3", "closed", "trail_out"}
     tp_hits = sum(status_counts.get(k, 0) for k in closed_statuses)
     sl_hits = status_counts.get("sl_hit", 0)
     closed_total = tp_hits + sl_hits
@@ -759,7 +761,7 @@ def get_perf_by_symbol_hour(
 
     q = db.query(Signal).filter(
         Signal.is_archived == False,
-        Signal.status.in_(("tp1", "tp2", "tp3", "sl_hit", "closed")),
+        Signal.status.in_(("tp1", "tp2", "tp3", "sl_hit", "closed", "trail_out")),
         Signal.pnl_usd.isnot(None),
     )
     if date_from:
@@ -1965,7 +1967,7 @@ async def archive_trades(
     _verify_pin(pin)
 
     # Trova tutti i segnali chiusi e non ancora archiviati
-    closed_statuses = ["tp1", "tp2", "tp3", "sl_hit", "closed", "cancelled", "cancelled_timing"]
+    closed_statuses = ["tp1", "tp2", "tp3", "sl_hit", "trail_out", "closed", "cancelled", "cancelled_timing"]
     signals = db.query(Signal).filter(
         Signal.status.in_(closed_statuses),
         Signal.is_archived == False,
