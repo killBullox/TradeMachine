@@ -1317,6 +1317,34 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             Signal.symbol == parsed.symbol,
                         ).order_by(Signal.created_at.desc()).first()
 
+                # Guard anti-doppio-trade: se il signal di riferimento e' ancora
+                # vivo sul broker (positions aperte o ordini pendenti), NON clonare.
+                # Il msg di reenter in questo caso e' un'istruzione tardiva per chi
+                # non era ancora entrato, non un vero rientro post-chiusura.
+                # Caso #444 (11/06/2026): msg "Everyone Enter Now with 4084 SL"
+                # arrivato 2 min dopo #443 ancora aperto -> il handler clonava e
+                # apriva un secondo BUY identico, raddoppiando l'esposizione.
+                if last_sig:
+                    try:
+                        import json as _json_re
+                        _tickets_ref = []
+                        if last_sig.mt5_tickets:
+                            try: _tickets_ref = _json_re.loads(last_sig.mt5_tickets)
+                            except Exception: _tickets_ref = []
+                        elif last_sig.mt5_ticket:
+                            _tickets_ref = [last_sig.mt5_ticket]
+                        _mt5_inst = mt5_trader._get_mt5() if mt5_trader.is_enabled() else None
+                        _has_active = False
+                        if _mt5_inst and _tickets_ref:
+                            for _t in _tickets_ref:
+                                if _mt5_inst.positions_get(ticket=_t) or _mt5_inst.orders_get(ticket=_t):
+                                    _has_active = True
+                                    break
+                        if _has_active:
+                            log(f"[Reenter] msg={msg_id} #{last_sig.id} {last_sig.symbol} ha ticket ATTIVI sul broker → siamo gia' dentro, SKIP (no doppio trade)")
+                            last_sig = None
+                    except Exception as _e:
+                        log(f"[Reenter] check broker errore: {str(_e)[:80]}")
                 if last_sig:
                     # Override entry range se il msg di reenter contiene numeri.
                     # Pattern supportati nel raw del msg:
