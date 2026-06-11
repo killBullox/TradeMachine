@@ -1442,6 +1442,70 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
             except Exception as e:
                 log(f"[Reenter] Errore: {str(e)[:100]}")
 
+        elif msg_type == "enter_now" and parsed:
+            # Istruzione "Entra ORA sul signal ancora attivo" (NON e' un reenter).
+            # Routing: trova il signal piu' recente del simbolo e controlla broker:
+            #  - gia' fillato → SKIP (siamo dentro)
+            #  - pending non filled → cancella pending + MARKET (eventualmente
+            #    aggiornando SL se il msg lo specifica)
+            #  - chiuso/cancellato → SKIP (no signal vivo, NON e' un reenter)
+            try:
+                import mt5_trader as _mt5t
+                import json as _jl_en
+                # Trova signal ref
+                ref = None
+                if parsed.symbol:
+                    ref = db.query(Signal).filter(Signal.symbol == parsed.symbol).order_by(Signal.created_at.desc()).first()
+                if not ref:
+                    log(f"[EnterNow] msg={msg_id} nessun signal di riferimento per {parsed.symbol} → ignore")
+                else:
+                    tickets_ref = []
+                    if ref.mt5_tickets:
+                        try: tickets_ref = _jl_en.loads(ref.mt5_tickets)
+                        except Exception: tickets_ref = []
+                    elif ref.mt5_ticket:
+                        tickets_ref = [ref.mt5_ticket]
+                    mt5_inst = _mt5t._get_mt5() if _mt5t.is_enabled() else None
+                    has_open = False; has_pending = False
+                    if mt5_inst and tickets_ref:
+                        for t in tickets_ref:
+                            if mt5_inst.positions_get(ticket=t): has_open = True
+                            elif mt5_inst.orders_get(ticket=t): has_pending = True
+                    if has_open:
+                        log(f"[EnterNow] #{ref.id} {ref.symbol} {ref.direction} gia' fillato → SKIP (siamo dentro)")
+                    elif has_pending and ref.status == "pending":
+                        log(f"[EnterNow] #{ref.id} {ref.symbol}: pending non filled → cancello e ripiazzo MARKET")
+                        for t in tickets_ref:
+                            if mt5_inst.orders_get(ticket=t):
+                                mt5_inst.order_send({"action": mt5_inst.TRADE_ACTION_REMOVE, "order": t})
+                        ref.mt5_ticket = None
+                        ref.mt5_tickets = None
+                        ref.entry_type = "market"
+                        # Se il msg specifica un nuovo SL ("with 4084 SL"), aggiornalo
+                        old_sl = ref.stoploss
+                        if parsed.sl is not None:
+                            ref.stoploss = parsed.sl
+                        _append_trade_log(ref, "enter_now_market",
+                            f"TG enter_now '{(parsed.raw or '')[:80]}': pending cancellati, MARKET entry"
+                            + (f", SL aggiornato {old_sl} → {parsed.sl}" if parsed.sl is not None and parsed.sl != old_sl else ""),
+                            {"trigger_msg_id": msg_id, "old_sl": old_sl, "new_sl": parsed.sl})
+                        db.add(ref); db.commit(); db.refresh(ref)
+                        try:
+                            tickets_new = _mt5t.place_orders(ref, catch_origin="realtime",
+                                catch_reason="trader: enter now su signal pending non filled",
+                                signal_ts=ref.created_at)
+                            if tickets_new:
+                                ref.mt5_tickets = _jl_en.dumps(tickets_new) if len(tickets_new) > 1 else None
+                                ref.mt5_ticket = tickets_new[0]
+                                db.add(ref); db.commit()
+                                log(f"[EnterNow] #{ref.id} ripiazzato OK tickets={tickets_new}")
+                        except Exception as _e:
+                            log(f"[EnterNow] #{ref.id} errore: {str(_e)[:120]}")
+                    else:
+                        log(f"[EnterNow] #{ref.id} status={ref.status}, no positions/pending broker → SKIP (no trade vivo, NON e' un reenter)")
+            except Exception as e:
+                log(f"[EnterNow] Errore: {str(e)[:100]}")
+
         elif msg_type == "close" and parsed:
             await _handle_close(db, parsed, reply_to_msg_id)
             await broadcast_ws({

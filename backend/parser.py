@@ -74,6 +74,15 @@ class ParsedReenter:
     raw: str
 
 
+@dataclass
+class ParsedEnterNow:
+    """Istruzione di entrare ORA su un signal ancora attivo (per chi non era
+    riuscito a entrare al primo signal). NON e' un rientro post-chiusura."""
+    symbol: Optional[str]
+    raw: str
+    sl: Optional[float] = None  # SL aggiornato se il msg lo specifica ("with 4084 SL")
+
+
 def _clean(text: str) -> str:
     """Rimuove emoji e caratteri non ASCII mantenendo testo leggibile."""
     return re.sub(r'[^\x00-\x7F]+', '', text).strip()

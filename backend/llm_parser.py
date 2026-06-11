@@ -28,7 +28,7 @@ quando estrai i contenuti semantici (es. "**1st Target** Done" significa "first 
 
 Schema:
 {
-  "type": "signal" | "close" | "sl_move" | "update" | "reenter" | "risky_flag" | "ignore",
+  "type": "signal" | "close" | "sl_move" | "update" | "reenter" | "enter_now" | "risky_flag" | "ignore",
   "symbol": "XAUUSD" | "BTCUSD" | "GBPJPY" | ... | null,
   "direction": "buy" | "sell" | null,
   "entry_type": "near" | "breakout" | null,
@@ -88,24 +88,34 @@ CLASSIFICAZIONE TYPE:
   Altrimenti → status_text="general"
   Estrai price_from e price_to dal pattern "X To Y" o "X to Y" se presente.
 
-▸ "reenter" — rientra nel trade. Anche quando il msg menziona "SL hit" o "loss" PRIMA,
-  l'intenzione principale e' "rientra". ESEMPI tutti type=reenter:
-  - "enter again", "everyone enter again now"
+▸ "reenter" — RIENTRA in un trade gia' uscito (SL hit, chiuso, cancelled).
+  Implica che il trade precedente NON e' piu' attivo. ESEMPI tutti type=reenter:
   - "re-enter", "reenter", "Re enter" (con spazio), "RE-ENTER"
+  - "enter again", "everyone enter again now", "enter again here"
   - "open again", "open again now"
-  - "everyone enter now", "enter now", "enter now cmp X" (cmp = current market price)
-    → questi sono SEMPRE reenter del signal piu' recente, MAI un nuovo signal.
-    Es: "Everyone Enter Now Cmp 4341" subito dopo un signal XAUUSD = reenter di quel signal.
-  - "Risky enter now", "Risky entry now" → reenter (il "now" implica entrata a market sul signal corrente)
   - "Sl hit In Sudden Spike Risky Can Re enter Here With Same Sl" → reenter
-    (il "Sl hit" e' contesto, l'azione e' "Re enter ... With Same Sl")
+    (il "Sl hit" e' esplicito → trade precedente uscito → rientra)
   - "SL hit but re-enter at same levels" → reenter
   - "Stop loss hit, you can re-enter here" → reenter
-  REGOLA CRITICA: un messaggio breve che dice "enter now" / "enter again" / "enter
-  again now" / "risky enter now" SENZA specificare almeno SL + TP1 non e' MAI un
-  signal nuovo (un signal reale ha sempre almeno SL + TP1; alcuni hanno anche TP2
-  e/o TP3 ma il minimo e' SL + TP1). E' sempre un reenter o un'istruzione di
-  market-entry sul signal precedente.
+  PAROLA CHIAVE: "again" / "re-" implica ritorno post-chiusura. Senza queste
+  parole NON e' un reenter — vedi enter_now sotto.
+
+▸ "enter_now" — istruzione di ENTRARE ORA su un signal ANCORA ATTIVO, per chi
+  non era riuscito a entrare al primo signal. NON e' un rientro: il trade
+  precedente e' ancora vivo. Il trader sta dicendo "se non sei dentro, mettiti
+  dentro adesso a market". ESEMPI tutti type=enter_now:
+  - "Everyone Enter Now", "Enter Now"
+  - "Enter Now Cmp 4341" (cmp = current market price, e' info, non l'entry)
+  - "Enter Now with 4084 SL" (specifica un SL aggiornato per chi entra adesso)
+  - "Risky Enter Now", "Risky entry now"
+  - "Cmp X" da solo (rare)
+  Estrai sl se presente (es. "with 4084 SL" → sl=4084).
+  DIFFERENZA chiave da reenter: NON c'e' "again" / "re-" / "SL hit" prima.
+  Il bot decidera' poi se siamo gia' dentro (skip) o se serve market entry.
+
+  REGOLA CRITICA: un messaggio breve "enter now" senza almeno SL + TP1 non e'
+  MAI un signal nuovo (un signal reale ha sempre almeno SL + TP1). E' SEMPRE
+  enter_now (se manca "again") o reenter (se c'e' "again" / "re-").
 
 ▸ "risky_flag" — segnala rischio elevato: "highly risky", "#risky", "aggressive", "#RiskyTrade"
 
@@ -252,6 +262,14 @@ def llm_to_parsed(data: dict):
         from parser import ParsedReenter
         return "reenter", ParsedReenter(
             symbol=data.get("symbol"),
+            raw=data.get("_raw", ""),
+        )
+
+    elif msg_type == "enter_now":
+        from parser import ParsedEnterNow
+        return "enter_now", ParsedEnterNow(
+            symbol=data.get("symbol"),
+            sl=data.get("sl"),
             raw=data.get("_raw", ""),
         )
 
