@@ -578,6 +578,102 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
         _save_raw(db, msg_id, sender, text, msg_type)
 
         if msg_type == "signal" and parsed:
+            # Duplicate signal detection con sostituzione del vecchio trade.
+            # Caso #446/#447 (11/06): stesso signal BTCUSD ripostato 52min dopo
+            # → doppio trade aperto.
+            # Logica: signal recente (<2h) stesso simbolo+direzione+livelli
+            # entro 0.3% (tolleranza stretta per evitare falsi positivi).
+            #   - vecchio gia' in profitto forte (>50% verso TP1) → SKIP nuovo
+            #     (tieni il vecchio che sta andando bene)
+            #   - altrimenti tenta close del vecchio:
+            #       close OK → procedi col nuovo signal normalmente
+            #       close FAIL → ABORT nuovo (no doppio trade involontario)
+            if parsed.symbol and parsed.direction and parsed.stoploss and parsed.tp1:
+                from datetime import timedelta
+                TOL = 0.003  # 0.3% tolleranza
+                recent_cutoff = datetime.utcnow() - timedelta(hours=2)
+                candidates = db.query(Signal).filter(
+                    Signal.symbol == parsed.symbol,
+                    Signal.direction == parsed.direction,
+                    Signal.created_at >= recent_cutoff,
+                    Signal.status.in_(("pending", "open", "tp1", "tp2")),
+                    Signal.mt5_tickets.isnot(None),
+                ).order_by(Signal.created_at.desc()).all()
+                import json as _jl_dup, mt5_trader as _mt5t_dup
+                _aborted = False
+                for cand in candidates:
+                    def _close(a, b):
+                        if a is None or b is None: return False
+                        if a == 0: return abs(b) < TOL
+                        return abs(a - b) / abs(a) <= TOL
+                    same_sl = _close(parsed.stoploss, cand.stoploss)
+                    same_tp1 = _close(parsed.tp1, cand.tp1)
+                    same_entry = _close(parsed.entry_price, cand.entry_price) or _close(parsed.entry_price, cand.entry_price_high)
+                    if not (same_sl and same_tp1 and same_entry):
+                        continue
+                    tk = []
+                    if cand.mt5_tickets:
+                        try: tk = _jl_dup.loads(cand.mt5_tickets)
+                        except Exception: tk = []
+                    elif cand.mt5_ticket:
+                        tk = [cand.mt5_ticket]
+                    mt5_inst_dup = _mt5t_dup._get_mt5() if _mt5t_dup.is_enabled() else None
+                    if not (mt5_inst_dup and tk):
+                        continue
+                    # Verifica ticket ancora attivi
+                    active_tickets = []
+                    for t in tk:
+                        if mt5_inst_dup.positions_get(ticket=t) or mt5_inst_dup.orders_get(ticket=t):
+                            active_tickets.append(t)
+                    if not active_tickets:
+                        continue
+                    # Check profitto > 50% verso TP1
+                    is_buy_c = (cand.direction or "").lower() == "buy"
+                    cur_price = None
+                    try:
+                        from mt5_trader import MT5_SYMBOL_MAP as _MAP_DUP
+                        sym = _MAP_DUP.get(cand.symbol.upper(), cand.symbol)
+                        tick = mt5_inst_dup.symbol_info_tick(sym)
+                        if tick: cur_price = (tick.bid + tick.ask) / 2
+                    except Exception: pass
+                    in_strong_profit = False
+                    if cur_price and cand.actual_entry_price and cand.tp1:
+                        tp1_dist = abs(float(cand.tp1) - float(cand.actual_entry_price))
+                        if tp1_dist > 0:
+                            cur_dist = abs(cur_price - float(cand.actual_entry_price))
+                            progress = cur_dist / tp1_dist
+                            dir_ok = (is_buy_c and cur_price > cand.actual_entry_price) or (not is_buy_c and cur_price < cand.actual_entry_price)
+                            in_strong_profit = dir_ok and progress > 0.5
+                    if in_strong_profit:
+                        log(f"[Duplicate] msg={msg_id} match #{cand.id} ma in profitto >50% verso TP1 → SKIP nuovo, tieni vecchio")
+                        return
+                    # Tenta close del vecchio
+                    cancelled_pend = 0; closed_pos = 0; failed_tk = []
+                    for t in active_tickets:
+                        if mt5_inst_dup.orders_get(ticket=t):
+                            r = mt5_inst_dup.order_send({"action": mt5_inst_dup.TRADE_ACTION_REMOVE, "order": t})
+                            if r and r.retcode == mt5_inst_dup.TRADE_RETCODE_DONE: cancelled_pend += 1
+                            else: failed_tk.append(t)
+                        elif mt5_inst_dup.positions_get(ticket=t):
+                            if _mt5t_dup.close_position(t, cand.symbol): closed_pos += 1
+                            else: failed_tk.append(t)
+                    if failed_tk:
+                        log(f"[Duplicate] msg={msg_id} close vecchio #{cand.id} FAILED su {failed_tk} → ABORT nuovo (no doppio trade)")
+                        _aborted = True
+                        break
+                    # Close OK: marca vecchio cancelled, procedi col nuovo
+                    cand.status = "cancelled"
+                    cand.closed_at = datetime.utcnow()
+                    cand.updated_at = datetime.utcnow()
+                    cand.notes = (cand.notes or "") + f" [Sostituito da signal duplicato msg={msg_id}: chiusi {closed_pos} pos / {cancelled_pend} pend]"
+                    _append_trade_log(cand, "duplicate_replaced",
+                        f"Trader ha ripostato signal identico (entro 0.3%): vecchio chiuso per fare spazio al nuovo. closed_pos={closed_pos} cancelled_pend={cancelled_pend}.",
+                        {"replaced_by_msg": msg_id, "closed_positions": closed_pos, "cancelled_pendings": cancelled_pend})
+                    db.add(cand); db.commit()
+                    log(f"[Duplicate] msg={msg_id} sostituisce #{cand.id}: chiusi {closed_pos} pos / {cancelled_pend} pend. Procedo col nuovo.")
+                    break
+                if _aborted:
+                    return
             # Anti-misclass LLM: signal reale richiede almeno SL + TP1.
             # Se entrambi mancano = msg interpretabile come istruzione sul signal
             # piu' recente (caso #436 09/06: "Everyone Enter Now Cmp 4341").
@@ -1780,28 +1876,60 @@ async def start_listener():
 
     @tg.on(events.MessageDeleted(chats=target))
     async def on_deleted(event):
-        """Se un segnale viene cancellato entro pochi secondi → marca come cancelled."""
+        """Quando il trader cancella un msg TG entro 60 min:
+        - se signal pending non filled → cancella pending broker + status=cancelled
+        - se signal aperto sul broker (positions) → chiude a market + status=cancelled
+        Caso #446 (11/06/2026): trader cancella signal con typo, listener aveva
+        gia' aperto il trade. Senza questa logica il trade resta vivo fino al SL."""
         from datetime import datetime as _dt, timedelta
+        import json as _jl_del
         deleted_ids = event.deleted_ids or []
         if not deleted_ids:
             return
         db = SessionLocal()
         try:
-            cutoff = _dt.utcnow() - timedelta(minutes=5)
+            import mt5_trader as _mt5t
+            cutoff = _dt.utcnow() - timedelta(minutes=60)
             for tg_id in deleted_ids:
                 sig = db.query(Signal).filter(
                     Signal.telegram_msg_id == tg_id,
                     Signal.created_at >= cutoff,
-                    Signal.status == "pending",
+                    Signal.status.in_(("pending", "open", "tp1", "tp2")),
                 ).first()
-                if sig:
-                    sig.status = "cancelled"
-                    sig.notes = (sig.notes or "") + " [Messaggio Telegram cancellato dall'admin]"
-                    db.add(sig)
-                    log(f"[Deleted] Segnale #{sig.id} annullato perché il msg TG è stato cancellato")
+                if not sig:
+                    continue
+                tickets = []
+                if sig.mt5_tickets:
+                    try: tickets = _jl_del.loads(sig.mt5_tickets)
+                    except Exception: tickets = []
+                elif sig.mt5_ticket:
+                    tickets = [sig.mt5_ticket]
+                mt5_inst = _mt5t._get_mt5() if _mt5t.is_enabled() else None
+                cancelled_pend = 0
+                closed_pos = 0
+                if mt5_inst and tickets:
+                    for t in tickets:
+                        if mt5_inst.orders_get(ticket=t):
+                            mt5_inst.order_send({"action": mt5_inst.TRADE_ACTION_REMOVE, "order": t})
+                            cancelled_pend += 1
+                        elif mt5_inst.positions_get(ticket=t):
+                            if _mt5t.close_position(t, sig.symbol):
+                                closed_pos += 1
+                sig.status = "cancelled"
+                sig.closed_at = _dt.utcnow()
+                sig.updated_at = _dt.utcnow()
+                sig.notes = (sig.notes or "") + (
+                    f" [Msg TG cancellato dal trader: chiusi {closed_pos} ticket aperti, "
+                    f"cancellati {cancelled_pend} pending]"
+                )
+                _append_trade_log(sig, "tg_msg_deleted",
+                    f"Trader ha cancellato il msg TG. Chiusura: positions={closed_pos}, pendings={cancelled_pend}.",
+                    {"tickets": tickets, "closed_positions": closed_pos, "cancelled_pendings": cancelled_pend})
+                db.add(sig)
+                log(f"[Deleted] #{sig.id} {sig.symbol} cancellato: chiusi {closed_pos} pos / {cancelled_pend} pending broker")
             db.commit()
         except Exception as e:
-            log(f"[Deleted] Errore: {str(e)[:80]}")
+            log(f"[Deleted] Errore: {str(e)[:120]}")
         finally:
             db.close()
 
