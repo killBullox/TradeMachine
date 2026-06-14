@@ -578,6 +578,24 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
         _save_raw(db, msg_id, sender, text, msg_type)
 
         if msg_type == "signal" and parsed:
+            # ── PROP MODE GUARD: Daily DD kill-switch.
+            # Gated da `prop_mode + daily_dd_limit_usd` settati sull'account
+            # attivo. Per Avatrade (prop_mode=False) `should_block_new_trades`
+            # ritorna SEMPRE None → questo if NON viene mai eseguito e il
+            # comportamento Avatrade resta identico.
+            try:
+                from prop_mode import should_block_new_trades as _block_check, check_max_concurrent_trades as _conc_check
+                _block_reason = _block_check()
+                if _block_reason:
+                    log(f"[PropGuard] signal msg={msg_id} BLOCCATO (daily DD): {_block_reason}")
+                    return
+                _conc_reason = _conc_check()
+                if _conc_reason:
+                    log(f"[PropGuard] signal msg={msg_id} BLOCCATO (max concurrent): {_conc_reason}")
+                    return
+            except Exception as _e:
+                log(f"[PropGuard] errore check: {str(_e)[:80]}")
+
             # Duplicate signal detection con sostituzione del vecchio trade.
             # Caso #446/#447 (11/06): stesso signal BTCUSD ripostato 52min dopo
             # → doppio trade aperto.

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { TrendingUp, TrendingDown, Target, ShieldAlert, Activity, DollarSign, Calendar, BarChart3, TrendingDown as DDIcon } from 'lucide-react'
 import TradeCard from '../components/TradeCard'
+import PropMonitor from '../components/PropMonitor'
 
 function StatCard({ label, value, icon: Icon, color }) {
   return (
@@ -163,6 +164,7 @@ export default function Dashboard({ wsEvents }) {
         </button>
       </div>
 
+      <PropMonitor />
       <MT5Panel />
 
       {/* Stats */}

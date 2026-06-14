@@ -172,6 +172,17 @@ class Mt5Account(Base):
     is_active = Column(Boolean, default=False)  # account attualmente in uso (uno solo True)
     mt5_path = Column(String(500), nullable=True)  # path al terminale MT5 dedicato (None = default da .env)
     broker = Column(String(50), nullable=True)  # tag broker (es. 'xm', 'avatrade'); popolato in signals.broker
+    # ─── Prop Mode Settings (additivo, nullable). Account "normali" (Avatrade
+    # demo) restano con questi a NULL/False e il comportamento del bot non
+    # cambia di una virgola. Tutte le guardie prop-specific sono gated da
+    # `if account.prop_mode:` e dai singoli limiti opzionali.
+    prop_mode = Column(Boolean, default=False)
+    daily_dd_limit_usd = Column(Float, nullable=True)  # blocca trade nuovi se P&L giorno < -X
+    daily_dd_warning_usd = Column(Float, nullable=True)  # warning (UI/log) prima del block
+    peak_equity_usd = Column(Float, nullable=True)  # max equity osservato (trailing DD)
+    max_total_dd_usd = Column(Float, nullable=True)  # equita' inseguita: bust se equity < peak - X
+    consistency_threshold_pct = Column(Float, default=30.0)  # max single-day vs total P&L
+    max_concurrent_trades = Column(Integer, nullable=True)  # cap posizioni aperte simultaneamente
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -270,6 +281,22 @@ def init_db():
                     conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN mt5_path VARCHAR(500)"))
                 if "broker" not in mt5_existing:
                     conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN broker VARCHAR(50)"))
+                # ── Prop Mode columns (additive, nullable). Account esistenti
+                # (Avatrade) restano con default False/NULL → comportamento invariato.
+                if "prop_mode" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN prop_mode BOOLEAN DEFAULT 0"))
+                if "daily_dd_limit_usd" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN daily_dd_limit_usd FLOAT"))
+                if "daily_dd_warning_usd" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN daily_dd_warning_usd FLOAT"))
+                if "peak_equity_usd" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN peak_equity_usd FLOAT"))
+                if "max_total_dd_usd" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN max_total_dd_usd FLOAT"))
+                if "consistency_threshold_pct" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN consistency_threshold_pct FLOAT DEFAULT 30.0"))
+                if "max_concurrent_trades" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN max_concurrent_trades INTEGER"))
                 conn.commit()
         except Exception:
             pass

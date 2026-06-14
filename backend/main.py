@@ -1585,6 +1585,96 @@ async def test_raw_close(ticket: int = Query(...), pin: str = Query(...),
     return await asyncio.get_event_loop().run_in_executor(None, _do)
 
 
+# ─── Prop Mode endpoints ──────────────────────────────────────────────────────
+
+@app.get("/api/prop/status")
+def get_prop_status(db: Session = Depends(get_db)):
+    """Espone lo stato delle guardie prop_mode dell'account attivo.
+
+    Output schema:
+      enabled: bool (prop_mode dell'account attivo)
+      daily_dd: dict | None — info kill-switch giornaliero
+      trailing_dd: dict | None — info trailing equita' inseguita
+      coerenza: dict | None — info regola coerenza
+      max_concurrent: dict | None — info max trade concorrenti
+
+    Se prop_mode=False sull'account attivo, enabled=False e i campi sono None.
+    Pensato per il pannello UI prop (visibile solo se enabled=True).
+    """
+    from prop_mode import (
+        is_prop_mode, get_today_pnl_usd, should_block_new_trades,
+        coerenza_status, check_max_concurrent_trades, get_prop_settings,
+        trailing_dd_status,
+    )
+    if not is_prop_mode(db):
+        return {"enabled": False, "daily_dd": None, "trailing_dd": None,
+                "coerenza": None, "max_concurrent": None}
+    settings = get_prop_settings(db)
+    today_pnl = get_today_pnl_usd(db)
+    daily_block = should_block_new_trades(db)
+    daily_dd = {
+        "today_pnl": round(today_pnl, 2),
+        "limit": settings.daily_dd_limit_usd,
+        "warning": settings.daily_dd_warning_usd,
+        "blocked": daily_block is not None,
+        "block_reason": daily_block,
+    } if settings.daily_dd_limit_usd is not None else None
+    # Equity attuale: prova via MT5
+    current_equity = None
+    try:
+        import mt5_trader
+        m = mt5_trader._get_mt5()
+        if m:
+            info = m.account_info()
+            if info: current_equity = info.equity
+    except Exception:
+        pass
+    trail_dd = trailing_dd_status(current_equity or 0, db) if current_equity else None
+    return {
+        "enabled": True,
+        "account_label": settings.label,
+        "current_equity": current_equity,
+        "daily_dd": daily_dd,
+        "trailing_dd": trail_dd,
+        "coerenza": coerenza_status(db),
+        "max_concurrent": ({
+            "limit": settings.max_concurrent_trades,
+            "block_reason": check_max_concurrent_trades(db),
+        } if settings.max_concurrent_trades is not None else None),
+    }
+
+
+@app.patch("/api/mt5/prop-settings/{account_id}")
+def update_prop_settings(
+    account_id: int,
+    pin: str = Query(...),
+    prop_mode: Optional[bool] = Query(None),
+    daily_dd_limit_usd: Optional[float] = Query(None),
+    daily_dd_warning_usd: Optional[float] = Query(None),
+    max_total_dd_usd: Optional[float] = Query(None),
+    consistency_threshold_pct: Optional[float] = Query(None),
+    max_concurrent_trades: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Aggiorna i parametri prop_mode di un account. Richiede PIN.
+
+    Schema additivo: solo i parametri passati vengono modificati. NULL non
+    azzera (per azzerare un campo, gestire da DB direttamente o via UI dedicata).
+    """
+    _verify_pin(pin)
+    acc = db.query(Mt5Account).filter(Mt5Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(status_code=404, detail="account non trovato")
+    if prop_mode is not None: acc.prop_mode = prop_mode
+    if daily_dd_limit_usd is not None: acc.daily_dd_limit_usd = daily_dd_limit_usd
+    if daily_dd_warning_usd is not None: acc.daily_dd_warning_usd = daily_dd_warning_usd
+    if max_total_dd_usd is not None: acc.max_total_dd_usd = max_total_dd_usd
+    if consistency_threshold_pct is not None: acc.consistency_threshold_pct = consistency_threshold_pct
+    if max_concurrent_trades is not None: acc.max_concurrent_trades = max_concurrent_trades
+    db.add(acc); db.commit()
+    return {"ok": True, "account_id": account_id, "prop_mode": acc.prop_mode}
+
+
 @app.post("/api/mt5/sync")
 async def mt5_sync():
     updated = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.sync_positions)
