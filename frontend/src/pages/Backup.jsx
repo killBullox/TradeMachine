@@ -127,6 +127,8 @@ export default function Backup() {
   const [showAddAccount, setShowAddAccount] = useState(false)
   const [newAcc, setNewAcc] = useState({ login: '', server: 'XM.COM-MT5', label: '', isDemo: true, mt5Path: '', broker: '' })
   const [editAcc, setEditAcc] = useState(null) // {id, label, server, mt5_path, broker, is_demo}
+  const [propAcc, setPropAcc] = useState(null) // {id, label, prop_mode, daily_dd_limit_usd, ...}
+  const [propSaving, setPropSaving] = useState(false)
 
   const load = async () => {
     try {
@@ -187,6 +189,17 @@ export default function Backup() {
       } else if (pinModal.action === 'remove_account') {
         await api.removeMt5Account(pinModal.id, pin)
         toast.success('Account rimosso')
+      } else if (pinModal.action === 'update_prop') {
+        setPropSaving(true)
+        const params = new URLSearchParams({ pin })
+        for (const [k, v] of Object.entries(pinModal.extra)) {
+          if (v !== null && v !== undefined && v !== '') params.set(k, String(v))
+        }
+        const res = await fetch(`/api/mt5/prop-settings/${pinModal.id}?${params}`, { method: 'PATCH' })
+        if (!res.ok) throw new Error(`status ${res.status}`)
+        toast.success('Prop settings aggiornate')
+        setPropAcc(null)
+        setPropSaving(false)
       }
       setPinModal(null)
       setPin('')
@@ -283,6 +296,23 @@ export default function Backup() {
                       className="px-3 py-2 text-sm rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
                     >
                       Modifica
+                    </button>
+                    <button
+                      onClick={() => setPropAcc({
+                        id: acc.id, label: acc.label,
+                        prop_mode: !!acc.prop_mode,
+                        daily_dd_limit_usd: acc.daily_dd_limit_usd || '',
+                        daily_dd_warning_usd: acc.daily_dd_warning_usd || '',
+                        max_total_dd_usd: acc.max_total_dd_usd || '',
+                        consistency_threshold_pct: acc.consistency_threshold_pct ?? 30,
+                        max_concurrent_trades: acc.max_concurrent_trades || '',
+                      })}
+                      className={`px-3 py-2 text-sm rounded-lg transition-colors ${
+                        acc.prop_mode ? 'bg-violet-700 hover:bg-violet-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
+                      }`}
+                      title="Configura prop mode (Funded Elite / FTMO / ecc.)"
+                    >
+                      {acc.prop_mode ? '🛡️ Prop' : 'Prop'}
                     </button>
                     {!acc.is_default && !isActive && (
                       <button
@@ -499,6 +529,96 @@ export default function Backup() {
                   broker: editAcc.broker, is_demo: editAcc.is_demo,
                 })}
                 className="flex-1 px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-lg font-medium">Salva</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Prop Settings */}
+      {propAcc && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-slate-800 border border-violet-700 rounded-xl p-6 w-[480px] max-w-[95vw] shadow-xl">
+            <h3 className="text-white font-semibold text-lg mb-1 flex items-center gap-2">
+              🛡️ Prop Mode — {propAcc.label}
+            </h3>
+            <p className="text-xs text-slate-400 mb-4">
+              Attiva e configura le guardie per i conti prop (Funded Elite, FTMO, ecc.).
+              Lascia OFF per account normali (es. Avatrade) — niente cambia.
+            </p>
+            <div className="space-y-3">
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={propAcc.prop_mode}
+                  onChange={e => setPropAcc(p => ({...p, prop_mode: e.target.checked}))} />
+                <span className="text-white">Attiva Prop Mode su questo account</span>
+              </label>
+              <div className={propAcc.prop_mode ? '' : 'opacity-40 pointer-events-none'}>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1" title="Soglia oltre la quale il bot smette di piazzare nuovi trade per la giornata (in $). Esempio Funded Elite 25K: $500 (= $250 buffer su limite hard $750).">
+                      Daily DD limit ($)
+                    </label>
+                    <input type="number" value={propAcc.daily_dd_limit_usd}
+                      onChange={e => setPropAcc(p => ({...p, daily_dd_limit_usd: e.target.value}))}
+                      placeholder="es. 500"
+                      className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-white text-sm" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1" title="Soglia warning (solo log/UI, no block).">
+                      Daily DD warning ($)
+                    </label>
+                    <input type="number" value={propAcc.daily_dd_warning_usd}
+                      onChange={e => setPropAcc(p => ({...p, daily_dd_warning_usd: e.target.value}))}
+                      placeholder="es. 300"
+                      className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-white text-sm" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1" title="Limite totale trailing equity (regola 'equita' inseguita' dei prop).">
+                      Max total DD ($)
+                    </label>
+                    <input type="number" value={propAcc.max_total_dd_usd}
+                      onChange={e => setPropAcc(p => ({...p, max_total_dd_usd: e.target.value}))}
+                      placeholder="es. 2000 (8% di 25k)"
+                      className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-white text-sm" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1" title="Soglia regola coerenza: max-day P&L / total P&L. Tipico 30%.">
+                      Coerenza %
+                    </label>
+                    <input type="number" value={propAcc.consistency_threshold_pct}
+                      onChange={e => setPropAcc(p => ({...p, consistency_threshold_pct: e.target.value}))}
+                      placeholder="30"
+                      className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-white text-sm" />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="text-xs text-slate-400 block mb-1" title="Numero massimo di trade contemporaneamente aperti.">
+                      Max trade contemporanei
+                    </label>
+                    <input type="number" value={propAcc.max_concurrent_trades}
+                      onChange={e => setPropAcc(p => ({...p, max_concurrent_trades: e.target.value}))}
+                      placeholder="es. 3"
+                      className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-white text-sm" />
+                  </div>
+                </div>
+                <p className="text-xs text-amber-400/70 mt-3">
+                  💡 Suggerimento Funded Elite 25K: daily 500, warning 300, total DD 2000, coerenza 30%, max trade 3.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setPropAcc(null)}
+                className="flex-1 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg">Annulla</button>
+              <button onClick={() => openPinModal('update_prop', propAcc.id, `Aggiorna prop settings ${propAcc.label}`, {
+                  prop_mode: propAcc.prop_mode,
+                  daily_dd_limit_usd: propAcc.daily_dd_limit_usd === '' ? null : +propAcc.daily_dd_limit_usd,
+                  daily_dd_warning_usd: propAcc.daily_dd_warning_usd === '' ? null : +propAcc.daily_dd_warning_usd,
+                  max_total_dd_usd: propAcc.max_total_dd_usd === '' ? null : +propAcc.max_total_dd_usd,
+                  consistency_threshold_pct: propAcc.consistency_threshold_pct === '' ? null : +propAcc.consistency_threshold_pct,
+                  max_concurrent_trades: propAcc.max_concurrent_trades === '' ? null : +propAcc.max_concurrent_trades,
+                })}
+                disabled={propSaving}
+                className="flex-1 px-4 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded-lg font-medium disabled:opacity-50">
+                {propSaving ? 'Salvo...' : 'Salva'}
+              </button>
             </div>
           </div>
         </div>

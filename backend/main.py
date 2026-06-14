@@ -1114,6 +1114,13 @@ async def mt5_accounts():
                 "id": a.id, "login": a.login, "server": a.server, "label": a.label,
                 "demo": a.is_demo, "is_default": a.is_default, "is_active": a.is_active,
                 "mt5_path": a.mt5_path, "broker": a.broker,
+                # Prop mode fields (None per account non-prop)
+                "prop_mode": a.prop_mode,
+                "daily_dd_limit_usd": a.daily_dd_limit_usd,
+                "daily_dd_warning_usd": a.daily_dd_warning_usd,
+                "max_total_dd_usd": a.max_total_dd_usd,
+                "consistency_threshold_pct": a.consistency_threshold_pct,
+                "max_concurrent_trades": a.max_concurrent_trades,
             }
             for a in accounts
         ]
