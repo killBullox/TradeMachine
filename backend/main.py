@@ -200,6 +200,8 @@ class SignalOut(_UTCModel):
     trail_stop_enabled: Optional[bool] = None  # override per-trade del default globale
     broker: Optional[str] = None  # broker su cui e' stato eseguito il trade
     mt5_account: Optional[int] = None  # numero account MT5 al momento dell'apertura
+    is_filtered: bool = False  # signal ignorato dai filtri utente (no MT5)
+    filter_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -508,7 +510,10 @@ def _apply_perf_filters(signals: list, symbols_csv: Optional[str], hours_csv: Op
         if syms_upper and (s.symbol or "").upper() not in syms_upper:
             continue
         if hours_set is not None:
-            ts = s.entered_at or s.created_at
+            # Filtro su ORARIO SIGNAL (created_at), non fill. Consistente con la
+            # logica del filtro hours nei nuovi excluded_hours: il filtro scatta
+            # al momento di arrivo del signal, non al fill.
+            ts = s.created_at
             if not ts:
                 continue
             tsu = ts.replace(tzinfo=utc_tz) if ts.tzinfo is None else ts
@@ -524,6 +529,7 @@ def get_perf_symbols(db: Session = Depends(get_db)):
     from sqlalchemy import distinct
     rows = db.query(distinct(Signal.symbol)).filter(
         Signal.is_archived == False,
+        Signal.is_filtered == False,
         Signal.symbol.isnot(None),
     ).all()
     syms = sorted({r[0] for r in rows if r[0]})
@@ -538,7 +544,7 @@ def get_performance(
     hours: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    q = db.query(Signal).filter(Signal.is_archived == False)
+    q = db.query(Signal).filter(Signal.is_archived == False, Signal.is_filtered == False)
     utc_start, utc_end = _parse_date_range_roma(date_from, date_to)
     if utc_start: q = q.filter(Signal.created_at >= utc_start)
     if utc_end:   q = q.filter(Signal.created_at <= utc_end)
@@ -736,6 +742,7 @@ def get_equity_curve(
     ordinato per closed_at. Cumulativo parte da 0."""
     q = db.query(Signal).filter(
         Signal.is_archived == False,
+        Signal.is_filtered == False,
         Signal.pnl_usd.isnot(None),
         Signal.closed_at.isnot(None),
     )
@@ -792,6 +799,7 @@ def get_perf_by_symbol_hour(
 
     q = db.query(Signal).filter(
         Signal.is_archived == False,
+        Signal.is_filtered == False,
         Signal.status.in_(("tp1", "tp2", "tp3", "sl_hit", "closed", "trail_out")),
         Signal.pnl_usd.isnot(None),
     )
@@ -800,10 +808,11 @@ def get_perf_by_symbol_hour(
     if utc_end:   q = q.filter(Signal.created_at <= utc_end)
     sigs = _apply_perf_filters(q.all(), symbols, hours)
 
-    # Aggrega per (symbol, hour_roma)
+    # Aggrega per (symbol, hour_roma). USA created_at (orario SIGNAL), non
+    # entered_at (fill), per coerenza coi filtri "ignore by hour".
     buckets = {}  # (sym, hour) -> {count, wins, losses, pnl, ids}
     for s in sigs:
-        ts = s.entered_at or s.created_at
+        ts = s.created_at
         if not ts:
             continue
         ts_utc = ts.replace(tzinfo=utc_tz) if ts.tzinfo is None else ts
@@ -874,6 +883,7 @@ def get_calendar(year: int, month: int, db: Session = Depends(get_db)):
         Signal.closed_at <= last,
         Signal.pnl_usd.isnot(None),
         Signal.is_archived == False,
+        Signal.is_filtered == False,
     ).all()
 
     days: dict = {}
@@ -896,6 +906,67 @@ def get_calendar(year: int, month: int, db: Session = Depends(get_db)):
             }
             for d, v in days.items()
         }
+    }
+
+
+@app.get("/api/performance/what-if")
+def get_performance_what_if(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Stats sui signal FILTRATI (is_filtered=True) — simulazione di cosa
+    sarebbe accaduto se non li avessimo esclusi. Mai mescolate con le stats reali.
+    Tutti i filtri di data sono su created_at (signal time)."""
+    q = db.query(Signal).filter(
+        Signal.is_archived == False,
+        Signal.is_filtered == True,
+    )
+    utc_start, utc_end = _parse_date_range_roma(date_from, date_to)
+    if utc_start: q = q.filter(Signal.created_at >= utc_start)
+    if utc_end:   q = q.filter(Signal.created_at <= utc_end)
+    sigs = q.all()
+    total = len(sigs)
+    closed_statuses = {"tp1", "tp2", "tp3", "closed", "trail_out"}
+    tp_hits = sum(1 for s in sigs if s.status in closed_statuses)
+    sl_hits = sum(1 for s in sigs if s.status == "sl_hit")
+    closed_total = tp_hits + sl_hits
+    win_rate = round(tp_hits / closed_total * 100, 1) if closed_total > 0 else None
+    closed = [s for s in sigs if s.pnl_usd is not None]
+    total_pnl = round(sum(s.pnl_usd for s in closed), 2)
+    total_wins = round(sum(s.pnl_usd for s in closed if s.pnl_usd > 0), 2)
+    total_loss = round(sum(s.pnl_usd for s in closed if s.pnl_usd < 0), 2)
+    # Breakdown per motivo (symbol vs hour)
+    by_reason = {"symbol": 0, "hour": 0, "other": 0}
+    for s in sigs:
+        r = (s.filter_reason or "").lower()
+        if "simbolo" in r:
+            by_reason["symbol"] += 1
+        elif "ora" in r or "fascia" in r:
+            by_reason["hour"] += 1
+        else:
+            by_reason["other"] += 1
+    # Lista signal per drill-down UI
+    items = [{
+        "id": s.id,
+        "symbol": s.symbol,
+        "direction": s.direction,
+        "status": s.status,
+        "pnl_usd": round(s.pnl_usd, 2) if s.pnl_usd is not None else None,
+        "filter_reason": s.filter_reason,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
+        "closed_at": s.closed_at.isoformat() if s.closed_at else None,
+    } for s in sorted(sigs, key=lambda x: x.created_at or datetime.min, reverse=True)]
+    return {
+        "total_filtered": total,
+        "tp_hits": tp_hits,
+        "sl_hits": sl_hits,
+        "win_rate_pct": win_rate,
+        "total_pnl_usd": total_pnl,
+        "total_wins_usd": total_wins,
+        "total_loss_usd": total_loss,
+        "by_reason": by_reason,
+        "items": items,
     }
 
 
@@ -936,6 +1007,42 @@ async def update_risk_settings(body: RiskSettingsIn, db: Session = Depends(get_d
     async def _run(): await asyncio.get_event_loop().run_in_executor(None, risk_module.recalculate_all)
     asyncio.create_task(_run())
     return {"ok": True, "message": "Settings salvati, ricalcolo P&L in corso"}
+
+
+# ─── Endpoints: Filtri segnali (symbol exclusion + hour inclusion) ──────────
+# Stato persistente in RiskSettings.excluded_symbols / allowed_hours (JSON).
+# Quando un signal matcha un filtro viene marcato is_filtered=True ma NON
+# piazzato su MT5 — la sua "vita simulata" continua (sl_move/target_done/edit)
+# per alimentare le stats what-if. Le stats reali escludono is_filtered=True.
+
+@app.get("/api/filter-settings")
+def get_filter_settings_api(db: Session = Depends(get_db)):
+    from signal_filters import get_filter_config
+    cfg = get_filter_config(db)
+    # Lista simboli effettivamente apparsi nei signal (per popolare l'UI)
+    rows = db.query(Signal.symbol).distinct().all()
+    available = sorted({(r[0] or "").upper() for r in rows if r[0]})
+    return {
+        "excluded_symbols": cfg["excluded_symbols"],
+        "allowed_hours": cfg["allowed_hours"],
+        "available_symbols": available,
+    }
+
+
+class FilterSettingsIn(BaseModel):
+    excluded_symbols: Optional[List[str]] = None
+    allowed_hours: Optional[List[int]] = None
+
+
+@app.post("/api/filter-settings")
+def update_filter_settings_api(body: FilterSettingsIn, db: Session = Depends(get_db)):
+    from signal_filters import set_filter_config
+    cfg = set_filter_config(
+        excluded_symbols=body.excluded_symbols,
+        allowed_hours=body.allowed_hours,
+        db=db,
+    )
+    return {"ok": True, **cfg}
 
 
 @app.post("/api/recalculate")

@@ -610,6 +610,78 @@ function TradingCalendar() {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+function WhatIfPanel({ dateFrom, dateTo }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [expanded, setExpanded] = useState(false)
+  useEffect(() => {
+    setLoading(true)
+    const params = new URLSearchParams()
+    if (dateFrom) params.set('date_from', dateFrom)
+    if (dateTo) params.set('date_to', dateTo)
+    fetch(`/api/performance/what-if?${params}`).then(r => r.json())
+      .then(d => { setData(d); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [dateFrom, dateTo])
+  if (loading) return <div className="card p-4 text-slate-400">Caricamento what-if...</div>
+  if (!data || data.total_filtered === 0) {
+    return (
+      <div className="card p-4 border border-dashed border-slate-700">
+        <h2 className="text-lg font-semibold text-slate-300 mb-1">What-If filtri</h2>
+        <p className="text-sm text-slate-500">Nessun segnale filtrato nel periodo selezionato. Configura i filtri da Impostazioni → Filtri Segnali.</p>
+      </div>
+    )
+  }
+  const pnlColor = data.total_pnl_usd >= 0 ? 'text-emerald-400' : 'text-red-400'
+  return (
+    <div className="card p-5 border border-violet-700/40">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h2 className="text-lg font-semibold text-white">What-If filtri <span className="text-xs font-normal text-violet-300 ml-2">(simulazione signal ignorati)</span></h2>
+          <p className="text-xs text-slate-400">Cosa sarebbe successo se non avessimo filtrato questi segnali. Stats separate da quelle reali.</p>
+        </div>
+        <button onClick={() => setExpanded(e => !e)} className="text-xs text-violet-400 hover:text-violet-300">
+          {expanded ? 'Nascondi dettaglio' : 'Mostra dettaglio'}
+        </button>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-center">
+        <div><div className="text-2xl font-bold text-white">{data.total_filtered}</div><div className="text-xs text-slate-400">Filtrati</div></div>
+        <div><div className={`text-2xl font-bold ${pnlColor}`}>${data.total_pnl_usd}</div><div className="text-xs text-slate-400">P&L ipotetico</div></div>
+        <div><div className="text-2xl font-bold text-emerald-400">{data.tp_hits}</div><div className="text-xs text-slate-400">TP</div></div>
+        <div><div className="text-2xl font-bold text-red-400">{data.sl_hits}</div><div className="text-xs text-slate-400">SL</div></div>
+        <div><div className="text-2xl font-bold text-violet-300">{data.win_rate_pct ?? '—'}{data.win_rate_pct != null ? '%' : ''}</div><div className="text-xs text-slate-400">Win rate</div></div>
+      </div>
+      <div className="mt-3 text-xs text-slate-500 flex gap-4">
+        <span>Per simbolo: {data.by_reason.symbol}</span>
+        <span>Per ora: {data.by_reason.hour}</span>
+        {data.by_reason.other > 0 && <span>Altro: {data.by_reason.other}</span>}
+      </div>
+      {expanded && (
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="text-slate-400 border-b border-slate-700">
+              <tr><th className="text-left py-1 px-2">#</th><th className="text-left">Symbol</th><th className="text-left">Dir</th><th className="text-left">Status</th><th className="text-right">P&L</th><th className="text-left">Motivo</th></tr>
+            </thead>
+            <tbody>
+              {data.items.map(it => (
+                <tr key={it.id} className="border-b border-slate-800">
+                  <td className="py-1 px-2 text-slate-400">{it.id}</td>
+                  <td className="text-slate-200">{it.symbol}</td>
+                  <td className="text-slate-300">{it.direction}</td>
+                  <td className="text-slate-300">{it.status}</td>
+                  <td className={`text-right ${it.pnl_usd == null ? 'text-slate-500' : it.pnl_usd >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{it.pnl_usd != null ? `$${it.pnl_usd}` : '—'}</td>
+                  <td className="text-slate-400 truncate max-w-xs">{it.filter_reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 export default function Performance() {
   const [perf, setPerf] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -836,6 +908,9 @@ export default function Performance() {
 
       {/* Calendario P&L */}
       <TradingCalendar />
+
+      {/* What-If filtri */}
+      <WhatIfPanel dateFrom={dateFrom} dateTo={dateTo} />
     </div>
   )
 }

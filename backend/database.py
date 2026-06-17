@@ -80,6 +80,13 @@ class Signal(Base):
     # Tipo di entry richiesto dal segnale: 'near' (LIMIT/MARKET su pullback)
     # oppure 'breakout' (STOP sopra/sotto livello, da "Buy Above"/"Sell Below").
     entry_type = Column(String(20), nullable=True)
+    # Signal escluso dai filtri utente (symbol/hour). Se True: il bot NON ha
+    # piazzato ordini reali sul broker, ma gestisce comunque il signal (status
+    # changes, sl_move, target_done, edit) per simulare l'esito ipotetico.
+    # is_filtered=True trade vanno SEMPRE esclusi dalle statistiche reali e
+    # mostrati solo in sezione what-if.
+    is_filtered = Column(Boolean, default=False)
+    filter_reason = Column(Text, nullable=True)  # es. "symbol XAUUSD excluded"
 
 
 class TradeUpdate(Base):
@@ -120,6 +127,12 @@ class RiskSettings(Base):
     entry_tolerance_pips = Column(Float, default=3.0)  # tolleranza pip per entry MARKET vicino al range
     trail_stop_enabled = Column(Boolean, default=False)  # auto trail SL: TP1 hit -> BE+1pip, TP2 hit -> TP1+1pip
     max_margin_pct_per_trade = Column(Float, default=50.0)  # cap % free margin per trade (default 50%)
+    # ─── Filtri signal (escludono determinati signal dal placing reale).
+    # Il signal escluso viene comunque salvato con is_filtered=True e gestito
+    # come se fosse aperto (sl_move/target_done/edit applicati) per fare
+    # simulazione what-if. Nessuna interazione MT5 reale.
+    excluded_symbols = Column(Text, nullable=True)  # JSON array es. ["EURJPY","USOIL"]
+    allowed_hours = Column(Text, nullable=True)     # JSON array int 0-23 (Roma). None=tutte
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -256,6 +269,10 @@ def init_db():
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN mt5_account INTEGER"))
         if "entry_type" not in existing:
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN entry_type VARCHAR(20)"))
+        if "is_filtered" not in existing:
+            conn.execute(sa.text("ALTER TABLE signals ADD COLUMN is_filtered BOOLEAN DEFAULT 0"))
+        if "filter_reason" not in existing:
+            conn.execute(sa.text("ALTER TABLE signals ADD COLUMN filter_reason TEXT"))
         conn.commit()
         # Migrazione risk_settings
         rs_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(risk_settings)")).fetchall()]
@@ -270,6 +287,12 @@ def init_db():
             conn.commit()
         if "max_margin_pct_per_trade" not in rs_existing:
             conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN max_margin_pct_per_trade FLOAT DEFAULT 50.0"))
+            conn.commit()
+        if "excluded_symbols" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN excluded_symbols TEXT"))
+            conn.commit()
+        if "allowed_hours" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN allowed_hours TEXT"))
             conn.commit()
         # Migrazione mt5_accounts
         try:

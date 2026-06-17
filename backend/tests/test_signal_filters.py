@@ -1,0 +1,138 @@
+"""Test su signal_filters: symbol exclusion + hour inclusion."""
+import json
+import pytest
+from datetime import datetime
+
+
+@pytest.fixture
+def filter_db(in_memory_db):
+    import sys
+    for mod in list(sys.modules.keys()):
+        if mod.startswith("signal_filters"):
+            del sys.modules[mod]
+    yield in_memory_db
+
+
+def _set_filters(SessionLocal, excluded=None, allowed_hours=None):
+    from database import RiskSettings
+    db = SessionLocal()
+    try:
+        rs = db.query(RiskSettings).first()
+        if not rs:
+            rs = RiskSettings()
+            db.add(rs)
+        rs.excluded_symbols = json.dumps(excluded) if excluded else None
+        rs.allowed_hours = json.dumps(allowed_hours) if allowed_hours else None
+        db.add(rs); db.commit()
+    finally:
+        db.close()
+
+
+class TestNoFilter:
+    def test_default_nessun_filtro(self, filter_db):
+        # Nessuna riga RiskSettings → niente filtri attivi
+        from signal_filters import check_signal_filter
+        from datetime import datetime
+        result = check_signal_filter("XAUUSD", datetime(2026, 6, 17, 14, 0))
+        assert result is None
+
+    def test_excluded_vuoto_no_block(self, filter_db):
+        _set_filters(filter_db, excluded=[], allowed_hours=None)
+        from signal_filters import check_signal_filter
+        assert check_signal_filter("XAUUSD", datetime(2026, 6, 17, 14, 0)) is None
+
+
+class TestExcludedSymbols:
+    def test_simbolo_escluso_blocca(self, filter_db):
+        _set_filters(filter_db, excluded=["EURJPY"])
+        from signal_filters import check_signal_filter
+        result = check_signal_filter("EURJPY", datetime(2026, 6, 17, 14, 0))
+        assert result is not None
+        assert "EURJPY" in result
+
+    def test_case_insensitive(self, filter_db):
+        _set_filters(filter_db, excluded=["xauusd"])
+        from signal_filters import check_signal_filter
+        result = check_signal_filter("XAUUSD", datetime(2026, 6, 17, 14, 0))
+        assert result is not None
+
+    def test_simbolo_non_in_lista_passa(self, filter_db):
+        _set_filters(filter_db, excluded=["EURJPY"])
+        from signal_filters import check_signal_filter
+        assert check_signal_filter("XAUUSD", datetime(2026, 6, 17, 14, 0)) is None
+
+
+class TestAllowedHours:
+    def test_ora_in_lista_passa(self, filter_db):
+        _set_filters(filter_db, allowed_hours=[8, 9, 10, 14, 15, 16])
+        from signal_filters import check_signal_filter
+        # 14:30 Roma = 12:30 UTC (CEST)
+        utc_ts = datetime(2026, 6, 17, 12, 30)
+        result = check_signal_filter("XAUUSD", utc_ts)
+        assert result is None
+
+    def test_ora_non_in_lista_blocca(self, filter_db):
+        _set_filters(filter_db, allowed_hours=[8, 9])
+        from signal_filters import check_signal_filter
+        # 14:30 Roma = 12:30 UTC
+        utc_ts = datetime(2026, 6, 17, 12, 30)
+        result = check_signal_filter("XAUUSD", utc_ts)
+        assert result is not None
+        assert "14" in result  # ora Roma 14
+
+    def test_allowed_hours_none_passa_sempre(self, filter_db):
+        _set_filters(filter_db, allowed_hours=None)
+        from signal_filters import check_signal_filter
+        # qualunque ora
+        for h in (0, 6, 12, 18, 23):
+            result = check_signal_filter("XAUUSD", datetime(2026, 6, 17, h, 0))
+            assert result is None
+
+
+class TestCombinedFilters:
+    def test_simbolo_escluso_prevale_su_ora_ok(self, filter_db):
+        _set_filters(filter_db, excluded=["BTCUSD"], allowed_hours=[8, 9, 10])
+        from signal_filters import check_signal_filter
+        # BTC alle 10 Roma (= 8 UTC) → escluso anche se ora ok
+        utc_ts = datetime(2026, 6, 17, 8, 30)
+        result = check_signal_filter("BTCUSD", utc_ts)
+        assert result is not None
+        assert "BTCUSD" in result
+
+    def test_ora_blocca_anche_se_simbolo_ok(self, filter_db):
+        _set_filters(filter_db, excluded=["BTCUSD"], allowed_hours=[8, 9])
+        from signal_filters import check_signal_filter
+        # XAUUSD alle 14 Roma → ora non in lista
+        utc_ts = datetime(2026, 6, 17, 12, 0)
+        result = check_signal_filter("XAUUSD", utc_ts)
+        assert result is not None
+        assert "14" in result
+
+
+class TestGetSetConfig:
+    def test_get_config_default(self, filter_db):
+        from signal_filters import get_filter_config
+        cfg = get_filter_config()
+        assert cfg["excluded_symbols"] == []
+        assert cfg["allowed_hours"] is None
+
+    def test_set_excluded(self, filter_db):
+        from signal_filters import set_filter_config, get_filter_config
+        set_filter_config(excluded_symbols=["EURJPY", "USOIL"])
+        cfg = get_filter_config()
+        assert "EURJPY" in cfg["excluded_symbols"]
+        assert "USOIL" in cfg["excluded_symbols"]
+
+    def test_set_hours(self, filter_db):
+        from signal_filters import set_filter_config, get_filter_config
+        set_filter_config(allowed_hours=[8, 10, 15])
+        cfg = get_filter_config()
+        assert cfg["allowed_hours"] == [8, 10, 15]
+
+    def test_clear_filters(self, filter_db):
+        from signal_filters import set_filter_config, get_filter_config
+        set_filter_config(excluded_symbols=["EURJPY"], allowed_hours=[8])
+        set_filter_config(excluded_symbols=[], allowed_hours=[])
+        cfg = get_filter_config()
+        assert cfg["excluded_symbols"] == []
+        assert cfg["allowed_hours"] is None

@@ -3,6 +3,7 @@ import { api } from '../api'
 import toast from 'react-hot-toast'
 import { format } from 'date-fns'
 import { it } from 'date-fns/locale'
+import FilterPanel from '../components/FilterPanel'
 
 function RiskPanel() {
   const [settings, setSettings] = useState(null)
@@ -220,6 +221,9 @@ export default function Backup() {
 
       {/* Risk Management */}
       <RiskPanel />
+
+      {/* Filtri Segnali */}
+      <FilterPanel />
 
       {/* Riavvio Server */}
       <div className="card p-6 mb-8 border border-amber-600/30">

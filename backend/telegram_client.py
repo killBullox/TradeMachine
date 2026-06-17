@@ -797,8 +797,23 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 log(f"[MarketEntry] #{ref.id} status={ref.status} (no pending, no open) → IGNORE msg '{text[:60]}'")
                 return
             sig = _save_signal(db, parsed, msg_id)
-            # Auto-trading: piazza ordine MT5 se abilitato
-            if sig:
+            # ── FILTRI UTENTE (symbol exclusion + hour inclusion) ──
+            # Se filtrato: il signal resta in DB con is_filtered=True per simulazione,
+            # ma NON viene piazzato su MT5. Continua a ricevere sl_move/target_done/edit.
+            if sig and not getattr(sig, "is_filtered", False):
+                try:
+                    from signal_filters import check_signal_filter
+                    _filter_reason = check_signal_filter(sig.symbol, sig.created_at, db)
+                    if _filter_reason:
+                        sig.is_filtered = True
+                        sig.filter_reason = _filter_reason
+                        _append_trade_log(sig, "filtered", f"Signal filtrato (no MT5): {_filter_reason}")
+                        db.add(sig); db.commit()
+                        log(f"[Filter] #{sig.id} {sig.symbol} → is_filtered=True ({_filter_reason})")
+                except Exception as _e:
+                    log(f"[Filter] errore check signal #{getattr(sig,'id','?')}: {_e}")
+            # Auto-trading: piazza ordine MT5 se abilitato (skip se filtrato)
+            if sig and not getattr(sig, "is_filtered", False):
                 try:
                     import mt5_trader
                     from mt5_trader import MT5_SYMBOL_MAP
