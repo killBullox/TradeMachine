@@ -1275,21 +1275,35 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             ).all()
 
                     for sig in open_sigs:
-                        # Una volta colpito TP1 (status passa a tp1/tp2), il bot gestisce
-                        # autonomamente lo SL via trail_applied. Ignoriamo i messaggi
-                        # SL Move TG successivi per evitare sovrapposizioni che hanno
-                        # causato early-close dei ticket residui (caso #355: trail
-                        # gia' a BE+1pip, TG ha mandato altro BE → sl_immediate_close
-                        # ha chiuso prematuramente sui ticket ancora in profit).
+                        # Post-TP1: ignora SL Move TG SOLO se trail auto e' attivo.
+                        # Senza trail auto attivo, il msg TG e' l'unica protezione →
+                        # va applicato. Caso #355 (con auto-trail ON): TG SL Move
+                        # sovrapposto causava sl_immediate_close — quindi ignora.
+                        # Caso #464 (auto-trail OFF): bot ignorava TG → SL originale
+                        # colpito per -71$. Distinguere via trail_stop_enabled.
                         if sig.status in ("tp1", "tp2"):
-                            _append_trade_log(sig, "sl_move_ignored",
-                                f"SL Move da TG ignorato: TP1 gia' colpito (status={sig.status}), "
-                                f"trail/lock_profit gestisce SL autonomamente.",
-                                {"new_sl_proposed": parsed.new_sl, "is_breakeven": parsed.is_breakeven,
-                                 "current_status": sig.status})
-                            log(f"[SLMove] #{sig.id} {sig.symbol} IGNORATO: TP1 gia' colpito (status={sig.status})")
-                            db.add(sig)
-                            continue
+                            # Determina se il trail automatico e' attivo per questo sig
+                            _trail_active = False
+                            if sig.trail_stop_enabled is True:
+                                _trail_active = True
+                            elif sig.trail_stop_enabled is None:
+                                try:
+                                    from risk import get_risk_settings as _grs
+                                    _rs = _grs()
+                                    _trail_active = bool(_rs.get("trail_stop_enabled", False))
+                                except Exception:
+                                    _trail_active = False
+                            if _trail_active:
+                                _append_trade_log(sig, "sl_move_ignored",
+                                    f"SL Move da TG ignorato: TP1 gia' colpito (status={sig.status}), "
+                                    f"trail auto attivo gestisce SL autonomamente.",
+                                    {"new_sl_proposed": parsed.new_sl, "is_breakeven": parsed.is_breakeven,
+                                     "current_status": sig.status, "trail_auto": True})
+                                log(f"[SLMove] #{sig.id} {sig.symbol} IGNORATO: TP1 colpito + trail auto ON")
+                                db.add(sig)
+                                continue
+                            # else: trail auto OFF → applica SL Move TG come unica protezione
+                            log(f"[SLMove] #{sig.id} {sig.symbol} post-TP1 ma trail auto OFF → APPLICO SL Move TG")
                         new_sl = parsed.new_sl
                         if parsed.is_breakeven and sig.actual_entry_price:
                             new_sl = sig.actual_entry_price
