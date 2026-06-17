@@ -4,6 +4,7 @@ import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Cell, AreaChart, Area, Brush
 } from 'recharts'
+import DateRangePicker from '../components/DateRangePicker'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -649,28 +650,11 @@ export default function Performance() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h1 className="text-xl font-bold text-white">Performance</h1>
         <div className="flex items-center gap-2 flex-wrap">
-          <label className="text-xs text-slate-400">Dal</label>
-          <input
-            type="datetime-local"
-            value={dateFrom}
-            onChange={e => setDateFrom(e.target.value)}
-            className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-brand-500"
+          <DateRangePicker
+            dateFrom={dateFrom}
+            dateTo={dateTo}
+            onChange={(from, to) => { setDateFrom(from || ''); setDateTo(to || '') }}
           />
-          <label className="text-xs text-slate-400">Al</label>
-          <input
-            type="datetime-local"
-            value={dateTo}
-            onChange={e => setDateTo(e.target.value)}
-            className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-brand-500"
-          />
-          {(dateFrom || dateTo) && (
-            <button
-              onClick={() => { setDateFrom(''); setDateTo('') }}
-              className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 border border-slate-700 rounded"
-            >
-              Reset
-            </button>
-          )}
           <button onClick={load} className="text-xs text-slate-400 hover:text-white border border-slate-700 rounded px-3 py-1.5">
             Aggiorna
           </button>
@@ -679,7 +663,7 @@ export default function Performance() {
       {(dateFrom || dateTo || selectedSymbols.length > 0 || selectedHours.length > 0) && (
         <div className="text-xs text-amber-400 bg-amber-900/20 border border-amber-800/40 rounded px-3 py-2 space-y-1">
           {(dateFrom || dateTo) && (
-            <div>Periodo: {dateFrom ? `dal ${dateFrom.replace('T',' ')}` : ''}{dateTo ? ` al ${dateTo.replace('T',' ')}` : ''}</div>
+            <div>Periodo: {dateFrom ? `dal ${dateFrom}` : ''}{dateTo ? ` al ${dateTo}` : ''}</div>
           )}
           {selectedSymbols.length > 0 && <div>Simboli: {selectedSymbols.join(', ')}</div>}
           {selectedHours.length > 0 && <div>Fasce orarie (Roma): {[...selectedHours].sort((a,b)=>a-b).map(h => `${String(h).padStart(2,'0')}:00`).join(', ')}</div>}

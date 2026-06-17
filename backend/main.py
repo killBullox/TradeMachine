@@ -433,6 +433,51 @@ def delete_journal(entry_id: int, db: Session = Depends(get_db)):
 
 # ─── Endpoints: Performance ───────────────────────────────────────────────────
 
+def _parse_date_range_roma(date_from: Optional[str], date_to: Optional[str]):
+    """Converte le date YYYY-MM-DD ricevute dal DatePicker in datetimes UTC
+    rispettando il fuso Roma (CEST/CET). Ritorna (utc_start, utc_end) o
+    (None, None) se non parsabili.
+
+    date_from = "2026-06-17" → start 2026-06-17 00:00 Roma = 2026-06-16 22:00 UTC
+    date_to   = "2026-06-17" → end   2026-06-17 23:59 Roma = 2026-06-17 21:59 UTC
+
+    Accetta anche formato ISO con tempo (legacy datetime-local) per retrocompat.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        rome = ZoneInfo("Europe/Rome")
+        utc = ZoneInfo("UTC")
+    except Exception:
+        rome = utc = None
+    utc_start = utc_end = None
+    if date_from:
+        try:
+            if 'T' in date_from:
+                dt = datetime.fromisoformat(date_from)
+                utc_start = dt
+            else:
+                d = datetime.fromisoformat(date_from)
+                if rome:
+                    utc_start = d.replace(tzinfo=rome).astimezone(utc).replace(tzinfo=None)
+                else:
+                    utc_start = d
+        except Exception:
+            utc_start = None
+    if date_to:
+        try:
+            if 'T' in date_to:
+                utc_end = datetime.fromisoformat(date_to)
+            else:
+                d = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59)
+                if rome:
+                    utc_end = d.replace(tzinfo=rome).astimezone(utc).replace(tzinfo=None)
+                else:
+                    utc_end = d
+        except Exception:
+            utc_end = None
+    return utc_start, utc_end
+
+
 def _parse_csv_param(v: Optional[str]) -> Optional[list]:
     if not v:
         return None
@@ -494,20 +539,9 @@ def get_performance(
     db: Session = Depends(get_db)
 ):
     q = db.query(Signal).filter(Signal.is_archived == False)
-    if date_from:
-        try:
-            q = q.filter(Signal.created_at >= datetime.fromisoformat(date_from))
-        except Exception:
-            pass
-    if date_to:
-        try:
-            dt_to = datetime.fromisoformat(date_to)
-            # include tutta la giornata finale
-            if 'T' not in date_to:
-                dt_to = dt_to.replace(hour=23, minute=59, second=59)
-            q = q.filter(Signal.created_at <= dt_to)
-        except Exception:
-            pass
+    utc_start, utc_end = _parse_date_range_roma(date_from, date_to)
+    if utc_start: q = q.filter(Signal.created_at >= utc_start)
+    if utc_end:   q = q.filter(Signal.created_at <= utc_end)
     signals = _apply_perf_filters(q.all(), symbols, hours)
     total = len(signals)
 
@@ -705,12 +739,9 @@ def get_equity_curve(
         Signal.pnl_usd.isnot(None),
         Signal.closed_at.isnot(None),
     )
-    if date_from:
-        try: q = q.filter(Signal.closed_at >= datetime.fromisoformat(date_from))
-        except: pass
-    if date_to:
-        try: q = q.filter(Signal.closed_at <= datetime.fromisoformat(date_to))
-        except: pass
+    utc_start, utc_end = _parse_date_range_roma(date_from, date_to)
+    if utc_start: q = q.filter(Signal.closed_at >= utc_start)
+    if utc_end:   q = q.filter(Signal.closed_at <= utc_end)
     sigs = _apply_perf_filters(q.all(), symbols, hours)
     sigs.sort(key=lambda s: s.closed_at)
     points = []
@@ -764,12 +795,9 @@ def get_perf_by_symbol_hour(
         Signal.status.in_(("tp1", "tp2", "tp3", "sl_hit", "closed", "trail_out")),
         Signal.pnl_usd.isnot(None),
     )
-    if date_from:
-        try: q = q.filter(Signal.created_at >= datetime.fromisoformat(date_from))
-        except: pass
-    if date_to:
-        try: q = q.filter(Signal.created_at <= datetime.fromisoformat(date_to))
-        except: pass
+    utc_start, utc_end = _parse_date_range_roma(date_from, date_to)
+    if utc_start: q = q.filter(Signal.created_at >= utc_start)
+    if utc_end:   q = q.filter(Signal.created_at <= utc_end)
     sigs = _apply_perf_filters(q.all(), symbols, hours)
 
     # Aggrega per (symbol, hour_roma)
