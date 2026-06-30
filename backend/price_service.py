@@ -748,10 +748,12 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
     # Segnali MT5: stato autorevole da sync_positions, non toccare
     if sig.mt5_ticket or sig.mt5_tickets:
         return
-    # Segnali senza ticket con MT5 abilitato: sono stati rigettati/mancati, non trackare
+    # Segnali senza ticket con MT5 abilitato: sono stati rigettati/mancati, non trackare.
+    # ECCEZIONE: signal filtrati (is_filtered=True) — noi NON li abbiamo piazzati apposta,
+    # ma vogliamo simularne il lifecycle per le stats what-if.
     try:
         import mt5_trader
-        if mt5_trader.is_enabled():
+        if mt5_trader.is_enabled() and not getattr(sig, "is_filtered", False):
             return
     except Exception:
         pass
