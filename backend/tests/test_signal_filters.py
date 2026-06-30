@@ -136,3 +136,128 @@ class TestGetSetConfig:
         cfg = get_filter_config()
         assert cfg["excluded_symbols"] == []
         assert cfg["allowed_hours"] is None
+
+
+class TestPaperLifecycle:
+    """Verifica che i signal filtered abbiano vita completa come paper trade."""
+
+    def _make_filtered_signal(self, SessionLocal, **overrides):
+        from database import Signal
+        from datetime import datetime
+        db = SessionLocal()
+        try:
+            sig = Signal(
+                telegram_msg_id=99001,
+                symbol="EURJPY",
+                direction="buy",
+                entry_price=160.00,
+                entry_price_high=160.05,
+                stoploss=159.50,
+                tp1=160.50,
+                tp2=161.00,
+                tp3=161.50,
+                status="pending",
+                is_filtered=True,
+                filter_reason="test",
+                raw_message="test signal",
+                created_at=datetime.utcnow(),
+                **overrides,
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            return sig.id
+        finally:
+            db.close()
+
+    def test_recalculate_signal_calcola_pnl_su_tp3(self, filter_db, fake_mt5):
+        sid = self._make_filtered_signal(filter_db)
+        # Simula transizioni complete: tutte e 3 le TP raggiunte
+        from database import Signal
+        from price_service import _append_event
+        from datetime import datetime
+        import risk
+        db = filter_db()
+        try:
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            now = datetime.utcnow()
+            sig.status = "open"
+            sig.actual_entry_price = 160.0
+            sig.entered_at = now
+            _append_event(sig, "entry", 160.0, now)
+            _append_event(sig, "tp1", 160.50, now)
+            _append_event(sig, "tp2", 161.00, now)
+            _append_event(sig, "tp3", 161.50, now)
+            sig.status = "tp3"
+            sig.exit_price = 161.50
+            sig.closed_at = now
+            risk.recalculate_signal(sig)
+            db.add(sig); db.commit()
+            db.refresh(sig)
+            assert sig.position_size is not None and sig.position_size > 0
+            assert sig.pnl_usd is not None
+            assert sig.pnl_usd > 0  # 3 TP positivi → profit
+        finally:
+            db.close()
+
+    def test_recalculate_signal_su_sl_hit_perdita(self, filter_db, fake_mt5):
+        sid = self._make_filtered_signal(filter_db)
+        from database import Signal
+        from price_service import _append_event
+        from datetime import datetime
+        import risk
+        db = filter_db()
+        try:
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            now = datetime.utcnow()
+            sig.status = "open"
+            sig.actual_entry_price = 160.0
+            sig.entered_at = now
+            _append_event(sig, "entry", 160.0, now)
+            _append_event(sig, "sl_hit", 159.50, now)
+            sig.status = "sl_hit"
+            sig.exit_price = 159.50
+            sig.closed_at = now
+            risk.recalculate_signal(sig)
+            db.add(sig); db.commit()
+            db.refresh(sig)
+            assert sig.pnl_usd is not None
+            assert sig.pnl_usd < 0
+        finally:
+            db.close()
+
+    def test_sl_move_aggiorna_stoploss_paper(self, filter_db, fake_mt5):
+        """Su un paper trade, lo SL move TG deve aggiornare sig.stoploss
+        (per i reali lo fa il sync MT5)."""
+        sid = self._make_filtered_signal(filter_db)
+        from database import Signal
+        from telegram_client import _save_sl_move
+        from parser import ParsedSLMove
+        db = filter_db()
+        try:
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            sig.status = "open"
+            sig.actual_entry_price = 160.0
+            db.add(sig); db.commit()
+            parsed = ParsedSLMove(symbol="EURJPY", new_sl=160.00, is_breakeven=True, raw="be")
+            _save_sl_move(db, parsed, msg_id=99100)
+            db.refresh(sig)
+            assert sig.stoploss == 160.00
+        finally:
+            db.close()
+
+    def test_append_event_costruisce_trade_log_json(self, filter_db, fake_mt5):
+        from database import Signal
+        from price_service import _append_event
+        from datetime import datetime
+        import json as _json
+        sid = self._make_filtered_signal(filter_db)
+        db = filter_db()
+        try:
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            _append_event(sig, "entry", 160.0, datetime.utcnow())
+            _append_event(sig, "tp1", 160.50, datetime.utcnow())
+            evs = _json.loads(sig.trade_log)
+            assert len(evs) == 2
+            assert evs[0]["event"] == "entry" and evs[0]["price"] == 160.0
+            assert evs[1]["event"] == "tp1"
+        finally:
+            db.close()

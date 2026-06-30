@@ -220,6 +220,33 @@ def _calc_pnl_from_trade_log(sig, lots: float, entry: float) -> tuple:
     return round(total_pnl, 2), json.dumps(updated_events)
 
 
+def recalculate_signal(sig) -> None:
+    """Ricalcola position_size + pnl_usd per UN signal (in-place, no commit).
+    Pensato per i paper trade (filtered): chiamato dal monitor a ogni cambio status.
+    Riusa la stessa formula di recalculate_all ma su un solo signal."""
+    settings = get_risk_settings()
+    risk_amount = calc_risk_amount(settings)
+    entry = sig.actual_entry_price or sig.entry_price or sig.entry_price_high
+    sl = sig.stoploss
+    effective_risk = risk_amount * 0.5 if getattr(sig, 'is_risky', False) else risk_amount
+    lots = calc_position_size(sig.symbol, entry, sl, effective_risk) if (entry and sl) else None
+    sig.risk_usd = effective_risk
+    # I filtered NON hanno ticket MT5: position_size = teorica
+    if not (sig.mt5_ticket or sig.mt5_tickets):
+        sig.position_size = lots
+    if not lots or not entry:
+        return
+    if sig.mt5_ticket:
+        return  # P&L autorevole da MT5
+    total_pnl, updated_log = _calc_pnl_from_trade_log(sig, lots, entry)
+    if total_pnl is not None:
+        sig.pnl_usd = total_pnl
+        sig.trade_log = updated_log
+    elif sig.status in ("sl_hit", "tp1", "tp2", "tp3") and sig.exit_price:
+        sig.pnl_usd = calc_pnl(sig.symbol, sig.direction or "buy",
+                                entry, sig.exit_price, lots)
+
+
 def recalculate_all():
     """
     Per ogni segnale: ricalcola position_size, risk_usd, pnl_usd

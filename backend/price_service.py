@@ -743,17 +743,34 @@ async def _check_open_signals():
         db.close()
 
 
+def _append_event(sig, event: str, price: float, ts: datetime):
+    """Append evento al trade_log nel formato atteso da risk._calc_pnl_from_trade_log
+    (chiavi: ts, event, price). Usato per i paper trade (filtered)."""
+    import json as _json
+    try:
+        log_list = _json.loads(sig.trade_log) if sig.trade_log else []
+    except Exception:
+        log_list = []
+    log_list.append({
+        "ts": ts.isoformat() + "Z",
+        "event": event,
+        "price": price,
+    })
+    sig.trade_log = _json.dumps(log_list)
+
+
 def _update_realtime(db, sig: Signal, price: float, now: datetime):
     """State machine real-time per un singolo segnale."""
     # Segnali MT5: stato autorevole da sync_positions, non toccare
     if sig.mt5_ticket or sig.mt5_tickets:
         return
+    is_paper = bool(getattr(sig, "is_filtered", False))
     # Segnali senza ticket con MT5 abilitato: sono stati rigettati/mancati, non trackare.
     # ECCEZIONE: signal filtrati (is_filtered=True) — noi NON li abbiamo piazzati apposta,
-    # ma vogliamo simularne il lifecycle per le stats what-if.
+    # ma vogliamo simularne il lifecycle come paper trade.
     try:
         import mt5_trader
-        if mt5_trader.is_enabled() and not getattr(sig, "is_filtered", False):
+        if mt5_trader.is_enabled() and not is_paper:
             return
     except Exception:
         pass
@@ -768,10 +785,14 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
             sig.actual_entry_price = price
             sig.entered_at = now
             changed = True
+            if is_paper:
+                _append_event(sig, "entry", price, now)
 
     if sig.status not in ("open", "tp1", "tp2"):
         if changed:
             sig.updated_at = now
+            if is_paper:
+                _recalc_paper(sig)
             db.add(sig)
             db.commit()
         return
@@ -784,6 +805,9 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
             sig.exit_price = sig.stoploss  # fill at SL level, not at detected price
             sig.closed_at = now
             sig.updated_at = now
+            if is_paper:
+                _append_event(sig, "sl_hit", sig.stoploss, now)
+                _recalc_paper(sig)
             db.add(sig)
             db.commit()
             log(f"[Monitor] SL HIT {sig.symbol} #{sig.id} @ {price:.5f}")
@@ -798,6 +822,14 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
         if hit:
             current = {"tp1": 1, "tp2": 2, "tp3": 3, "open": 0}.get(sig.status, 0)
             if tp_num > current:
+                # Per i paper trade: appendi un evento per ogni TP intermedio
+                # saltato (es. salto open→tp3 = ricostruisci tp1, tp2, tp3 in fila
+                # per coerenza con risk._calc_pnl_from_trade_log partial close)
+                if is_paper:
+                    for n in range(current + 1, tp_num + 1):
+                        tp_n_price = [sig.tp1, sig.tp2, sig.tp3][n - 1]
+                        if tp_n_price is not None:
+                            _append_event(sig, f"tp{n}", tp_n_price, now)
                 status_map = {1: "tp1", 2: "tp2", 3: "tp3"}
                 sig.status = status_map[tp_num]
                 if tp_num == 3:
@@ -809,5 +841,16 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
             break
 
     if changed:
+        if is_paper:
+            _recalc_paper(sig)
         db.add(sig)
         db.commit()
+
+
+def _recalc_paper(sig):
+    """Wrapper sicuro per risk.recalculate_signal (no-op se import fail)."""
+    try:
+        import risk
+        risk.recalculate_signal(sig)
+    except Exception as e:
+        log(f"[Monitor] recalculate_signal #{sig.id} err: {e}")

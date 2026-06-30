@@ -324,6 +324,18 @@ def _save_sl_move(db, parsed: ParsedSLMove, msg_id: int):
     db.add(move)
     db.commit()
     log(f"[SLMove] msg={msg_id} sig={signal_id} new_sl={parsed.new_sl} be={parsed.is_breakeven}")
+    # PAPER TRADE (filtered): per i reali il sync MT5 aggiorna sig.stoploss;
+    # per i filtered nessun sync esiste, quindi lo aggiorniamo qui direttamente.
+    if signal_id:
+        tgt = db.query(Signal).filter(Signal.id == signal_id).first()
+        if tgt and getattr(tgt, "is_filtered", False):
+            new_sl = parsed.new_sl
+            if new_sl is None and parsed.is_breakeven:
+                new_sl = tgt.actual_entry_price or tgt.entry_price or tgt.entry_price_high
+            if new_sl is not None:
+                tgt.stoploss = new_sl
+                db.add(tgt); db.commit()
+                log(f"[SLMove] paper #{tgt.id} stoploss aggiornato a {new_sl}")
 
 
 async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
