@@ -46,32 +46,17 @@ function RiskPanel() {
       <h2 className="text-lg font-semibold text-white mb-4">Risk Management</h2>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="space-y-1">
-          <label className="text-xs text-slate-400">Account ($)</label>
-          <input type="number" value={settings.account_size}
-            onChange={e => setSettings(s => ({...s, account_size: +e.target.value}))}
-            className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500" />
-          {mt5Info?.balance != null && (
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-xs text-slate-500">
-                Balance MT5 attuale ({mt5Info.label}): <span className="text-slate-300 font-mono">${mt5Info.balance.toLocaleString()}</span>
-              </span>
-              {Math.abs(settings.account_size - mt5Info.balance) > 1 && (
-                <button
-                  type="button"
-                  onClick={() => setSettings(s => ({...s, account_size: Math.round(mt5Info.balance) }))}
-                  className="text-xs px-2 py-0.5 bg-brand-700/50 hover:bg-brand-600 text-brand-200 rounded"
-                  title="Copia il balance MT5 corrente nel campo Account"
-                >
-                  Usa balance
-                </button>
-              )}
-            </div>
-          )}
-          {mt5Info?.prop_mode && (
-            <p className="text-xs text-violet-400 mt-1">
-              Prop mode ATTIVO: il calcolo del rischio usa gia' il balance MT5 live indipendentemente da questo campo.
-            </p>
-          )}
+          <label className="text-xs text-slate-400">Account ($) - live MT5</label>
+          <input type="number"
+            value={mt5Info?.balance != null ? Math.round(mt5Info.balance) : settings.account_size}
+            readOnly
+            disabled
+            className="w-full px-3 py-2 text-sm bg-slate-800/60 border border-slate-700 rounded-lg text-slate-300 cursor-not-allowed" />
+          <p className="text-xs text-slate-500">
+            {mt5Info?.balance != null
+              ? `Balance MT5 live (${mt5Info.label}). Il calcolo del rischio segue automaticamente balance + rischio %.`
+              : 'MT5 non raggiungibile: fallback su ultimo valore salvato.'}
+          </p>
         </div>
         <div className="space-y-1">
           <label className="text-xs text-slate-400">Rischio % / trade</label>
@@ -306,86 +291,86 @@ export default function Backup() {
               return (
                 <div
                   key={acc.login}
-                  className={`flex items-center justify-between p-4 rounded-lg border ${
+                  className={`p-3 rounded-lg border ${
                     isActive
                       ? 'bg-emerald-900/20 border-emerald-600/40'
                       : 'bg-slate-800/50 border-slate-700'
                   }`}
                 >
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-white font-medium">{acc.label}</span>
-                      {acc.demo ? (
-                        <span className="px-2 py-0.5 bg-blue-600/30 text-blue-300 text-xs rounded-full">DEMO</span>
-                      ) : (
-                        <span className="px-2 py-0.5 bg-amber-600/30 text-amber-300 text-xs rounded-full">REAL</span>
-                      )}
-                      {isActive && (
-                        <span className="px-2 py-0.5 bg-emerald-600/30 text-emerald-300 text-xs rounded-full" title="Account che TradeMachine sta usando per piazzare i trade">ATTIVO</span>
-                      )}
-                      {isTerminalConnected && !isActive && (
-                        <span className="px-2 py-0.5 bg-amber-600/30 text-amber-300 text-xs rounded-full" title="Loggato nel terminale MT5 ma non usato da TM">TERM</span>
-                      )}
-                      {acc.prop_mode && (
-                        <span className="px-2 py-0.5 bg-violet-600/30 text-violet-300 text-xs rounded-full" title="Prop mode configurato (daily DD, trailing, coerenza)">PROP</span>
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    {/* LEFT: label + badges + login riga singola */}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-white font-semibold text-sm">{acc.label}</span>
+                        <span className="text-xs text-slate-500 font-mono">#{acc.login}</span>
+                        {acc.demo
+                          ? <span className="px-1.5 py-0.5 bg-blue-600/25 text-blue-300 text-[10px] font-semibold rounded">DEMO</span>
+                          : <span className="px-1.5 py-0.5 bg-amber-600/25 text-amber-300 text-[10px] font-semibold rounded">REAL</span>}
+                        {isActive && (
+                          <span className="px-1.5 py-0.5 bg-emerald-600/30 text-emerald-300 text-[10px] font-semibold rounded" title="TradeMachine usa questo account per piazzare i trade">ATTIVO</span>
+                        )}
+                        {isTerminalConnected && !isActive && (
+                          <span className="px-1.5 py-0.5 bg-amber-600/30 text-amber-300 text-[10px] font-semibold rounded" title="Loggato nel terminale MT5 ma non usato da TM">TERM</span>
+                        )}
+                        {acc.prop_mode && (
+                          <span className="px-1.5 py-0.5 bg-violet-600/30 text-violet-300 text-[10px] font-semibold rounded" title="Prop mode (daily DD, trailing, coerenza)">PROP</span>
+                        )}
+                      </div>
+                      <div className="text-xs text-slate-400 mt-1 truncate" title={`${acc.server}${acc.broker ? ' · ' + acc.broker : ''}${acc.mt5_path ? ' · ' + acc.mt5_path : ''}`}>
+                        {acc.server}
+                        {acc.broker && <> <span className="text-slate-600">·</span> {acc.broker}</>}
+                        {isTerminalConnected && mt5Accounts.current && <> <span className="text-slate-600">·</span> <span className="text-emerald-400">${mt5Accounts.current.balance?.toLocaleString()}</span></>}
+                      </div>
+                    </div>
+                    {/* RIGHT: actions compatte */}
+                    <div className="flex gap-1.5 flex-shrink-0">
+                      <button
+                        onClick={() => openPinModal('switch_account', null, isActive ? `Ri-attiva ${acc.label} (${acc.login})` : `Cambia a ${acc.label} (${acc.login})`, { login: acc.login, server: acc.server })}
+                        title={isActive ? "Ri-attiva: forza switch_account (aggiorna .env / ri-init MT5)" : "Attiva questo account"}
+                        className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+                          isActive
+                            ? 'bg-slate-700 hover:bg-slate-600 text-slate-200'
+                            : acc.demo
+                              ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                              : 'bg-amber-600 hover:bg-amber-500 text-white'
+                        }`}
+                      >
+                        {isActive ? 'Ri-attiva' : 'Seleziona'}
+                      </button>
+                      <button
+                        onClick={() => setEditAcc({ id: acc.id, label: acc.label, server: acc.server, mt5_path: acc.mt5_path || '', broker: acc.broker || '', is_demo: acc.demo })}
+                        className="px-3 py-1.5 text-xs rounded-md bg-slate-700 hover:bg-slate-600 text-slate-300"
+                        title="Modifica label, server, path, broker"
+                      >
+                        Modifica
+                      </button>
+                      <button
+                        onClick={() => setPropAcc({
+                          id: acc.id, label: acc.label,
+                          prop_mode: !!acc.prop_mode,
+                          daily_dd_limit_usd: acc.daily_dd_limit_usd || '',
+                          daily_dd_warning_usd: acc.daily_dd_warning_usd || '',
+                          max_total_dd_usd: acc.max_total_dd_usd || '',
+                          consistency_threshold_pct: acc.consistency_threshold_pct ?? 30,
+                          max_concurrent_trades: acc.max_concurrent_trades || '',
+                        })}
+                        className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
+                          acc.prop_mode ? 'bg-violet-700 hover:bg-violet-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
+                        }`}
+                        title="Configura prop mode (Funded Elite / FTMO / ecc.)"
+                      >
+                        Prop
+                      </button>
+                      {!acc.is_default && !isActive && (
+                        <button
+                          onClick={() => openPinModal('remove_account', acc.id, `Rimuovi account ${acc.label} (${acc.login})`)}
+                          className="px-3 py-1.5 text-xs rounded-md bg-red-600/20 hover:bg-red-600/40 text-red-400"
+                          title="Rimuovi questo account dal DB"
+                        >
+                          Rimuovi
+                        </button>
                       )}
                     </div>
-                    <p className="text-sm text-slate-400 mt-1">
-                      Login: {acc.login} &middot; Server: {acc.server}
-                      {acc.broker && ` - Broker: ${acc.broker}`}
-                      {isTerminalConnected && mt5Accounts.current && ` - Balance: $${mt5Accounts.current.balance?.toLocaleString()}`}
-                    </p>
-                    {acc.mt5_path && (
-                      <p className="text-xs text-slate-500 mt-0.5 font-mono truncate" title={acc.mt5_path}>
-                        Path: {acc.mt5_path}
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex gap-2 ml-4 flex-shrink-0">
-                    <button
-                      onClick={() => openPinModal('switch_account', null, isActive ? `Ri-attiva ${acc.label} (${acc.login}) — utile per aggiornare .env / ri-init MT5` : `Cambia a ${acc.label} (${acc.login})`, { login: acc.login, server: acc.server })}
-                      title={isActive ? "Ri-attiva: forza switch_account (utile per aggiornare .env o rifare init MT5)" : "Attiva questo account"}
-                      className={`px-4 py-2 text-sm rounded-lg font-medium transition-colors ${
-                        isActive
-                          ? 'bg-slate-600 hover:bg-slate-500 text-white'
-                          : acc.demo
-                            ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                            : 'bg-amber-600 hover:bg-amber-500 text-white'
-                      }`}
-                    >
-                      {isActive ? 'Ri-attiva' : 'Seleziona'}
-                    </button>
-                    <button
-                      onClick={() => setEditAcc({ id: acc.id, label: acc.label, server: acc.server, mt5_path: acc.mt5_path || '', broker: acc.broker || '', is_demo: acc.demo })}
-                      className="px-3 py-2 text-sm rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
-                    >
-                      Modifica
-                    </button>
-                    <button
-                      onClick={() => setPropAcc({
-                        id: acc.id, label: acc.label,
-                        prop_mode: !!acc.prop_mode,
-                        daily_dd_limit_usd: acc.daily_dd_limit_usd || '',
-                        daily_dd_warning_usd: acc.daily_dd_warning_usd || '',
-                        max_total_dd_usd: acc.max_total_dd_usd || '',
-                        consistency_threshold_pct: acc.consistency_threshold_pct ?? 30,
-                        max_concurrent_trades: acc.max_concurrent_trades || '',
-                      })}
-                      className={`px-3 py-2 text-sm rounded-lg transition-colors ${
-                        acc.prop_mode ? 'bg-violet-700 hover:bg-violet-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
-                      }`}
-                      title="Configura prop mode (Funded Elite / FTMO / ecc.)"
-                    >
-                      {acc.prop_mode ? '🛡️ Prop' : 'Prop'}
-                    </button>
-                    {!acc.is_default && !isActive && (
-                      <button
-                        onClick={() => openPinModal('remove_account', acc.id, `Rimuovi account ${acc.label} (${acc.login})`)}
-                        className="px-3 py-2 text-sm rounded-lg bg-red-600/20 hover:bg-red-600/40 text-red-400 transition-colors"
-                      >
-                        Rimuovi
-                      </button>
-                    )}
                   </div>
                 </div>
               )
