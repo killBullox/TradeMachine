@@ -306,18 +306,19 @@ export default function Backup() {
                     )}
                   </div>
                   <div className="flex gap-2 ml-4 flex-shrink-0">
-                    {!isActive && (
-                      <button
-                        onClick={() => openPinModal('switch_account', null, `Cambia a ${acc.label} (${acc.login})`, { login: acc.login, server: acc.server })}
-                        className={`px-4 py-2 text-sm rounded-lg font-medium transition-colors ${
-                          acc.demo
+                    <button
+                      onClick={() => openPinModal('switch_account', null, isActive ? `Ri-attiva ${acc.label} (${acc.login}) — utile per aggiornare .env / ri-init MT5` : `Cambia a ${acc.label} (${acc.login})`, { login: acc.login, server: acc.server })}
+                      title={isActive ? "Ri-attiva: forza switch_account (utile per aggiornare .env o rifare init MT5)" : "Attiva questo account"}
+                      className={`px-4 py-2 text-sm rounded-lg font-medium transition-colors ${
+                        isActive
+                          ? 'bg-slate-600 hover:bg-slate-500 text-white'
+                          : acc.demo
                             ? 'bg-blue-600 hover:bg-blue-500 text-white'
                             : 'bg-amber-600 hover:bg-amber-500 text-white'
-                        }`}
-                      >
-                        Seleziona
-                      </button>
-                    )}
+                      }`}
+                    >
+                      {isActive ? 'Ri-attiva' : 'Seleziona'}
+                    </button>
                     <button
                       onClick={() => setEditAcc({ id: acc.id, label: acc.label, server: acc.server, mt5_path: acc.mt5_path || '', broker: acc.broker || '', is_demo: acc.demo })}
                       className="px-3 py-2 text-sm rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
