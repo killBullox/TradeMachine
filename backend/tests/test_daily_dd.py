@@ -38,8 +38,10 @@ def _make_account(SessionLocal, **kwargs):
         db.close()
 
 
-def _make_signal_today(SessionLocal, pnl: float):
-    """Crea un signal chiuso oggi con pnl_usd."""
+def _make_signal_today(SessionLocal, pnl: float, mt5_account: int = 99999):
+    """Crea un signal chiuso oggi con pnl_usd. Il default mt5_account=99999
+    matcha _make_account default login=99999 (indispensabile per il filtro
+    per-account del prop_mode)."""
     from database import Signal
     from datetime import datetime
     db = SessionLocal()
@@ -47,6 +49,7 @@ def _make_signal_today(SessionLocal, pnl: float):
         sig = Signal(
             symbol="XAUUSD", direction="buy", status="sl_hit",
             pnl_usd=pnl, closed_at=datetime.utcnow(),
+            mt5_account=mt5_account,
         )
         db.add(sig)
         db.commit()

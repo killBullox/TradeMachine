@@ -45,12 +45,13 @@ def _make_signal_active(SessionLocal, tickets="[1,2,3]"):
         db.close()
 
 
-def _make_signal_closed(SessionLocal, pnl, closed_at):
+def _make_signal_closed(SessionLocal, pnl, closed_at, mt5_account: int = 99999):
     from database import Signal
     db = SessionLocal()
     try:
         sig = Signal(symbol="XAUUSD", direction="buy", status="tp1",
-                     pnl_usd=pnl, closed_at=closed_at)
+                     pnl_usd=pnl, closed_at=closed_at,
+                     mt5_account=mt5_account)
         db.add(sig); db.commit()
     finally:
         db.close()

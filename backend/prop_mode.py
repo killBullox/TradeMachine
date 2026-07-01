@@ -106,7 +106,7 @@ def get_today_pnl_usd(db=None) -> float:
         if active_login is not None:
             # Include trade dell'account attivo + retrocompat: trade senza mt5_account
             # settato (test/vecchi record) passano comunque.
-            q = q.filter(or_(Signal.mt5_account == active_login, Signal.mt5_account.is_(None)))
+            q = q.filter(Signal.mt5_account == active_login)
         return float(sum(s.pnl_usd for s in q.all()))
     finally:
         if close_db:
@@ -173,7 +173,7 @@ def coerenza_status(db=None) -> Optional[dict]:
             Signal.closed_at.isnot(None),
         )
         if active_login is not None:
-            q = q.filter(or_(Signal.mt5_account == active_login, Signal.mt5_account.is_(None)))
+            q = q.filter(Signal.mt5_account == active_login)
         sigs = q.all()
         if not sigs:
             return {
