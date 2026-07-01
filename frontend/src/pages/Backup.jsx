@@ -18,12 +18,18 @@ function RiskPanel() {
       fetch('/api/mt5/accounts').then(r => r.json()).catch(() => null),
     ]).then(([status, accounts]) => {
       const activeAcc = accounts?.available?.find(a => a.is_active)
+      const balance = status?.account?.balance ?? null
       setMt5Info({
-        balance: status?.account?.balance ?? null,
+        balance,
         login: status?.account?.login ?? null,
         prop_mode: activeAcc?.prop_mode ?? false,
         label: activeAcc?.label ?? null,
       })
+      // Sincronizza settings.account_size = balance live, cosi' il display
+      // "Max risk per trade" e il save mandano il valore corretto
+      if (balance && balance > 0) {
+        setSettings(s => s ? {...s, account_size: Math.round(balance)} : s)
+      }
     })
   }, [])
 
