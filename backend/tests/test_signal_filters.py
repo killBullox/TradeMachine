@@ -261,3 +261,70 @@ class TestPaperLifecycle:
             assert evs[1]["event"] == "tp1"
         finally:
             db.close()
+
+
+class TestPaperSellFillZone:
+    """Regression: paper SELL con entry range deve entrare quando price <= entry_high (upper),
+    non quando price <= entry_low (bug #521 USTECH)."""
+
+    def test_paper_sell_fill_al_toccare_upper(self, filter_db, fake_mt5):
+        from database import Signal
+        from price_service import _update_realtime
+        from datetime import datetime
+        db = filter_db()
+        try:
+            sig = Signal(
+                telegram_msg_id=99500, symbol="USTECH", direction="sell",
+                entry_price=29900.0, entry_price_high=29950.0,
+                stoploss=30050.0, tp1=29800.0, tp2=29700.0, tp3=29600.0,
+                status="pending", is_filtered=True, filter_reason="test",
+                raw_message="test", created_at=datetime.utcnow(),
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            # Prezzo 29940 (dentro il range, sotto upper) → SELL deve fillare
+            _update_realtime(db, sig, price=29940.0, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.status == "open", f"SELL non entrato al toccare upper: status={sig.status}"
+            assert sig.actual_entry_price == 29940.0
+        finally:
+            db.close()
+
+    def test_paper_sell_non_entra_sopra_range(self, filter_db, fake_mt5):
+        from database import Signal
+        from price_service import _update_realtime
+        from datetime import datetime
+        db = filter_db()
+        try:
+            sig = Signal(
+                telegram_msg_id=99501, symbol="USTECH", direction="sell",
+                entry_price=29900.0, entry_price_high=29950.0,
+                stoploss=30050.0, tp1=29800.0, tp2=29700.0, tp3=29600.0,
+                status="pending", is_filtered=True, filter_reason="test",
+                raw_message="test", created_at=datetime.utcnow(),
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            _update_realtime(db, sig, price=29960.0, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.status == "pending", "SELL non deve entrare finche' price > entry_high"
+        finally:
+            db.close()
+
+    def test_paper_buy_fill_al_toccare_low(self, filter_db, fake_mt5):
+        from database import Signal
+        from price_service import _update_realtime
+        from datetime import datetime
+        db = filter_db()
+        try:
+            sig = Signal(
+                telegram_msg_id=99502, symbol="USTECH", direction="buy",
+                entry_price=29900.0, entry_price_high=29950.0,
+                stoploss=29800.0, tp1=30000.0, tp2=30100.0, tp3=30200.0,
+                status="pending", is_filtered=True, filter_reason="test",
+                raw_message="test", created_at=datetime.utcnow(),
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            _update_realtime(db, sig, price=29910.0, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.status == "open", f"BUY non entrato al toccare low: status={sig.status}"
+        finally:
+            db.close()

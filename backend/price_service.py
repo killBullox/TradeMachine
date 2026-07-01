@@ -778,9 +778,22 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
     changed = False
 
     # pending → open se entry toccato
+    # Zona entry [low, high]:
+    #   BUY  entra quando price >= low  (scende nel range dall'alto)
+    #   SELL entra quando price <= high (sale nel range dal basso)
     if sig.status == "pending":
-        entry = sig.entry_price or sig.entry_price_high
-        if entry is None or (is_buy and price >= entry) or (not is_buy and price <= entry):
+        entry_low = sig.entry_price
+        entry_high = sig.entry_price_high or sig.entry_price
+        trigger = None
+        if is_buy and entry_low is not None:
+            trigger = entry_low
+            fill = price >= trigger
+        elif (not is_buy) and entry_high is not None:
+            trigger = entry_high
+            fill = price <= trigger
+        else:
+            fill = (entry_low is None and entry_high is None)
+        if fill:
             sig.status = "open"
             sig.actual_entry_price = price
             sig.entered_at = now
