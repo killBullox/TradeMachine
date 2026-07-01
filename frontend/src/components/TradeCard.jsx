@@ -198,6 +198,7 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
             {isBuy ? '▲ BUY' : '▼ SELL'}
           </span>
           {sig.is_risky && <span className="text-xs text-amber-400 px-2 py-0.5 bg-amber-900/30 rounded">⚠ Risky</span>}
+          {sig.is_filtered && <span className="text-xs font-semibold text-violet-300 px-2 py-0.5 bg-violet-900/40 border border-violet-600/50 rounded" title={sig.filter_reason || 'Paper trade (non piazzato su MT5)'}>PAPER</span>}
           <span className="text-xs text-slate-500">#{sig.id}</span>
         </div>
         <span className={`text-xl font-mono font-bold ${pnlColor(displayPnl)}`}>

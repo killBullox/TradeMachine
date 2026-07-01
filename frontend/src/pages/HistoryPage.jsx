@@ -3,6 +3,13 @@ import { api } from '../api'
 import { format } from 'date-fns'
 import { it } from 'date-fns/locale'
 
+function fmtPx(price, symbol) {
+  if (price == null) return '—'
+  const s = (symbol || '').toUpperCase()
+  const decimals = s.includes('BTC') ? 0 : s.includes('JPY') ? 2 : s.includes('XAU') || s.includes('OIL') || s.includes('TECH') || s.includes('XAG') ? 2 : 5
+  return Number(price).toFixed(decimals)
+}
+
 const STATUS_COLORS = {
   pending: 'text-yellow-400', open: 'text-blue-400',
   tp1: 'text-emerald-400', tp2: 'text-emerald-300', tp3: 'text-emerald-200',
@@ -132,6 +139,7 @@ function SignalRow({ s }) {
           }
           {s.symbol}
           {s.is_risky && <span className="ml-1 text-xs text-amber-400" title="Risky trade — lotto dimezzato">⚠</span>}
+          {s.is_filtered && <span className="ml-1 text-[10px] font-semibold text-violet-300 px-1 py-0.5 bg-violet-900/40 border border-violet-600/50 rounded" title={s.filter_reason || 'Paper trade (non piazzato su MT5)'}>PAPER</span>}
           {(() => {
             try {
               const log = s.trade_log ? JSON.parse(s.trade_log) : []
@@ -149,13 +157,13 @@ function SignalRow({ s }) {
           </span>
         </td>
         <td className="py-2 pr-3 font-mono text-slate-400 text-xs">
-          {s.entry_price ?? '?'}{s.entry_price_high ? `–${s.entry_price_high}` : ''}
+          {fmtPx(s.entry_price, s.symbol)}{s.entry_price_high != null ? `–${fmtPx(s.entry_price_high, s.symbol)}` : ''}
         </td>
-        <td className="py-2 pr-3 font-mono text-slate-200 text-xs">{s.actual_entry_price ?? '—'}</td>
-        <td className="py-2 pr-3 font-mono text-rose-400 text-xs">{s.stoploss ?? '—'}</td>
-        <td className="py-2 pr-3 font-mono text-emerald-400 text-xs">{s.tp1 ?? '—'}</td>
-        <td className="py-2 pr-3 font-mono text-emerald-300 text-xs">{s.tp2 ?? '—'}</td>
-        <td className="py-2 pr-3 font-mono text-emerald-200 text-xs">{s.tp3 ?? '—'}</td>
+        <td className="py-2 pr-3 font-mono text-slate-200 text-xs">{fmtPx(s.actual_entry_price, s.symbol)}</td>
+        <td className="py-2 pr-3 font-mono text-rose-400 text-xs">{fmtPx(s.stoploss, s.symbol)}</td>
+        <td className="py-2 pr-3 font-mono text-emerald-400 text-xs">{fmtPx(s.tp1, s.symbol)}</td>
+        <td className="py-2 pr-3 font-mono text-emerald-300 text-xs">{fmtPx(s.tp2, s.symbol)}</td>
+        <td className="py-2 pr-3 font-mono text-emerald-200 text-xs">{fmtPx(s.tp3, s.symbol)}</td>
         <td className="py-2 pr-3">
           <span className={`text-xs ${STATUS_COLORS[s.status] || 'text-slate-400'}`}>
             {STATUS_LABELS[s.status] || s.status}

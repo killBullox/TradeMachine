@@ -30,11 +30,11 @@ export default function OpenTrades() {
       ])
       setGlobalTrail(!!riskSettings.trail_stop_enabled)
 
-      // Solo segnali con ticket MT5 effettivo (trade realmente aperti su MT5)
+      // Segnali con ticket MT5 (reali) + paper trade (is_filtered, senza ticket per design)
       const open = sigs.filter(s =>
         ['open', 'pending', 'tp1', 'tp2'].includes(s.status) &&
         !s.closed_at &&
-        (s.mt5_ticket || s.mt5_tickets)
+        (s.mt5_ticket || s.mt5_tickets || s.is_filtered)
       )
       setSignals(open)
       setPositions(mt5.open_positions ?? [])
