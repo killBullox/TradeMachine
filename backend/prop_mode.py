@@ -23,6 +23,7 @@ class PropSettings:
     volta (es. solo daily DD all'inizio, poi peak equity, poi coerenza).
     """
     account_id: int
+    login: int
     label: str
     daily_dd_limit_usd: Optional[float] = None
     daily_dd_warning_usd: Optional[float] = None
@@ -49,6 +50,7 @@ def get_prop_settings(db=None) -> Optional[PropSettings]:
             return None
         return PropSettings(
             account_id=acc.id,
+            login=acc.login,
             label=acc.label,
             daily_dd_limit_usd=acc.daily_dd_limit_usd,
             daily_dd_warning_usd=acc.daily_dd_warning_usd,
@@ -68,13 +70,17 @@ def is_prop_mode(db=None) -> bool:
 
 
 def get_today_pnl_usd(db=None) -> float:
-    """Somma P&L USD dei trade chiusi OGGI (giorno corrente Roma).
+    """Somma P&L USD dei trade chiusi OGGI (giorno corrente Roma) SUL CONTO
+    ATTIVO. Filtra per Signal.mt5_account = login dell'account prop attivo
+    per non contaminare i numeri con lo storico degli altri conti.
 
     Usato sia dal daily DD kill-switch sia da dashboard/monitor. Ritorna 0.0
     se nessun trade chiuso oggi. Nessun side effect.
     """
     from database import SessionLocal, Signal
     from datetime import datetime
+    settings = get_prop_settings(db)
+    active_login = settings.login if settings else None
     try:
         from zoneinfo import ZoneInfo
         rome = ZoneInfo("Europe/Rome")
@@ -92,11 +98,16 @@ def get_today_pnl_usd(db=None) -> float:
             now_rome = datetime.now(rome)
             today_start_rome = now_rome.replace(hour=0, minute=0, second=0, microsecond=0)
             today_start = today_start_rome.astimezone(utc).replace(tzinfo=None)
-        rows = db.query(Signal).filter(
+        from sqlalchemy import or_
+        q = db.query(Signal).filter(
             Signal.closed_at >= today_start,
             Signal.pnl_usd.isnot(None),
-        ).all()
-        return float(sum(s.pnl_usd for s in rows))
+        )
+        if active_login is not None:
+            # Include trade dell'account attivo + retrocompat: trade senza mt5_account
+            # settato (test/vecchi record) passano comunque.
+            q = q.filter(or_(Signal.mt5_account == active_login, Signal.mt5_account.is_(None)))
+        return float(sum(s.pnl_usd for s in q.all()))
     finally:
         if close_db:
             db.close()
@@ -150,15 +161,20 @@ def coerenza_status(db=None) -> Optional[dict]:
         utc = ZoneInfo("UTC")
     except Exception:
         rome = utc = None
+    active_login = settings.login
     close_db = False
     if db is None:
         db = SessionLocal()
         close_db = True
     try:
-        sigs = db.query(Signal).filter(
+        from sqlalchemy import or_
+        q = db.query(Signal).filter(
             Signal.pnl_usd.isnot(None),
             Signal.closed_at.isnot(None),
-        ).all()
+        )
+        if active_login is not None:
+            q = q.filter(or_(Signal.mt5_account == active_login, Signal.mt5_account.is_(None)))
+        sigs = q.all()
         if not sigs:
             return {
                 "max_day_pnl": 0.0, "max_day_date": None,
