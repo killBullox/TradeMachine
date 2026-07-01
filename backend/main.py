@@ -1218,17 +1218,16 @@ async def mt5_disable(db: Session = Depends(get_db)):
 
 @app.get("/api/mt5/accounts")
 async def mt5_accounts():
-    """Elenca gli account disponibili nel terminale MT5."""
-    import MetaTrader5 as mt5
-    mt5.initialize()
-    # Account corrente
-    info = mt5.account_info()
+    """Elenca gli account disponibili nel terminale MT5.
+    Usa la stessa strada di /api/mt5/status per current (via mt5_trader),
+    cosi' i due endpoint non divergono."""
+    info = mt5_trader.get_account_info()
     current = {
-        "login": info.login if info else None,
-        "name": info.name if info else None,
-        "server": info.server if info else None,
-        "balance": info.balance if info else 0,
-        "demo": info.trade_mode == 0 if info else None,
+        "login": info.get("login"),
+        "name": info.get("name"),
+        "server": info.get("server"),
+        "balance": info.get("balance", 0),
+        "demo": info.get("demo"),
     } if info else None
     # Carica conti dal DB
     db = SessionLocal()
