@@ -2842,8 +2842,11 @@ def backfill_missing_pnl() -> int:
     db = SessionLocal()
     fixed = 0
     try:
+        from sqlalchemy import or_
+        # Cattura NULL e 0.0 (bug storici del recalculate_all che azzerava
+        # pnl invece di lasciarlo intatto).
         candidates = db.query(Signal).filter(
-            Signal.pnl_usd.is_(None),
+            or_(Signal.pnl_usd.is_(None), Signal.pnl_usd == 0.0),
             Signal.closed_at.isnot(None),
             Signal.mt5_ticket.isnot(None),
             Signal.status.in_(("sl_hit", "tp1", "tp2", "tp3", "closed")),
