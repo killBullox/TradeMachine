@@ -35,6 +35,33 @@ MT5_SYMBOL_MAP_XM = {
     "NASDAQ":  "US100Cash#",
 }
 
+MT5_SYMBOL_MAP_FTMO = {
+    "XAUUSD":  "XAUUSD",
+    "XAGUSD":  "XAGUSD",
+    "EURUSD":  "EURUSD",
+    "GBPUSD":  "GBPUSD",
+    "USDJPY":  "USDJPY",
+    "USDCHF":  "USDCHF",
+    "USDCAD":  "USDCAD",
+    "AUDUSD":  "AUDUSD",
+    "NZDUSD":  "NZDUSD",
+    "GBPJPY":  "GBPJPY",
+    "EURJPY":  "EURJPY",
+    "AUDJPY":  "AUDJPY",
+    "GBPCHF":  "GBPCHF",
+    "EURGBP":  "EURGBP",
+    "USTECH":  "US100.cash",
+    "US100":   "US100.cash",
+    "NAS100":  "US100.cash",
+    "NASDAQ":  "US100.cash",
+    "BTCUSD":  "BTCUSD",
+    "USOIL":   "USOIL.cash",
+    "OIL":     "USOIL.cash",
+    "WTI":     "USOIL.cash",
+    "UKOIL":   "UKOIL.cash",
+    "BRENT":   "UKOIL.cash",
+}
+
 MT5_SYMBOL_MAP_AVATRADE = {
     "XAUUSD":  "GOLD",
     "XAGUSD":  "SILVER",
@@ -67,16 +94,22 @@ MT5_SYMBOL_MAP_AVATRADE = {
 def get_mt5_symbol(symbol: str, default=None):
     """Mappa symbol logico -> simbolo MT5 specifico del broker attivo."""
     s = symbol.upper()
-    if MT5_BROKER and MT5_BROKER.lower() == "avatrade":
+    broker = (MT5_BROKER or "").lower()
+    if broker == "avatrade":
         return MT5_SYMBOL_MAP_AVATRADE.get(s, default if default is not None else symbol)
+    if broker == "ftmo":
+        return MT5_SYMBOL_MAP_FTMO.get(s, default if default is not None else symbol)
     return MT5_SYMBOL_MAP_XM.get(s, default if default is not None else symbol)
 
 
 # Compat alias: alcuni call-site fanno MT5_SYMBOL_MAP.get(...)
 class _BrokerSymbolMap:
     def _active(self):
-        if MT5_BROKER and MT5_BROKER.lower() == "avatrade":
+        broker = (MT5_BROKER or "").lower()
+        if broker == "avatrade":
             return MT5_SYMBOL_MAP_AVATRADE
+        if broker == "ftmo":
+            return MT5_SYMBOL_MAP_FTMO
         return MT5_SYMBOL_MAP_XM
     def get(self, symbol, default=None):
         return get_mt5_symbol(symbol, default)
