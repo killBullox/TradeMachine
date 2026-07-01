@@ -622,12 +622,14 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 from datetime import timedelta
                 TOL = 0.003  # 0.3% tolleranza
                 recent_cutoff = datetime.utcnow() - timedelta(hours=2)
+                # Include anche i paper trade (is_filtered=True): non hanno ticket
+                # MT5 per design ma il vecchio va comunque cancellato quando il
+                # trader riposta lo stesso signal.
                 candidates = db.query(Signal).filter(
                     Signal.symbol == parsed.symbol,
                     Signal.direction == parsed.direction,
                     Signal.created_at >= recent_cutoff,
                     Signal.status.in_(("pending", "open", "tp1", "tp2")),
-                    Signal.mt5_tickets.isnot(None),
                 ).order_by(Signal.created_at.desc()).all()
                 import json as _jl_dup, mt5_trader as _mt5t_dup
                 _aborted = False
@@ -641,6 +643,18 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     same_entry = _close(parsed.entry_price, cand.entry_price) or _close(parsed.entry_price, cand.entry_price_high)
                     if not (same_sl and same_tp1 and same_entry):
                         continue
+                    # PAPER TRADE: nessun ticket MT5, marca direttamente cancelled
+                    if getattr(cand, "is_filtered", False):
+                        cand.status = "cancelled"
+                        cand.closed_at = datetime.utcnow()
+                        cand.updated_at = datetime.utcnow()
+                        cand.notes = (cand.notes or "") + f" [Paper sostituito da signal duplicato msg={msg_id}]"
+                        _append_trade_log(cand, "duplicate_replaced",
+                            f"Trader ha ripostato signal identico: paper vecchio marcato cancelled.",
+                            {"replaced_by_msg": msg_id})
+                        db.add(cand); db.commit()
+                        log(f"[Duplicate] msg={msg_id} sostituisce paper #{cand.id}: marcato cancelled. Procedo col nuovo.")
+                        break
                     tk = []
                     if cand.mt5_tickets:
                         try: tk = _jl_dup.loads(cand.mt5_tickets)
