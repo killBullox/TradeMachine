@@ -8,9 +8,23 @@ import FilterPanel from '../components/FilterPanel'
 function RiskPanel() {
   const [settings, setSettings] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [mt5Info, setMt5Info] = useState(null) // {balance, login, prop_mode}
 
   useEffect(() => {
     api.getRiskSettings().then(setSettings)
+    // Balance MT5 live + info account attivo (per suggerimento sync)
+    Promise.all([
+      fetch('/api/mt5/status').then(r => r.json()).catch(() => null),
+      fetch('/api/mt5/accounts').then(r => r.json()).catch(() => null),
+    ]).then(([status, accounts]) => {
+      const activeAcc = accounts?.available?.find(a => a.is_active)
+      setMt5Info({
+        balance: status?.account?.balance ?? null,
+        login: status?.account?.login ?? null,
+        prop_mode: activeAcc?.prop_mode ?? false,
+        label: activeAcc?.label ?? null,
+      })
+    })
   }, [])
 
   if (!settings) return null
@@ -36,6 +50,28 @@ function RiskPanel() {
           <input type="number" value={settings.account_size}
             onChange={e => setSettings(s => ({...s, account_size: +e.target.value}))}
             className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500" />
+          {mt5Info?.balance != null && (
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-xs text-slate-500">
+                Balance MT5 attuale ({mt5Info.label}): <span className="text-slate-300 font-mono">${mt5Info.balance.toLocaleString()}</span>
+              </span>
+              {Math.abs(settings.account_size - mt5Info.balance) > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setSettings(s => ({...s, account_size: Math.round(mt5Info.balance) }))}
+                  className="text-xs px-2 py-0.5 bg-brand-700/50 hover:bg-brand-600 text-brand-200 rounded"
+                  title="Copia il balance MT5 corrente nel campo Account"
+                >
+                  Usa balance
+                </button>
+              )}
+            </div>
+          )}
+          {mt5Info?.prop_mode && (
+            <p className="text-xs text-violet-400 mt-1">
+              Prop mode ATTIVO: il calcolo del rischio usa gia' il balance MT5 live indipendentemente da questo campo.
+            </p>
+          )}
         </div>
         <div className="space-y-1">
           <label className="text-xs text-slate-400">Rischio % / trade</label>
