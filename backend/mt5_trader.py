@@ -2681,6 +2681,11 @@ def switch_account(login: int, server: str) -> dict:
             db.close()
     except Exception as e:
         log(f"switch_account: errore persistenza is_active: {e}")
+    # Aggiorna .env cosi' al prossimo restart TM parte gia' sull'account corretto
+    try:
+        _update_env_mt5(login, server, new_path, new_broker)
+    except Exception as e:
+        log(f"switch_account: errore update .env: {e}")
     log(f"Account cambiato: {login}@{server} ({info.name}) balance={info.balance}")
     return {
         "ok": True,
@@ -2690,6 +2695,45 @@ def switch_account(login: int, server: str) -> dict:
         "server": info.server,
         "demo": info.trade_mode == 0,
     }
+
+
+def _update_env_mt5(login: int, server: str, path: str, broker: str) -> None:
+    """Aggiorna le variabili MT5_* nel .env in modo idempotente.
+    Se una chiave esiste la sostituisce, altrimenti la appende.
+    Salva sempre in UTF-8 con line-ending nativo del file esistente."""
+    import os as _os
+    env_path = _os.path.join(_os.path.dirname(__file__), ".env")
+    if not _os.path.exists(env_path):
+        log(f"_update_env_mt5: .env non trovato in {env_path}")
+        return
+    with open(env_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    updates = {
+        "MT5_ACCOUNT": str(login),
+        "MT5_SERVER": server,
+        "MT5_PATH": path or "",
+        "MT5_BROKER": broker or "",
+    }
+    keys_seen = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.lstrip()
+        matched = False
+        for k, v in updates.items():
+            if stripped.startswith(k + "="):
+                new_lines.append(f"{k}={v}\n")
+                keys_seen.add(k)
+                matched = True
+                break
+        if not matched:
+            new_lines.append(line)
+    # Append missing keys
+    for k, v in updates.items():
+        if k not in keys_seen:
+            new_lines.append(f"{k}={v}\n")
+    with open(env_path, "w", encoding="utf-8", newline="") as f:
+        f.writelines(new_lines)
+    log(f"_update_env_mt5: aggiornato .env -> account={login} server={server} broker={broker}")
 
 
 def get_open_positions() -> list:

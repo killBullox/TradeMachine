@@ -128,10 +128,26 @@ def save_risk_settings(account_size: float, risk_pct: float,
 # ─── Calcoli ─────────────────────────────────────────────────────────────────
 
 def calc_risk_amount(settings: dict) -> float:
-    """Ritorna il rischio in $ per trade."""
+    """Ritorna il rischio in $ per trade.
+
+    In modalita' percentuale + prop_mode: la base e' il balance MT5 LIVE
+    del conto attivo (dinamico: sale/scende col conto). In modalita' fissa
+    ($) o non-prop: usa il valore hardcoded account_size del settings.
+    """
     if settings["use_fixed_usd"] and settings["risk_per_trade_usd"]:
         return settings["risk_per_trade_usd"]
-    return settings["account_size"] * settings["risk_per_trade_pct"] / 100.0
+    base = settings["account_size"]
+    try:
+        import prop_mode
+        if prop_mode.is_prop_mode():
+            import mt5_trader
+            info = mt5_trader.get_account_info()
+            live_balance = info.get("balance") if info else None
+            if live_balance and live_balance > 0:
+                base = live_balance
+    except Exception:
+        pass
+    return base * settings["risk_per_trade_pct"] / 100.0
 
 
 def calc_position_size(symbol: str, entry: float, sl: float,
