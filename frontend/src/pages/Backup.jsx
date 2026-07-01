@@ -254,16 +254,16 @@ export default function Backup() {
               const mismatch = activeAcc && terminalLogin && activeAcc.login !== terminalLogin
               return mismatch && (
                 <div className="mb-3 p-3 bg-red-900/30 border border-red-600/50 rounded-lg text-sm">
-                  <div className="font-semibold text-red-300">\u26A0\uFE0F Mismatch account MT5 vs TradeMachine</div>
+                  <div className="font-semibold text-red-300">[!] Mismatch account MT5 vs TradeMachine</div>
                   <div className="text-red-200 mt-1">
-                    TradeMachine sta usando <b>{activeAcc.label} ({activeAcc.login})</b> ma il terminale MT5 \u00E8 loggato su <b>{terminalLogin}</b>.
+                    TradeMachine sta usando <b>{activeAcc.label} ({activeAcc.login})</b> ma il terminale MT5 e loggato su <b>{terminalLogin}</b>.
                     Clicca <b>Seleziona</b> sul conto giusto per allineare tutto (switch effettivo + persistenza DB).
                   </div>
                 </div>
               )
             })()}
             {mt5Accounts.available.map(acc => {
-              // isActive = attivo nel DB TM (chi user\u00E0 per piazzare i trade)
+              // isActive = attivo nel DB TM (chi usera per piazzare i trade)
               const isActive = !!acc.is_active
               // Il terminale MT5 potrebbe essere loggato su un account diverso
               const isTerminalConnected = mt5Accounts.current && mt5Accounts.current.login === acc.login
@@ -291,13 +291,13 @@ export default function Backup() {
                         <span className="px-2 py-0.5 bg-amber-600/30 text-amber-300 text-xs rounded-full" title="Loggato nel terminale MT5 ma non usato da TM">TERM</span>
                       )}
                       {acc.prop_mode && (
-                        <span className="px-2 py-0.5 bg-violet-600/30 text-violet-300 text-xs rounded-full" title="Prop mode configurato (daily DD, trailing, coerenza)">\uD83D\uDEE1\uFE0F PROP</span>
+                        <span className="px-2 py-0.5 bg-violet-600/30 text-violet-300 text-xs rounded-full" title="Prop mode configurato (daily DD, trailing, coerenza)">PROP</span>
                       )}
                     </div>
                     <p className="text-sm text-slate-400 mt-1">
                       Login: {acc.login} &middot; Server: {acc.server}
-                      {acc.broker && ` \u00B7 Broker: ${acc.broker}`}
-                      {isTerminalConnected && mt5Accounts.current && ` \u00B7 Balance: $${mt5Accounts.current.balance?.toLocaleString()}`}
+                      {acc.broker && ` - Broker: ${acc.broker}`}
+                      {isTerminalConnected && mt5Accounts.current && ` - Balance: $${mt5Accounts.current.balance?.toLocaleString()}`}
                     </p>
                     {acc.mt5_path && (
                       <p className="text-xs text-slate-500 mt-0.5 font-mono truncate" title={acc.mt5_path}>
