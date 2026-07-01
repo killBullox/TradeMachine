@@ -291,14 +291,14 @@ def recalculate_all():
             if not is_mt5_active:
                 sig.position_size = lots
 
-            if lots and entry:
-                # Segnali MT5: P&L autorevole da sync_positions, non sovrascrivere
-                if sig.mt5_ticket:
-                    # Aggiorna solo position_size e risk_usd, lascia pnl_usd di MT5
-                    db.add(sig)
-                    updated += 1
-                    continue
+            # PRIMA di ogni tocco a pnl_usd: i trade MT5 hanno pnl_usd autorevole
+            # da sync_positions. Non toccarlo MAI qui, anche se lots/entry sono None.
+            if sig.mt5_ticket or sig.mt5_tickets:
+                db.add(sig)
+                updated += 1
+                continue
 
+            if lots and entry:
                 # Backfill trade_log se mancante e il segnale è chiuso
                 if not sig.trade_log and sig.status in ("sl_hit", "tp1", "tp2", "tp3", "closed"):
                     try:
