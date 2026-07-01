@@ -2506,9 +2506,12 @@ def cancel_expired_signals():
     db = SessionLocal()
     try:
         # Block 1: orphan (status attivo senza ticket MT5)
+        # ESCLUDIAMO i paper trade (is_filtered=True): non hanno ticket per design,
+        # non sono orfani ma simulazioni.
         orphans = db.query(Signal).filter(
             Signal.status.in_(["open", "tp1", "tp2"]),
             Signal.mt5_ticket.is_(None),
+            Signal.is_filtered == False,
         ).all()
         cancelled = []
         for sig in orphans:
@@ -2528,6 +2531,7 @@ def cancel_expired_signals():
         pending = db.query(Signal).filter(
             Signal.status == "pending",
             Signal.mt5_ticket.is_(None),
+            Signal.is_filtered == False,
         ).all()
 
         for sig in pending:
