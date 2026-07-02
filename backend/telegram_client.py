@@ -453,6 +453,28 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                 sig.status = "closed"
                 sig.closed_at = now
                 sig.updated_at = now
+                # Calcola P&L reale dai deal MT5 (profit + commission + swap sui deal OUT).
+                # Necessario perche' sync_positions dopo il close skippa l'update
+                # (closed_at gia' settato), lasciando pnl_usd al valore floating vecchio.
+                try:
+                    import mt5_trader as _mt5t
+                    import time as _time
+                    _time.sleep(0.8)  # attendi che i deal siano in history
+                    mt5 = _mt5t._get_mt5()
+                    if mt5:
+                        total_real = 0.0
+                        for tk in tickets:
+                            deals = mt5.history_deals_get(position=tk)
+                            if not deals:
+                                continue
+                            for d in deals:
+                                if d.entry == mt5.DEAL_ENTRY_OUT:
+                                    total_real += float(d.profit) + float(getattr(d, 'commission', 0) or 0) + float(getattr(d, 'swap', 0) or 0)
+                        if total_real != 0.0:
+                            sig.pnl_usd = round(total_real, 2)
+                            log(f"[Close] #{sig.id} pnl reale da deal MT5 = {sig.pnl_usd}$")
+                except Exception as _e:
+                    log(f"[Close] #{sig.id} errore calcolo pnl reale: {_e}")
                 _append_trade_log(sig, "tg_close",
                     f"Close da Telegram applicato: posizioni chiuse (motivo: {reason_txt})",
                     {"reason": reason_txt})
