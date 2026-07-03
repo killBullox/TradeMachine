@@ -371,11 +371,12 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
             log(f"[Close] reply a msg={reply_to_msg_id} -> #{sig.id} {sig.symbol} status={sig.status} (gia' chiuso) -> skip")
             return
 
+    from sqlalchemy import or_ as _or_close
     if not targets and parsed.symbol:
         sigs = db.query(Signal).filter(
             Signal.symbol == parsed.symbol,
             Signal.status.in_(["open", "pending", "tp1", "tp2"]),
-            Signal.mt5_ticket.isnot(None),
+            _or_close(Signal.mt5_ticket.isnot(None), Signal.is_filtered == True),
         ).order_by(Signal.created_at.desc()).all()
         targets = sigs
 
@@ -383,7 +384,7 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
         # Nessun simbolo → chiudi tutto
         targets = db.query(Signal).filter(
             Signal.status.in_(["open", "pending", "tp1", "tp2"]),
-            Signal.mt5_ticket.isnot(None),
+            _or_close(Signal.mt5_ticket.isnot(None), Signal.is_filtered == True),
         ).all()
 
     if not targets:
@@ -405,14 +406,27 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                                                     "exit the trade"])
 
     for sig in targets:
-        # PAPER TRADE (is_filtered): nessun ticket MT5. Chiudi come simulazione:
-        # marca status closed, prendi prezzo mercato corrente come exit, calcola
-        # pnl teorico da entry->exit sui lots del paper.
+        # PAPER TRADE (is_filtered): nessun ticket MT5. Stessa semantica dei reali:
+        #  - pending mai fillato → cancelled
+        #  - book profit (non hard close) → simula chiusura 1/3 (evento tp1-like a
+        #    prezzo mercato) + SL a BE, status tp1 — come i reali
+        #  - close totale → exit a mercato, pnl teorico
         if getattr(sig, "is_filtered", False):
+            reason_txt = parsed.reason or "Close da TG"
+            if sig.status == "pending":
+                sig.status = "cancelled"
+                sig.closed_at = now
+                sig.updated_at = now
+                sig.notes = (sig.notes or "") + " [Close ricevuto: paper pending mai fillato]"
+                _append_trade_log(sig, "tg_cancel",
+                    f"Close TG su paper pending mai fillato: annullato (motivo: {reason_txt})",
+                    {"reason": reason_txt})
+                db.add(sig); db.commit()
+                log(f"[Close] paper #{sig.id} pending → cancelled")
+                continue
             if sig.status not in ("open", "tp1", "tp2"):
                 log(f"[Close] paper #{sig.id} status={sig.status} → nulla da chiudere")
                 continue
-            reason_txt = parsed.reason or "Close da TG"
             close_price = None
             try:
                 import mt5_trader as _mt5t
@@ -427,17 +441,49 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                 log(f"[Close] paper #{sig.id} tick err: {_e}")
             if close_price is None:
                 close_price = sig.actual_entry_price or sig.entry_price
+
+            if is_book_profit and not is_hard_close and sig.status == "open":
+                # Simula il book profit dei reali: chiudi 1/3 al prezzo corrente
+                # (evento "tp1" con price=mercato per _calc_pnl_from_trade_log)
+                # e sposta SL a BE. Status → tp1.
+                from price_service import _append_event as _ape
+                _ape(sig, "tp1", close_price, now)
+                sig.status = "tp1"
+                be_price = sig.actual_entry_price or sig.entry_price
+                if be_price:
+                    sig.stoploss = be_price
+                sig.updated_at = now
+                try:
+                    import risk as _risk
+                    _risk.recalculate_signal(sig)
+                except Exception as _e:
+                    log(f"[Close] paper #{sig.id} recalc err: {_e}")
+                _append_trade_log(sig, "tg_book_profit",
+                    f"Book profit TG (paper): 1/3 chiuso @ {close_price}, SL → BE {be_price}",
+                    {"reason": reason_txt, "close_price": close_price})
+                db.add(sig); db.commit()
+                log(f"[Close] paper #{sig.id} book profit: 1/3 @ {close_price}, SL→BE")
+                continue
+
+            # Close totale: chiudi la parte residua al prezzo corrente.
+            # Se gia' tp1/tp2, appendi evento chiusura del residuo; il calcolo
+            # partial-aware avviene in _calc_pnl_from_trade_log.
+            from price_service import _append_event as _ape2
+            _ape2(sig, "closed", close_price, now)
             sig.status = "closed"
             sig.exit_price = close_price
             sig.closed_at = now
             sig.updated_at = now
-            # Ricalcola pnl teorico: entry -> close_price su lots del paper
             try:
-                from risk import calc_pnl
-                entry = sig.actual_entry_price or sig.entry_price
-                if entry and sig.position_size:
-                    sig.pnl_usd = round(calc_pnl(sig.symbol, sig.direction or "buy",
-                                                  entry, close_price, sig.position_size), 2)
+                import risk as _risk2
+                _risk2.recalculate_signal(sig)
+                # Fallback se il trade_log non produce pnl (es. solo entry+closed)
+                if sig.pnl_usd is None:
+                    from risk import calc_pnl
+                    entry = sig.actual_entry_price or sig.entry_price
+                    if entry and sig.position_size:
+                        sig.pnl_usd = round(calc_pnl(sig.symbol, sig.direction or "buy",
+                                                      entry, close_price, sig.position_size), 2)
             except Exception as _e:
                 log(f"[Close] paper #{sig.id} calc pnl err: {_e}")
             _append_trade_log(sig, "tg_close",
@@ -1076,14 +1122,53 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 trail_explicit = trail_explicit_llm or trail_explicit_regex
                 if is_target_hit and detected_symbol and mt5_trader.is_enabled():
                     # Tutti i signal del simbolo non ancora chiusi (pending o open/tp1/tp2)
+                    from sqlalchemy import or_ as _or_td
                     affected_sigs = db.query(Signal).filter(
                         Signal.status.in_(("pending", "open", "tp1", "tp2")),
-                        Signal.mt5_tickets.isnot(None),
+                        _or_td(Signal.mt5_tickets.isnot(None), Signal.is_filtered == True),
                         Signal.symbol == detected_symbol,
                     ).all()
                     mt5_inst = mt5_trader._get_mt5()
                     sigs_to_ema = []
                     for sig in affected_sigs:
+                        # PAPER: stessa semantica dei reali, senza MT5.
+                        if getattr(sig, "is_filtered", False):
+                            if sig.status == "pending":
+                                # TG segnala target su paper mai fillato → trade perso
+                                sig.status = "cancelled"
+                                sig.updated_at = datetime.utcnow()
+                                sig.closed_at = datetime.utcnow()
+                                sig.notes = (sig.notes or "") + " [Paper non partito: target TG con entry mai fillato]"
+                                _append_trade_log(sig, "pending_dropped",
+                                    f"Target TG su paper ancora pending: annullato.",
+                                    {"trigger": "target_done_paper"})
+                                db.add(sig)
+                                log(f"[TargetDone] paper #{sig.id} pending → cancelled")
+                            elif trail_explicit and sig.status in ("open", "tp1", "tp2"):
+                                # Trail esplicito: SL a BE/TP1/TP2 +1pip come i reali
+                                try:
+                                    from risk import get_spec as _gspec
+                                    pip_p = _gspec(sig.symbol)["pip"]
+                                    is_buy_p = (sig.direction or "").lower() == "buy"
+                                    if tp_level_hit >= 3 and sig.tp2:
+                                        anchor_p, lbl = float(sig.tp2), "TP2+1pip"
+                                    elif tp_level_hit >= 2 and sig.tp1:
+                                        anchor_p, lbl = float(sig.tp1), "TP1+1pip"
+                                    else:
+                                        anchor_p, lbl = (sig.actual_entry_price or sig.entry_price), "BE+1pip"
+                                    if anchor_p and pip_p:
+                                        new_sl_p = round(anchor_p + pip_p, 5) if is_buy_p else round(anchor_p - pip_p, 5)
+                                        old_sl_p = sig.stoploss
+                                        sig.stoploss = new_sl_p
+                                        sig.updated_at = datetime.utcnow()
+                                        _append_trade_log(sig, "sl_move_trail_tg",
+                                            f"TG trail esplicito (paper): SL {old_sl_p} → {new_sl_p} ({lbl})",
+                                            {"new_sl": new_sl_p, "old_sl": old_sl_p, "trail_label": lbl, "trigger": "trail_explicit_paper"})
+                                        db.add(sig)
+                                        log(f"[TargetDone] paper #{sig.id} SL → {new_sl_p} ({lbl})")
+                                except Exception as _pe:
+                                    log(f"[TargetDone] paper #{sig.id} trail err: {_pe}")
+                            continue
                         tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
                         cancelled_pending = 0
                         open_found = 0
@@ -1207,14 +1292,52 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     if not target_symbol:
                         log(f"[TrailStandalone] nessun simbolo risolvibile, skip")
                         raise StopIteration
+                    from sqlalchemy import or_ as _or_ts
                     affected_sigs2 = db.query(Signal).filter(
                         Signal.status.in_(("open", "tp1", "tp2")),
-                        Signal.mt5_tickets.isnot(None),
+                        _or_ts(Signal.mt5_tickets.isnot(None), Signal.is_filtered == True),
                         Signal.symbol == target_symbol,
                         Signal.closed_at.is_(None),
                     ).all()
                     mt5_inst2 = mt5_trader._get_mt5()
                     for sig in affected_sigs2:
+                        # PAPER: caso open → arma trail flag (identico ai reali, e'
+                        # solo un flag DB; il monitor paper non fa auto-trail ma il
+                        # flag documenta l'intent). Caso tp1/tp2 → SL trail diretto.
+                        if getattr(sig, "is_filtered", False):
+                            if sig.status == "open":
+                                if not sig.trail_stop_enabled:
+                                    sig.trail_stop_enabled = True
+                                    sig.updated_at = datetime.utcnow()
+                                    _append_trade_log(sig, "trail_armed_pre_tp",
+                                        f"TG trail standalone (paper): armato trail_stop_enabled, SL invariato.",
+                                        {"status": sig.status, "trigger": "trail_standalone_pre_tp_paper"})
+                                    db.add(sig)
+                                continue
+                            try:
+                                from risk import get_spec as _gspec2
+                                pip_pp = _gspec2(sig.symbol)["pip"]
+                                is_buy_pp = (sig.direction or "").lower() == "buy"
+                                if sig.status == "tp2" and sig.tp1:
+                                    anchor_pp, lbl_pp = float(sig.tp1), "TP1+1pip"
+                                else:
+                                    anchor_pp, lbl_pp = (sig.actual_entry_price or sig.entry_price), "BE+1pip"
+                                if anchor_pp and pip_pp:
+                                    tsl = round(anchor_pp + pip_pp, 5) if is_buy_pp else round(anchor_pp - pip_pp, 5)
+                                    cur = sig.stoploss
+                                    degrade = cur is not None and ((is_buy_pp and tsl <= cur) or (not is_buy_pp and tsl >= cur))
+                                    if not degrade:
+                                        old_pp = sig.stoploss
+                                        sig.stoploss = tsl
+                                        sig.updated_at = datetime.utcnow()
+                                        _append_trade_log(sig, "sl_move_trail_standalone",
+                                            f"TG trail standalone (paper): SL {old_pp} → {tsl} ({lbl_pp})",
+                                            {"new_sl": tsl, "old_sl": old_pp, "trail_label": lbl_pp, "trigger": "trail_standalone_paper"})
+                                        db.add(sig)
+                                        log(f"[TrailStandalone] paper #{sig.id} SL→{tsl} ({lbl_pp})")
+                            except Exception as _pe2:
+                                log(f"[TrailStandalone] paper #{sig.id} err: {_pe2}")
+                            continue
                         # CASO A: signal ancora "open" (TP1 broker NON hit) →
                         # NON muovere SL ora, ARMA invece trail_stop_enabled.
                         # Cosi' quando il broker tocca davvero TP1, l'auto-trail
@@ -1306,12 +1429,13 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     # uno SLMove (incluso BE) su un signal ancora pending = il
                     # nostro LIMIT/STOP non si e' mai filled mentre il TG ha
                     # gia' "incassato" virtualmente -> trade perso, cancellalo.
+                    from sqlalchemy import or_ as _or_slm
                     pending_sigs_to_drop = []
                     if reply_to_msg_id:
                         cand = db.query(Signal).filter(
                             Signal.telegram_msg_id == reply_to_msg_id,
                             Signal.status == "pending",
-                            Signal.mt5_ticket.isnot(None),
+                            _or_slm(Signal.mt5_ticket.isnot(None), Signal.is_filtered == True),
                         ).first()
                         if cand:
                             pending_sigs_to_drop.append(cand)
@@ -1319,7 +1443,7 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         # Fallback per simbolo solo se ho il simbolo nel messaggio
                         pending_sigs_to_drop = db.query(Signal).filter(
                             Signal.status == "pending",
-                            Signal.mt5_ticket.isnot(None),
+                            _or_slm(Signal.mt5_ticket.isnot(None), Signal.is_filtered == True),
                             Signal.symbol == parsed.symbol,
                         ).all()
                     for sig in pending_sigs_to_drop:
@@ -1362,7 +1486,8 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             Signal.telegram_msg_id == reply_to_msg_id
                         ).first()
                         if target_sig and target_sig.status in ("open", "tp1", "tp2") \
-                                and target_sig.mt5_ticket and target_sig.closed_at is None:
+                                and (target_sig.mt5_ticket or getattr(target_sig, "is_filtered", False)) \
+                                and target_sig.closed_at is None:
                             open_sigs = [target_sig]
                         elif target_sig:
                             log(f"[SLMove] reply a #{target_sig.id} {target_sig.symbol} status={target_sig.status} (gia' chiuso/cancellato) -> skip")
@@ -1373,7 +1498,7 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         else:
                             open_sigs = db.query(Signal).filter(
                                 Signal.status.in_(["open", "tp1", "tp2"]),
-                                Signal.mt5_ticket.isnot(None),
+                                _or_slm(Signal.mt5_ticket.isnot(None), Signal.is_filtered == True),
                                 Signal.closed_at.is_(None),
                                 Signal.symbol == parsed.symbol,
                             ).all()
@@ -1460,6 +1585,19 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                         continue
                             except Exception as _e:
                                 log(f"[SLMove] #{sig.id} validazione typo errore: {str(_e)[:80]}")
+                            # PAPER: applica direttamente al DB (niente MT5). La regola
+                            # post-TP1 + typo validation sopra valgono anche per paper.
+                            if getattr(sig, "is_filtered", False):
+                                old_sl_paper = sig.stoploss
+                                sig.stoploss = new_sl
+                                sig.updated_at = datetime.utcnow()
+                                _append_trade_log(sig, "sl_move_applied",
+                                    f"SL Move TG applicato (paper): {old_sl_paper} → {new_sl}"
+                                    + (" (BE)" if parsed.is_breakeven else ""),
+                                    {"new_sl": new_sl, "old_sl": old_sl_paper, "is_breakeven": parsed.is_breakeven})
+                                db.add(sig)
+                                log(f"[SLMove] paper #{sig.id} {sig.symbol} SL {old_sl_paper} → {new_sl}")
+                                continue
                             tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
                             failed_invalid_sl = False
                             for ticket in tickets:
@@ -1641,7 +1779,20 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     _append_trade_log(new_sig, "reenter", f"Rientro nel trade #{last_sig.id} {last_sig.symbol} {last_sig.direction}.{override_note}")
                     log(f"[Reenter] Nuovo segnale #{new_sig.id} clonato da #{last_sig.id} {last_sig.symbol}.{override_note}")
 
-                    if mt5_trader.is_enabled():
+                    # FILTRI UTENTE: anche i reenter rispettano exclusion/hours →
+                    # se filtrato diventa paper (no MT5), lifecycle simulato.
+                    try:
+                        from signal_filters import check_signal_filter as _csf_re
+                        _fr = _csf_re(new_sig.symbol, new_sig.created_at or datetime.utcnow(), db)
+                        if _fr:
+                            new_sig.is_filtered = True
+                            new_sig.filter_reason = _fr
+                            _append_trade_log(new_sig, "filtered", f"Reenter filtrato (no MT5): {_fr}")
+                            log(f"[Filter] reenter #{new_sig.id} {new_sig.symbol} → is_filtered=True")
+                    except Exception as _fe:
+                        log(f"[Filter] reenter check err: {_fe}")
+
+                    if not getattr(new_sig, "is_filtered", False) and mt5_trader.is_enabled():
                         _append_trade_log(new_sig, "mt5_placing", f"Invio ordini a MT5 per {new_sig.symbol} {new_sig.direction}")
                         db.add(new_sig)
                         db.commit()
@@ -1844,6 +1995,18 @@ async def load_history(limit: int = 500, since: datetime = None):
                         db.add(sig)
                         db.commit()
                         db.refresh(sig)
+                        # FILTRI UTENTE: anche i replay rispettano exclusion/hours
+                        try:
+                            from signal_filters import check_signal_filter as _csf_rp
+                            _frp = _csf_rp(sig.symbol, sig.created_at or ts, db)
+                            if _frp:
+                                sig.is_filtered = True
+                                sig.filter_reason = _frp
+                                _append_trade_log(sig, "filtered", f"Replay filtrato (no MT5): {_frp}")
+                                db.add(sig); db.commit()
+                                log(f"[Filter] replay #{sig.id} {sig.symbol} → is_filtered=True")
+                        except Exception as _fe:
+                            log(f"[Filter] replay check err: {_fe}")
                         # Se il signal e' "recente" (<30 min) e MT5 abilitato, tenta
                         # comunque il place_orders con catch_origin='replay'. Il
                         # pre-check tick di late-catch decidera' MARKET/LIMIT/CANCEL.
@@ -1853,7 +2016,7 @@ async def load_history(limit: int = 500, since: datetime = None):
                         try:
                             import mt5_trader as _mt5t
                             delay_sec = (datetime.utcnow() - ts).total_seconds()
-                            if delay_sec < 1800 and _mt5t.is_enabled():
+                            if delay_sec < 1800 and _mt5t.is_enabled() and not getattr(sig, "is_filtered", False):
                                 log(f"[Replay] #{sig.id} signal recente (delay {int(delay_sec)}s): tentativo place_orders con catch_origin=replay")
                                 tickets = _mt5t.place_orders(sig, catch_origin="replay",
                                     catch_reason=f"recuperato da history replay, delay {int(delay_sec)}s",

@@ -224,7 +224,9 @@ def _calc_pnl_from_trade_log(sig, lots: float, entry: float) -> tuple:
                 pnl = calc_pnl(sig.symbol, sig.direction or "buy", entry, price, lots_per_tp)
                 ev_copy["pnl"] = pnl
                 total_pnl += pnl
-        elif ev["event"] == "sl_hit":
+        elif ev["event"] in ("sl_hit", "closed"):
+            # sl_hit = SL sul residuo; closed = chiusura manuale/TG del residuo
+            # a prezzo mercato. Stesso calcolo: remaining_lots al prezzo evento.
             if price and entry and remaining_lots > 0:
                 pnl = calc_pnl(sig.symbol, sig.direction or "buy", entry, price, remaining_lots)
                 ev_copy["pnl"] = pnl

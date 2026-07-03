@@ -782,6 +782,21 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
     #   BUY  entra quando price >= low  (scende nel range dall'alto)
     #   SELL entra quando price <= high (sale nel range dal basso)
     if sig.status == "pending":
+        # PAPER missed-TP1: se il prezzo tocca TP1 mentre siamo ancora pending,
+        # il fill non e' mai avvenuto e il trade e' "perso" — stessa semantica
+        # di drop_pending_missed_tp per i reali (che gira in sync MT5).
+        if is_paper and sig.tp1 is not None:
+            tp1_hit_unfilled = (is_buy and price >= sig.tp1) or (not is_buy and price <= sig.tp1)
+            if tp1_hit_unfilled:
+                sig.status = "cancelled"
+                sig.closed_at = now
+                sig.updated_at = now
+                sig.notes = (sig.notes or "") + " [Paper non partito: TP1 raggiunto senza fill]"
+                _append_event(sig, "pending_dropped", price, now)
+                db.add(sig)
+                db.commit()
+                log(f"[Monitor] paper #{sig.id} {sig.symbol} pending dropped: TP1 {sig.tp1} raggiunto senza fill")
+                return
         entry_low = sig.entry_price
         entry_high = sig.entry_price_high or sig.entry_price
         trigger = None

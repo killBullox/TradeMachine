@@ -328,3 +328,76 @@ class TestPaperSellFillZone:
             assert sig.status == "open", f"BUY non entrato al toccare low: status={sig.status}"
         finally:
             db.close()
+
+
+class TestPaperParityLifecycle:
+    """Parita' di logica reali/paper: close-event pnl, missed TP1 drop."""
+
+    def _mk(self, SessionLocal, **kw):
+        from database import Signal
+        from datetime import datetime
+        db = SessionLocal()
+        try:
+            defaults = dict(
+                telegram_msg_id=99600, symbol="XAUUSD", direction="buy",
+                entry_price=4000.0, entry_price_high=4002.0, stoploss=3990.0,
+                tp1=4010.0, tp2=4020.0, tp3=4030.0, status="pending",
+                is_filtered=True, filter_reason="test", raw_message="t",
+                created_at=datetime.utcnow(),
+            )
+            defaults.update(kw)
+            sig = Signal(**defaults)
+            db.add(sig); db.commit(); db.refresh(sig)
+            return sig.id
+        finally:
+            db.close()
+
+    def test_evento_closed_calcola_pnl_residuo(self, filter_db, fake_mt5):
+        """Evento 'closed' nel trade_log = chiusura residuo a mercato → pnl calcolato."""
+        from database import Signal
+        from price_service import _append_event
+        from datetime import datetime
+        import risk
+        sid = self._mk(filter_db)
+        db = filter_db()
+        try:
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            now = datetime.utcnow()
+            sig.status = "open"; sig.actual_entry_price = 4000.0
+            _append_event(sig, "entry", 4000.0, now)
+            _append_event(sig, "closed", 4005.0, now)  # chiusura manuale in profit
+            sig.status = "closed"; sig.exit_price = 4005.0; sig.closed_at = now
+            risk.recalculate_signal(sig)
+            assert sig.pnl_usd is not None and sig.pnl_usd > 0
+        finally:
+            db.close()
+
+    def test_paper_pending_dropped_se_tp1_hit_senza_fill(self, filter_db, fake_mt5):
+        """BUY range 4000-4002, prezzo era gia' sopra e tocca TP1 4010 senza fill → cancelled."""
+        from database import Signal
+        from price_service import _update_realtime
+        from datetime import datetime
+        sid = self._mk(filter_db)
+        db = filter_db()
+        try:
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            _update_realtime(db, sig, price=4010.5, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.status == "cancelled", f"atteso cancelled, got {sig.status}"
+        finally:
+            db.close()
+
+    def test_paper_pending_fill_normale_non_droppato(self, filter_db, fake_mt5):
+        """Prezzo dentro il range (sotto TP1) → fill normale, non drop."""
+        from database import Signal
+        from price_service import _update_realtime
+        from datetime import datetime
+        sid = self._mk(filter_db)
+        db = filter_db()
+        try:
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            _update_realtime(db, sig, price=4001.0, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.status == "open"
+        finally:
+            db.close()
