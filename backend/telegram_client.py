@@ -405,6 +405,47 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                                                     "exit the trade"])
 
     for sig in targets:
+        # PAPER TRADE (is_filtered): nessun ticket MT5. Chiudi come simulazione:
+        # marca status closed, prendi prezzo mercato corrente come exit, calcola
+        # pnl teorico da entry->exit sui lots del paper.
+        if getattr(sig, "is_filtered", False):
+            if sig.status not in ("open", "tp1", "tp2"):
+                log(f"[Close] paper #{sig.id} status={sig.status} → nulla da chiudere")
+                continue
+            reason_txt = parsed.reason or "Close da TG"
+            close_price = None
+            try:
+                import mt5_trader as _mt5t
+                mt5 = _mt5t._get_mt5()
+                bsym = _mt5t.get_mt5_symbol(sig.symbol)
+                if mt5 and bsym:
+                    tick = mt5.symbol_info_tick(bsym)
+                    if tick:
+                        is_buy_p = (sig.direction or "buy").lower() == "buy"
+                        close_price = tick.bid if is_buy_p else tick.ask
+            except Exception as _e:
+                log(f"[Close] paper #{sig.id} tick err: {_e}")
+            if close_price is None:
+                close_price = sig.actual_entry_price or sig.entry_price
+            sig.status = "closed"
+            sig.exit_price = close_price
+            sig.closed_at = now
+            sig.updated_at = now
+            # Ricalcola pnl teorico: entry -> close_price su lots del paper
+            try:
+                from risk import calc_pnl
+                entry = sig.actual_entry_price or sig.entry_price
+                if entry and sig.position_size:
+                    sig.pnl_usd = round(calc_pnl(sig.symbol, sig.direction or "buy",
+                                                  entry, close_price, sig.position_size), 2)
+            except Exception as _e:
+                log(f"[Close] paper #{sig.id} calc pnl err: {_e}")
+            _append_trade_log(sig, "tg_close",
+                f"Close TG applicato (paper): exit @ {close_price}, pnl={sig.pnl_usd}$, motivo={reason_txt}",
+                {"reason": reason_txt, "close_price": close_price})
+            db.add(sig); db.commit()
+            log(f"[Close] paper #{sig.id} {sig.symbol} chiuso @ {close_price} pnl={sig.pnl_usd}")
+            continue
         tickets = jsonlib.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
 
         if is_book_profit and not is_hard_close and len(tickets) > 1:
