@@ -102,7 +102,9 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
 
   const livePnl = openPos.length > 0 ? openPos.reduce((s, p) => s + (p.profit ?? 0), 0) : null
   const displayPnl = livePnl ?? sig.pnl_usd
-  const lots = openPos.reduce((s, p) => s + (p.volume ?? 0), 0)
+  // Per paper trade (is_filtered) non ci sono posizioni MT5: usa position_size dal DB (calcolo teorico)
+  const lotsFromMt5 = openPos.reduce((s, p) => s + (p.volume ?? 0), 0)
+  const lots = lotsFromMt5 > 0 ? lotsFromMt5 : (sig.is_filtered ? (sig.position_size ?? 0) : 0)
 
   // SL effettivo: se ci sono posizioni aperte, prende lo SL dal primo ticket
   // attivo con SL valorizzato (riflette BE / lock profit / SL move da TG).

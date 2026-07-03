@@ -858,6 +858,21 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
             _recalc_paper(sig)
         db.add(sig)
         db.commit()
+        return
+
+    # Nessun cambio di status. Per i paper aggiorna comunque il floating P&L
+    # (i reali lo aggiornano da sync_positions MT5, i paper no).
+    if is_paper and sig.status in ("open", "tp1", "tp2"):
+        try:
+            from risk import calc_pnl
+            entry = sig.actual_entry_price or sig.entry_price
+            if entry and sig.position_size:
+                floating = calc_pnl(sig.symbol, sig.direction or "buy",
+                                    entry, price, sig.position_size)
+                sig.pnl_usd = round(floating, 2)
+                db.add(sig); db.commit()
+        except Exception as e:
+            log(f"[Monitor] paper floating pnl #{sig.id} err: {e}")
 
 
 def _recalc_paper(sig):
