@@ -2939,6 +2939,7 @@ def sync_positions() -> list:
             positions_count = 0
             pendings_count = 0
             closed_tickets = []
+            closed_reasons = {}  # ticket -> "TP" | "SL" | "SL@BE" | "manuale/Close" | "?"
             tp1_hit        = False
 
             for ticket in tickets:
@@ -2973,23 +2974,27 @@ def sync_positions() -> list:
                     close_ts    = _get_mt5_utc(close_deal.time)
                     total_profit += profit
                     closed_tickets.append((ticket, close_price, profit, close_ts))
+                    # Determina motivo dal commento del deal (es. '[tp 4530.00]',
+                    # '[sl 4525.40]', 'IC-close'). Calcolato SEMPRE (non solo per il
+                    # log): serve alla determinazione dello status TP robusta a
+                    # slippage (caso #538: TP2 fill a 4164.81 con TP a 4165.0).
+                    comment = (close_deal.comment or "").lower()
+                    if 'tp' in comment:
+                        reason = "TP"
+                    elif 'sl' in comment:
+                        # Distingui SL originale vs SL @ BE
+                        if sig.actual_entry_price and abs(close_price - sig.actual_entry_price) < abs(close_price) * 0.001:
+                            reason = "SL@BE"
+                        else:
+                            reason = "SL"
+                    elif 'close' in comment or 'ic-close' in comment:
+                        reason = "manuale/Close"
+                    else:
+                        reason = "?"
+                    closed_reasons[ticket] = reason
                     # Log evento di chiusura nel trade_log (idempotente: skip se gia' loggato per quel ticket)
                     existing_log = sig.trade_log or "[]"
                     if f'"ticket": {ticket}' not in existing_log or '"event": "ticket_closed"' not in existing_log or f'{{"ticket": {ticket}' not in existing_log.replace('"event": "ticket_closed"', ''):
-                        # Determina motivo dal commento del deal (es. '[tp 4530.00]', '[sl 4525.40]', 'IC-close')
-                        comment = (close_deal.comment or "").lower()
-                        if 'tp' in comment:
-                            reason = "TP"
-                        elif 'sl' in comment:
-                            # Distingui SL originale vs SL @ BE
-                            if sig.actual_entry_price and abs(close_price - sig.actual_entry_price) < abs(close_price) * 0.001:
-                                reason = "SL@BE"
-                            else:
-                                reason = "SL"
-                        elif 'close' in comment or 'ic-close' in comment:
-                            reason = "manuale/Close"
-                        else:
-                            reason = "?"
                         # Idempotenza: cerca evento gia' presente per questo ticket
                         import json as _jsonlib
                         try:
@@ -3167,6 +3172,11 @@ def sync_positions() -> list:
             # tile in UI riflette lo stato reale anche durante il trade.
             if open_count > 0 and closed_tickets:
                 tp_levels_hit_status = 0
+                # Ticket-based (robusto a slippage, caso #538)
+                for _idx, _tk in enumerate(tickets):
+                    if _idx < 3 and closed_reasons.get(_tk) == "TP":
+                        tp_levels_hit_status = max(tp_levels_hit_status, _idx + 1)
+                # Fallback prezzo
                 for _tp_num, _tp_price in [(1, sig.tp1), (2, sig.tp2), (3, sig.tp3)]:
                     if _tp_price is None:
                         continue
@@ -3226,13 +3236,25 @@ def sync_positions() -> list:
                 # "sl_hit". Caso #442 GBPJPY 11/06: entry 214.836, trail TG sposta SL
                 # a 214.845, close 214.845 → profit +5.45$ ma status era "sl_hit".
                 new_status = "sl_hit"
-                for tp_num, tp_price in [(3, sig.tp3), (2, sig.tp2), (1, sig.tp1)]:
-                    if tp_price is None:
-                        continue
-                    if any((is_buy and cp >= tp_price) or (not is_buy and cp <= tp_price)
-                           for _, cp, _, _ in closed_tickets):
-                        new_status = f"tp{tp_num}"
-                        break
+                # 1) Metodo ticket-based (robusto a slippage, caso #538): l'ordine
+                #    dei ticket in sig.mt5_tickets e' [TP1, TP2, TP3]. Se il deal
+                #    di chiusura del ticket i-esimo ha comment TP, quel livello e'
+                #    stato raggiunto indipendentemente dal prezzo di fill.
+                tp_from_tickets = 0
+                for _idx, _tk in enumerate(tickets):
+                    if _idx < 3 and closed_reasons.get(_tk) == "TP":
+                        tp_from_tickets = max(tp_from_tickets, _idx + 1)
+                if tp_from_tickets > 0:
+                    new_status = f"tp{tp_from_tickets}"
+                else:
+                    # 2) Fallback prezzo (trade legacy / chiusure manuali)
+                    for tp_num, tp_price in [(3, sig.tp3), (2, sig.tp2), (1, sig.tp1)]:
+                        if tp_price is None:
+                            continue
+                        if any((is_buy and cp >= tp_price) or (not is_buy and cp <= tp_price)
+                               for _, cp, _, _ in closed_tickets):
+                            new_status = f"tp{tp_num}"
+                            break
                 if new_status == "sl_hit" and sig.actual_entry_price and closed_tickets:
                     entry_anchor = float(sig.actual_entry_price)
                     favorable_closes = sum(
