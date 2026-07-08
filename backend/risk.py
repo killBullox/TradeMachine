@@ -237,26 +237,39 @@ def _calc_pnl_from_trade_log(sig, lots: float, entry: float) -> tuple:
     return round(total_pnl, 2), json.dumps(updated_events)
 
 
+_TERMINAL_STATUSES = ("sl_hit", "tp1", "tp2", "tp3", "closed", "trail_out")
+
+
 def recalculate_signal(sig) -> None:
     """Ricalcola position_size + pnl_usd per UN signal (in-place, no commit).
     Pensato per i paper trade (filtered): chiamato dal monitor a ogni cambio status.
-    Riusa la stessa formula di recalculate_all ma su un solo signal."""
+    Riusa la stessa formula di recalculate_all ma su un solo signal.
+
+    REGOLA CHIAVE (bug #543/#537/#528): per un trade CHIUSO la position size
+    NON si ricalcola dallo SL corrente — che puo' essere stato mosso a BE
+    (entry==sl → distanza 0 → lots=None → pnl azzerato). Si usa la size gia'
+    salvata, che fu calcolata con lo SL ORIGINALE al momento dell'ingresso.
+    E se il ricalcolo non e' possibile, il pnl esistente NON si tocca."""
     settings = get_risk_settings()
     risk_amount = calc_risk_amount(settings)
     entry = sig.actual_entry_price or sig.entry_price or sig.entry_price_high
     sl = sig.stoploss
     effective_risk = risk_amount * 0.5 if getattr(sig, 'is_risky', False) else risk_amount
-    lots = calc_position_size(sig.symbol, entry, sl, effective_risk) if (entry and sl) else None
+    is_closed = sig.closed_at is not None or sig.status in _TERMINAL_STATUSES
+    if is_closed and sig.position_size:
+        lots = sig.position_size  # size storica (SL originale), non ricalcolare
+    else:
+        lots = calc_position_size(sig.symbol, entry, sl, effective_risk) if (entry and sl) else None
     sig.risk_usd = effective_risk
     # I filtered NON hanno ticket MT5: position_size = teorica
-    if not (sig.mt5_ticket or sig.mt5_tickets):
+    if not (sig.mt5_ticket or sig.mt5_tickets) and lots:
         sig.position_size = lots
     if not lots or not entry:
-        return
+        return  # non calcolabile: NON toccare pnl esistente
     if sig.mt5_ticket:
         return  # P&L autorevole da MT5
     total_pnl, updated_log = _calc_pnl_from_trade_log(sig, lots, entry)
-    if total_pnl is not None:
+    if total_pnl is not None and (total_pnl != 0.0 or not is_closed):
         sig.pnl_usd = total_pnl
         sig.trade_log = updated_log
     elif sig.status in ("sl_hit", "tp1", "tp2", "tp3") and sig.exit_price:
@@ -280,17 +293,25 @@ def recalculate_all():
             # Usa actual_entry_price se disponibile (prezzo reale di fill)
             entry = sig.actual_entry_price or sig.entry_price or sig.entry_price_high
             sl = sig.stoploss
+            is_closed = sig.closed_at is not None or sig.status in _TERMINAL_STATUSES
 
-            # Position size (dimezzata se segnale risky)
+            # Position size (dimezzata se segnale risky).
+            # TRADE CHIUSI: usa la size storica salvata (fu calcolata con lo SL
+            # ORIGINALE). Ricalcolare dallo SL corrente e' sbagliato se lo SL e'
+            # stato mosso a BE (entry==sl → lots=None → pnl azzerato: bug
+            # #543/#537/#528 del 07/07).
             effective_risk = risk_amount * 0.5 if getattr(sig, 'is_risky', False) else risk_amount
-            lots = calc_position_size(sig.symbol, entry, sl, effective_risk)
+            if is_closed and sig.position_size:
+                lots = sig.position_size
+            else:
+                lots = calc_position_size(sig.symbol, entry, sl, effective_risk)
             sig.risk_usd = effective_risk
             # Se il segnale è effettivamente piazzato su MT5 (ticket attivo, non
             # cancellato), il position_size autorevole arriva da place_orders /
             # sync_positions: NON sovrascrivere con il ricalcolo teorico, che
             # usa una formula diversa e spesso differisce dalla realtà MT5.
             is_mt5_active = bool(sig.mt5_ticket or sig.mt5_tickets) and sig.status != "cancelled"
-            if not is_mt5_active:
+            if not is_mt5_active and lots:
                 sig.position_size = lots
 
             # PRIMA di ogni tocco a pnl_usd: i trade MT5 hanno pnl_usd autorevole
@@ -315,19 +336,23 @@ def recalculate_all():
                     except Exception as e:
                         print(f"[Risk] Backfill #{sig.id} fallito: {e}", flush=True)
 
-                # P&L da trade_log (con parziali per TP)
+                # P&L da trade_log (con parziali per TP).
+                # total_pnl == 0.0 su trade CHIUSO = trade_log senza eventi di
+                # chiusura (non un BE reale): preserva il pnl esistente.
                 total_pnl, updated_log = _calc_pnl_from_trade_log(sig, lots, entry)
-                if total_pnl is not None:
+                if total_pnl is not None and (total_pnl != 0.0 or not is_closed):
                     sig.pnl_usd = total_pnl
                     sig.trade_log = updated_log
                 elif sig.status in ("sl_hit", "tp1", "tp2", "tp3") and sig.exit_price:
                     # Fallback: P&L sull'intero lotto con exit_price
                     sig.pnl_usd = calc_pnl(sig.symbol, sig.direction or "buy",
                                             entry, sig.exit_price, lots)
-                else:
+                elif not is_closed:
                     sig.pnl_usd = None
-            else:
+                # else: chiuso ma non ricalcolabile → preserva pnl esistente
+            elif not is_closed:
                 sig.pnl_usd = None
+            # else: chiuso senza lots/entry ricalcolabili → NON toccare pnl
 
             db.add(sig)
             updated += 1

@@ -401,3 +401,67 @@ class TestPaperParityLifecycle:
             assert sig.status == "open"
         finally:
             db.close()
+
+
+class TestRecalcNonDistruttivo:
+    """recalculate_all/signal NON devono azzerare pnl di trade chiusi
+    quando il ricalcolo non e' possibile (bug #543/#537/#528: SL a BE
+    → entry==sl → lots=None → pnl azzerato)."""
+
+    def test_paper_chiuso_sl_be_preserva_pnl(self, filter_db, fake_mt5):
+        from database import Signal
+        from datetime import datetime
+        import risk
+        db = filter_db()
+        try:
+            now = datetime.utcnow()
+            sig = Signal(
+                telegram_msg_id=99700, symbol="GBPJPY", direction="sell",
+                entry_price=216.00, entry_price_high=216.05,
+                stoploss=216.252,  # SL mosso a BE == actual_entry
+                actual_entry_price=216.252,
+                tp1=215.85, tp2=215.65, tp3=215.50,
+                status="sl_hit", exit_price=216.252, closed_at=now,
+                pnl_usd=-42.50,          # pnl esistente da preservare
+                position_size=1.16,
+                is_filtered=True, filter_reason="test", raw_message="t",
+                created_at=now,
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            risk.recalculate_signal(sig)
+            # position_size storica usata, pnl NON azzerato
+            assert sig.pnl_usd is not None, "pnl azzerato su trade chiuso con SL==entry!"
+        finally:
+            db.close()
+
+    def test_recalculate_all_preserva_pnl_chiusi_sl_be(self, filter_db, fake_mt5):
+        from database import Signal
+        from datetime import datetime
+        import sys
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("risk"):
+                del sys.modules[mod]
+        import risk
+        db = filter_db()
+        try:
+            now = datetime.utcnow()
+            sig = Signal(
+                telegram_msg_id=99701, symbol="BTCUSD", direction="buy",
+                entry_price=63500.0, actual_entry_price=63527.88,
+                stoploss=63527.88,  # BE
+                tp1=64000.0, tp2=64500.0, tp3=65000.0,
+                status="sl_hit", exit_price=63527.88, closed_at=now,
+                pnl_usd=-12.30, position_size=0.23,
+                is_filtered=True, filter_reason="test", raw_message="t",
+                created_at=now,
+            )
+            db.add(sig); db.commit(); sid = sig.id
+        finally:
+            db.close()
+        risk.recalculate_all()
+        db = filter_db()
+        try:
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            assert sig.pnl_usd is not None, "recalculate_all ha azzerato pnl chiuso!"
+        finally:
+            db.close()
