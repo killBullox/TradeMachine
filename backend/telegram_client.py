@@ -333,9 +333,23 @@ def _save_sl_move(db, parsed: ParsedSLMove, msg_id: int):
             if new_sl is None and parsed.is_breakeven:
                 new_sl = tgt.actual_entry_price or tgt.entry_price or tgt.entry_price_high
             if new_sl is not None:
-                tgt.stoploss = new_sl
-                db.add(tgt); db.commit()
-                log(f"[SLMove] paper #{tgt.id} stoploss aggiornato a {new_sl}")
+                # Regola anti-allargamento (decisione #546 08/07): uno SL move
+                # che ALLARGA lo stop aumenterebbe il rischio oltre il max risk
+                # con cui la size fu calcolata → rifiutato. Solo tightening.
+                is_buy_w = (tgt.direction or "buy").lower() == "buy"
+                cur = tgt.stoploss
+                widens = cur is not None and ((is_buy_w and new_sl < cur) or (not is_buy_w and new_sl > cur))
+                if widens:
+                    _append_trade_log(tgt, "sl_move_rejected_risk",
+                        f"SL Move TG {new_sl} RIFIUTATO (paper): allargherebbe lo stop oltre il "
+                        f"rischio massimo (SL corrente {cur}). Mantengo {cur}.",
+                        {"proposed": new_sl, "current_sl": cur})
+                    db.add(tgt); db.commit()
+                    log(f"[SLMove] paper #{tgt.id} RIFIUTATO {new_sl}: allarga stop (cur={cur})")
+                else:
+                    tgt.stoploss = new_sl
+                    db.add(tgt); db.commit()
+                    log(f"[SLMove] paper #{tgt.id} stoploss aggiornato a {new_sl}")
 
 
 async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
@@ -1585,6 +1599,21 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                         continue
                             except Exception as _e:
                                 log(f"[SLMove] #{sig.id} validazione typo errore: {str(_e)[:80]}")
+                            # ─── Regola anti-allargamento (decisione #546, 08/07) ───
+                            # Uno SL move che ALLARGA lo stop porta il rischio oltre
+                            # il max risk con cui la size fu calcolata all'ingresso.
+                            # Solo tightening (verso BE/profit) viene applicato.
+                            _is_buy_w = (sig.direction or "buy").lower() == "buy"
+                            _cur_sl = sig.stoploss
+                            if _cur_sl is not None and new_sl is not None and \
+                                    ((_is_buy_w and new_sl < _cur_sl) or (not _is_buy_w and new_sl > _cur_sl)):
+                                _append_trade_log(sig, "sl_move_rejected_risk",
+                                    f"SL Move TG {new_sl} RIFIUTATO: allargherebbe lo stop oltre il rischio "
+                                    f"massimo definito all'ingresso (SL corrente {_cur_sl}). Mantengo {_cur_sl}.",
+                                    {"proposed": new_sl, "current_sl": _cur_sl, "is_breakeven": parsed.is_breakeven})
+                                log(f"[SLMove] #{sig.id} {sig.symbol} RIFIUTATO {new_sl}: allarga stop (cur={_cur_sl})")
+                                db.add(sig)
+                                continue
                             # PAPER: applica direttamente al DB (niente MT5). La regola
                             # post-TP1 + typo validation sopra valgono anche per paper.
                             if getattr(sig, "is_filtered", False):
@@ -1600,18 +1629,38 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 continue
                             tickets = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
                             failed_invalid_sl = False
+                            ok_count = 0
+                            failed_other = []  # ticket falliti per motivi ≠ 10016
                             for ticket in tickets:
                                 ok = mt5_trader.modify_sl(ticket, new_sl, sig.symbol)
-                                if not ok:
+                                if ok:
+                                    ok_count += 1
+                                else:
                                     err = mt5_trader._last_modify_error
                                     # err = (retcode, comment) da result.retcode/comment.
                                     # 10016 = TRADE_RETCODE_INVALID_STOPS (SL/TP troppo
                                     # vicini al prezzo o lato sbagliato). Standard MT5,
                                     # indipendente da broker e da testo del comment.
-                                    if err and isinstance(err, tuple) and len(err) >= 1:
-                                        if err[0] == 10016:
-                                            failed_invalid_sl = True
+                                    if err and isinstance(err, tuple) and len(err) >= 1 and err[0] == 10016:
+                                        failed_invalid_sl = True
+                                    else:
+                                        failed_other.append(ticket)
                             label = "BE" if parsed.is_breakeven else f"SL->{new_sl}"
+                            if ok_count == 0 and failed_other and not failed_invalid_sl:
+                                # NESSUN modify riuscito per errori generici (lib/conn/
+                                # requote): NON dichiarare applicato, NON toccare il DB
+                                # stoploss (bug #546: SL fantasma — DB diceva 4116, il
+                                # broker aveva ancora 4118 → -1019$). Retry via pending
+                                # queue di sync_positions.
+                                mt5_trader.register_pending_sl(sig.id, new_sl, failed_other, sig.symbol, sig.direction)
+                                _append_trade_log(sig, "sl_move_failed",
+                                    f"SL Move da TG ({label}) FALLITO su TUTTI i {len(tickets)} ticket "
+                                    f"(err={mt5_trader._last_modify_error}): DB NON aggiornato, retry in pending queue.",
+                                    {"new_sl": new_sl, "failed": failed_other,
+                                     "last_error": str(mt5_trader._last_modify_error)})
+                                log(f"[SLMove] #{sig.id} {sig.symbol} SL->{new_sl} FALLITO su tutti i ticket → pending retry (DB non toccato)")
+                                db.add(sig)
+                                continue
                             if failed_invalid_sl:
                                 # Modify rifiutato perche' SL troppo vicino al prezzo:
                                 # significa che il prezzo ha gia' superato/raggiunto il

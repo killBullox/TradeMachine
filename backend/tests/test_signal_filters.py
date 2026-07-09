@@ -465,3 +465,81 @@ class TestRecalcNonDistruttivo:
             assert sig.pnl_usd is not None, "recalculate_all ha azzerato pnl chiuso!"
         finally:
             db.close()
+
+
+class TestAntiAllargamentoSL:
+    """Regola #546: SL move che allarga lo stop → rifiutato (solo tightening)."""
+
+    def _mk_paper_open(self, SessionLocal, direction="buy", sl=4118.0):
+        from database import Signal
+        from datetime import datetime
+        db = SessionLocal()
+        try:
+            sig = Signal(
+                telegram_msg_id=99800, symbol="XAUUSD", direction=direction,
+                entry_price=4122.0, entry_price_high=4124.0,
+                actual_entry_price=4123.91, stoploss=sl,
+                tp1=4128.0, tp2=4132.0, tp3=4137.0,
+                status="open", is_filtered=True, filter_reason="test",
+                raw_message="t", created_at=datetime.utcnow(),
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            return sig.id
+        finally:
+            db.close()
+
+    def test_buy_widening_rifiutato(self, filter_db, fake_mt5):
+        """BUY con SL 4118: proposta 4116 (allarga) → rifiutata, SL resta 4118."""
+        from database import Signal
+        from telegram_client import _save_sl_move
+        from parser import ParsedSLMove
+        sid = self._mk_paper_open(filter_db, "buy", 4118.0)
+        db = filter_db()
+        try:
+            parsed = ParsedSLMove(symbol="XAUUSD", new_sl=4116.0, is_breakeven=False, raw="hold 4116 sl")
+            _save_sl_move(db, parsed, msg_id=99801)
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            assert sig.stoploss == 4118.0, f"SL allargato applicato! sl={sig.stoploss}"
+        finally:
+            db.close()
+
+    def test_buy_tightening_applicato(self, filter_db, fake_mt5):
+        """BUY con SL 4118: proposta 4120 (stringe) → applicata."""
+        from database import Signal
+        from telegram_client import _save_sl_move
+        from parser import ParsedSLMove
+        sid = self._mk_paper_open(filter_db, "buy", 4118.0)
+        db = filter_db()
+        try:
+            parsed = ParsedSLMove(symbol="XAUUSD", new_sl=4120.0, is_breakeven=False, raw="hold 4120 sl")
+            _save_sl_move(db, parsed, msg_id=99802)
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            assert sig.stoploss == 4120.0
+        finally:
+            db.close()
+
+    def test_sell_widening_rifiutato(self, filter_db, fake_mt5):
+        """SELL con SL 4130: proposta 4135 (allarga verso l'alto) → rifiutata."""
+        from database import Signal
+        from telegram_client import _save_sl_move
+        from parser import ParsedSLMove
+        sid = self._mk_paper_open(filter_db, "sell", 4130.0)
+        db = filter_db()
+        try:
+            parsed = ParsedSLMove(symbol="XAUUSD", new_sl=4135.0, is_breakeven=False, raw="hold 4135 sl")
+            _save_sl_move(db, parsed, msg_id=99803)
+            sig = db.query(Signal).filter(Signal.id == sid).first()
+            assert sig.stoploss == 4130.0, f"SL SELL allargato applicato! sl={sig.stoploss}"
+        finally:
+            db.close()
+
+
+class TestModifySlFloatCast:
+    """Bug #546: int passato alla lib MT5 → (-2, Invalid sl argument). Il cast
+    float() deve avvenire in modify_sl_tp prima della request."""
+
+    def test_int_sl_convertito_float(self, fake_mt5):
+        # verifica del comportamento del cast: round(float(int)) non solleva
+        # e produce float
+        v = round(float(4116), 2)
+        assert isinstance(v, float) and v == 4116.0

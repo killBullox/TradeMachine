@@ -2015,8 +2015,11 @@ def modify_sl_tp(ticket: int, new_sl: Optional[float], new_tp: Optional[float], 
     mt5_sym = MT5_SYMBOL_MAP.get(symbol.upper(), symbol)
     sym_info = mt5.symbol_info(mt5_sym)
     digits = sym_info.digits if sym_info else 5
-    new_sl_rounded = round(new_sl, digits) if new_sl is not None else None
-    new_tp_rounded = round(new_tp, digits) if new_tp is not None else None
+    # float() OBBLIGATORIO: la libreria MT5 rifiuta int con (-2, 'Invalid "sl"
+    # argument') SENZA arrivare al broker (bug #546: "Hold With 4116 SL" →
+    # parser estrae int 4116 → 9 modify falliti in silenzio → SL fantasma).
+    new_sl_rounded = round(float(new_sl), digits) if new_sl is not None else None
+    new_tp_rounded = round(float(new_tp), digits) if new_tp is not None else None
 
     positions = mt5.positions_get(ticket=ticket)
     if not positions:
