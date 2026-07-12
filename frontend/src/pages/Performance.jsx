@@ -516,7 +516,7 @@ const MONTHS_IT = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
                    'Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre']
 const DAYS_IT   = ['DOM','LUN','MAR','MER','GIO','VEN','SAB']
 
-function TradingCalendar() {
+function TradingCalendar({ symbolsCsv = '', hoursCsv = '' }) {
   const now = new Date()
   const [year,  setYear]  = useState(now.getFullYear())
   const [month, setMonth] = useState(now.getMonth() + 1)
@@ -524,9 +524,12 @@ function TradingCalendar() {
   const [view,  setView]  = useState('pnl') // 'pnl' | 'events'
 
   useEffect(() => {
-    fetch(`/api/performance/calendar?year=${year}&month=${month}`)
+    const params = new URLSearchParams({ year, month })
+    if (symbolsCsv) params.set('symbols', symbolsCsv)
+    if (hoursCsv) params.set('hours', hoursCsv)
+    fetch(`/api/performance/calendar?${params}`)
       .then(r => r.json()).then(d => setData(d.days || {}))
-  }, [year, month])
+  }, [year, month, symbolsCsv, hoursCsv])
 
   const prev = () => { if (month === 1) { setYear(y => y-1); setMonth(12) } else setMonth(m => m-1) }
   const next = () => { if (month === 12) { setYear(y => y+1); setMonth(1) } else setMonth(m => m+1) }
@@ -907,7 +910,7 @@ export default function Performance() {
       <SymbolHourHeatmap dateFrom={dateFrom} dateTo={dateTo} symbolsCsv={symbolsCsv} hoursCsv={hoursCsv} />
 
       {/* Calendario P&L */}
-      <TradingCalendar />
+      <TradingCalendar symbolsCsv={symbolsCsv} hoursCsv={hoursCsv} />
 
       {/* What-If filtri */}
       <WhatIfPanel dateFrom={dateFrom} dateTo={dateTo} />

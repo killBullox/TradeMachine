@@ -872,8 +872,13 @@ def get_perf_by_symbol_hour(
 
 
 @app.get("/api/performance/calendar")
-def get_calendar(year: int, month: int, db: Session = Depends(get_db)):
-    """Ritorna P&L giornaliero e win-rate per un mese."""
+def get_calendar(year: int, month: int,
+                 symbols: Optional[str] = Query(None),
+                 hours: Optional[str] = Query(None),
+                 db: Session = Depends(get_db)):
+    """Ritorna P&L giornaliero e win-rate per un mese.
+    Rispetta i filtri symbols/hours della pagina Performance (come gli altri
+    endpoint perf: filtro su orario SIGNAL created_at, Roma)."""
     import calendar as cal_mod
     from datetime import date
     first = datetime(year, month, 1)
@@ -885,6 +890,7 @@ def get_calendar(year: int, month: int, db: Session = Depends(get_db)):
         Signal.is_archived == False,
         Signal.is_filtered == False,
     ).all()
+    sigs = _apply_perf_filters(sigs, symbols, hours)
 
     days: dict = {}
     for s in sigs:
