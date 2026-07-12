@@ -233,12 +233,22 @@ def _add_backend_to_path(monkeypatch):
     yield
 
 
-@pytest.fixture
-def fake_mt5(monkeypatch):
-    """Inietta un FakeMT5 al posto del modulo MetaTrader5 reale."""
+@pytest.fixture(autouse=True)
+def _block_real_mt5(monkeypatch):
+    """GUARDIA GLOBALE (autouse): NESSUN test deve mai importare il modulo
+    MetaTrader5 reale — mt5.initialize() AVVIA il terminale MT5 sulla macchina
+    dove gira pytest (incidente 12/07: pytest sul laptop ha lanciato MT5 locale,
+    violando la regola 'MT5 solo su VPS'). Inietta sempre il FakeMT5; i test
+    che vogliono configurarlo usano la fixture fake_mt5 che ritorna l'istanza."""
     fake = FakeMT5()
     monkeypatch.setitem(sys.modules, "MetaTrader5", fake)
-    return fake
+    yield fake
+
+
+@pytest.fixture
+def fake_mt5(_block_real_mt5):
+    """Ritorna il FakeMT5 gia' iniettato dalla guardia globale autouse."""
+    return _block_real_mt5
 
 
 @pytest.fixture

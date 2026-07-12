@@ -130,8 +130,24 @@ def should_block_new_trades(db=None) -> Optional[str]:
     if settings is None or settings.daily_dd_limit_usd is None:
         return None
     today = get_today_pnl_usd(db)
-    if today <= -settings.daily_dd_limit_usd:
-        return (f"Daily DD kill-switch: P&L oggi {today:+.2f}$ <= soglia "
+    # FLOATING P&L: FTMO conta il daily loss sull'EQUITY (chiusi + aperti).
+    # Contare solo i chiusi sottostima il rischio reale: con -3000 chiusi e
+    # -2000 floating siamo gia' a -5000 per FTMO. Somma il profit delle
+    # posizioni aperte (0 se MT5 non disponibile).
+    floating = 0.0
+    try:
+        import mt5_trader
+        mt5 = mt5_trader._get_mt5()
+        if mt5:
+            positions = mt5.positions_get()
+            if positions:
+                floating = sum(float(p.profit) for p in positions)
+    except Exception:
+        pass
+    effective = today + min(floating, 0.0)  # solo floating NEGATIVO aggrava il daily
+    if effective <= -settings.daily_dd_limit_usd:
+        return (f"Daily DD kill-switch: P&L oggi {today:+.2f}$ (chiusi) "
+                f"{floating:+.2f}$ (floating) = {effective:+.2f}$ <= soglia "
                 f"-{settings.daily_dd_limit_usd:.2f}$ (account '{settings.label}'). "
                 f"Nuovi trade BLOCCATI fino a mezzanotte Roma.")
     return None
