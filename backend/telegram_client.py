@@ -1764,6 +1764,29 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             last_sig = None
                     except Exception as _e:
                         log(f"[Reenter] check broker errore: {str(_e)[:80]}")
+                # ─── Sanity check distanza SL (bug #568, 14/07) ───
+                # Il reenter clona lo SL del vecchio trade. Se il prezzo corrente
+                # e' gia' a ridosso (o oltre) lo SL clonato, entrare a MARKET =
+                # stop quasi istantaneo (#568: entry 4026.3 con SL 4027 →
+                # -177$ in 24s). Richiedi distanza prezzo↔SL >= 30% della
+                # distanza originale entry↔SL, altrimenti ABORT (last_sig=None).
+                if last_sig:
+                    try:
+                        cur_px = mt5_trader.get_current_price(last_sig.symbol)
+                        orig_entry = last_sig.actual_entry_price or last_sig.entry_price
+                        if cur_px and last_sig.stoploss and orig_entry:
+                            orig_dist = abs(float(orig_entry) - float(last_sig.stoploss))
+                            cur_dist = abs(cur_px - float(last_sig.stoploss))
+                            is_buy_re = (last_sig.direction or "").lower() == "buy"
+                            past_sl = (is_buy_re and cur_px <= last_sig.stoploss) or \
+                                      (not is_buy_re and cur_px >= last_sig.stoploss)
+                            if past_sl or (orig_dist > 0 and cur_dist < orig_dist * 0.30):
+                                log(f"[Reenter] ABORT #{last_sig.id}: prezzo {cur_px} troppo vicino/oltre "
+                                    f"SL clonato {last_sig.stoploss} (dist {cur_dist:.2f} < 30% di "
+                                    f"{orig_dist:.2f}). Nessun trade aperto.")
+                                last_sig = None
+                    except Exception as _re_e:
+                        log(f"[Reenter] sanity check err (procedo): {_re_e}")
                 if last_sig:
                     # Override entry range se il msg di reenter contiene numeri.
                     # Pattern supportati nel raw del msg:
@@ -1808,6 +1831,7 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     # Clona come nuovo segnale (con eventuali override)
                     new_entry_low = override_low if override_low is not None else last_sig.entry_price
                     new_entry_high = override_high if override_high is not None else last_sig.entry_price_high
+
                     new_sig = Signal(
                         symbol=last_sig.symbol,
                         direction=last_sig.direction,

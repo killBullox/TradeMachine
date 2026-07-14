@@ -99,6 +99,16 @@ CLASSIFICAZIONE TYPE:
   - "Stop loss hit, you can re-enter here" → reenter
   PAROLA CHIAVE: "again" / "re-" implica ritorno post-chiusura. Senza queste
   parole NON e' un reenter — vedi enter_now sotto.
+  ⚠️ TEMPO VERBALE CRITICO: reenter SOLO se e' un comando PRESENTE/IMPERATIVO.
+  Se il trader annuncia un'INTENZIONE FUTURA o CONDIZIONALE, NON e' un comando:
+  type=ignore. ESEMPI type=ignore (NON reenter):
+  - "will plan re-entry here" → ignore (futuro: "pianifichero'")
+  - "planning to re-enter" → ignore
+  - "may re-enter later" / "might re-enter" → ignore
+  - "will re-enter if price comes back" → ignore
+  - "watch for re-entry" / "waiting for re-entry setup" → ignore
+  Il discrimine: "re-enter NOW/here + verbo presente o imperativo" = comando;
+  "will/plan/may/might/later/if" = annuncio, si aspetta il VERO signal dopo.
 
 ▸ "enter_now" — istruzione di ENTRARE ORA su un signal ANCORA ATTIVO, per chi
   non era riuscito a entrare al primo signal. NON e' un rientro: il trade

@@ -104,3 +104,28 @@ class TestIgnore:
         mtype, p = parse_message(text)
         # accettiamo che venga riconosciuto come 'level' o ignorato
         assert mtype in ("level", "other", "ignore")
+
+
+class TestReenterFuturo:
+    """Bug #568: 'will plan re-entry here' NON e' un comando reenter."""
+
+    def test_will_plan_reentry_non_e_reenter(self):
+        from parser import classify_message
+        t = classify_message("Quick $6 spike on the chart. will plan re-entry here")
+        assert t != "reenter", f"classificato {t}!"
+
+    def test_planning_to_reenter_non_e_reenter(self):
+        from parser import classify_message
+        assert classify_message("planning to re-enter after news") != "reenter"
+
+    def test_may_reenter_later_non_e_reenter(self):
+        from parser import classify_message
+        assert classify_message("may re-enter later if price comes back") != "reenter"
+
+    def test_reenter_imperativo_resta_reenter(self):
+        from parser import classify_message
+        assert classify_message("SL hit, everyone re-enter here with same levels") == "reenter"
+
+    def test_can_reenter_here_resta_reenter(self):
+        from parser import classify_message
+        assert classify_message("Sl hit In Sudden Spike Risky Can Re enter Here With Same Sl") == "reenter"

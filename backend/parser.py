@@ -201,6 +201,19 @@ REENTER_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Marcatori di FUTURO/INTENZIONE: "will plan re-entry", "planning to re-enter",
+# "may re-enter later" NON sono comandi — il trader sta solo annunciando che
+# rientrera' in futuro (bug #568 14/07: "will plan re-entry here" eseguito
+# come reenter immediato → -177$ in 24s). Presente/imperativo ("re-enter now",
+# "can re-enter here") resta reenter.
+REENTER_FUTURE_PATTERN = re.compile(
+    r'\b(?:will\s+(?:plan|re.?enter|look|wait|watch)'
+    r'|plan(?:ning)?\s+(?:to\s+|a\s+)?re.?ent(?:er|ry)'
+    r'|may\s+re.?enter|might\s+re.?enter'
+    r'|re.?ent(?:er|ry)\s+(?:later|soon|if))\b',
+    re.IGNORECASE
+)
+
 
 def classify_message(text: str) -> str:
     """Restituisce: 'signal' | 'update' | 'sl_move' | 'close' | 'level' | 'watchlist' | 'other'"""
@@ -222,6 +235,9 @@ def classify_message(text: str) -> str:
         return 'sl_move'
 
     if REENTER_PATTERN.search(text):
+        # Futuro/intenzione ("will plan re-entry") NON e' un comando (bug #568)
+        if REENTER_FUTURE_PATTERN.search(text):
+            return 'other'
         return 'reenter'
 
     if UPDATE_PATTERN.search(text):
