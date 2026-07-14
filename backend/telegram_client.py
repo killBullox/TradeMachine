@@ -946,6 +946,24 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 log(f"[MarketEntry] #{ref.id} status={ref.status} (no pending, no open) → IGNORE msg '{text[:60]}'")
                 return
             sig = _save_signal(db, parsed, msg_id)
+            # ─── NEWS FILTER Tier 1 (uniforme reali+paper, post-mortem #570) ───
+            # Signal arrivato dentro la finestra di una news high-impact →
+            # NON si trada (nemmeno in paper: il paper simula il sistema).
+            if sig and sig.status == "pending":
+                try:
+                    import news_filter as _nf
+                    _news_reason = _nf.entry_blocked()
+                    if _news_reason:
+                        sig.status = "cancelled"
+                        sig.closed_at = datetime.utcnow()
+                        sig.updated_at = datetime.utcnow()
+                        sig.notes = (sig.notes or "") + " [News filter: ingresso bloccato]"
+                        _append_trade_log(sig, "news_blocked", _news_reason)
+                        db.add(sig); db.commit()
+                        log(f"[NewsFilter] #{sig.id} {sig.symbol} signal BLOCCATO: {_news_reason}")
+                        return
+                except Exception as _nf_e:
+                    log(f"[NewsFilter] check err (procedo): {_nf_e}")
             # ── FILTRI UTENTE (symbol exclusion + hour inclusion) ──
             # Se filtrato: il signal resta in DB con is_filtered=True per simulazione,
             # ma NON viene piazzato su MT5. Continua a ricevere sl_move/target_done/edit.

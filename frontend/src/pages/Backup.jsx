@@ -4,6 +4,7 @@ import toast from 'react-hot-toast'
 import { format } from 'date-fns'
 import { it } from 'date-fns/locale'
 import FilterPanel from '../components/FilterPanel'
+import NewsFilterPanel from '../components/NewsFilterPanel'
 
 function RiskPanel() {
   const [settings, setSettings] = useState(null)
@@ -116,6 +117,26 @@ function RiskPanel() {
             onChange={e => setSettings(s => ({...s, max_margin_pct_per_trade: +e.target.value}))}
             className="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500" />
           <p className="text-xs text-slate-500">Cap del margine usato per trade (% del free margin)</p>
+        </div>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 mb-1">
+            <input type="checkbox" checked={settings.news_filter_enabled !== false}
+              onChange={e => setSettings(s => ({...s, news_filter_enabled: e.target.checked}))}
+              className="w-4 h-4 rounded" id="news-filter-toggle" />
+            <label htmlFor="news-filter-toggle" className="text-xs text-slate-400"
+              title="Blocca nuovi ingressi -10/+5 min attorno alle news high-impact, cancella i pending a -10 e chiude le posizioni aperte a -5 (eventi con flag Flatten). Post-mortem #570.">
+              News filter (blocco + flatten)
+            </label>
+          </div>
+          <div className="flex items-center gap-2">
+            <input type="checkbox" checked={settings.friday_flatten_enabled !== false}
+              onChange={e => setSettings(s => ({...s, friday_flatten_enabled: e.target.checked}))}
+              className="w-4 h-4 rounded" id="friday-flatten-toggle" />
+            <label htmlFor="friday-flatten-toggle" className="text-xs text-slate-400"
+              title="Chiude tutte le posizioni il venerdì alle 22:45 Roma contro i gap di apertura del lunedì.">
+              Weekend flatten (ven 22:45)
+            </label>
+          </div>
         </div>
         <div className="flex items-end">
           <div className="w-full">
@@ -251,6 +272,9 @@ export default function Backup() {
 
       {/* Filtri Segnali */}
       <FilterPanel />
+
+      {/* News Filter */}
+      <NewsFilterPanel />
 
       {/* Riavvio Server */}
       <div className="card p-6 mb-8 border border-amber-600/30">

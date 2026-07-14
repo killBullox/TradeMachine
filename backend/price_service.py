@@ -709,7 +709,132 @@ async def start_price_monitor():
             await _check_open_signals()
         except Exception as e:
             log(f"[Monitor] Errore loop: {str(e)[:100]}")
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, _news_protection_tick)
+        except Exception as e:
+            log(f"[Monitor] Errore news protection: {str(e)[:100]}")
         await asyncio.sleep(15)
+
+
+def _news_protection_tick():
+    """Tier 2+3 del news filter + flatten venerdi' sera (post-mortem #570).
+    Gira ogni 15s nel monitor loop:
+    - pending_cancel_due: rimuove i pending non fillati (reali) e cancella i
+      paper pending, [T-10, T] di ogni evento
+    - flatten_due / friday_flatten_due: chiude TUTTE le posizioni aperte
+      (reali a mercato, paper simulati) [T-5, T]"""
+    import news_filter as nf
+    ev_pending = nf.pending_cancel_due()
+    ev_flatten = nf.flatten_due()
+    friday = nf.friday_flatten_due()
+    if not ev_pending and not ev_flatten and not friday:
+        return
+
+    reason = None
+    if ev_flatten:
+        reason = f"News flatten: '{ev_flatten.name}' alle {ev_flatten.event_time.strftime('%H:%M')} UTC"
+    elif friday:
+        reason = "Weekend flatten: venerdi' sera, protezione gap di apertura lunedi'"
+    elif ev_pending:
+        reason = f"News pending-cancel: '{ev_pending.name}' alle {ev_pending.event_time.strftime('%H:%M')} UTC"
+
+    import mt5_trader
+    import json as _json
+    from risk import calc_pnl
+    db = SessionLocal()
+    try:
+        active = db.query(Signal).filter(
+            Signal.status.in_(("pending", "open", "tp1", "tp2")),
+            Signal.closed_at.is_(None),
+        ).all()
+        if not active:
+            if ev_flatten:
+                nf.mark_flatten_done(ev_flatten.id, db)
+            return
+        mt5 = mt5_trader._get_mt5() if mt5_trader.is_enabled() else None
+        do_flatten = bool(ev_flatten or friday)
+        now = datetime.utcnow()
+        for sig in active:
+            is_paper = bool(getattr(sig, "is_filtered", False))
+            tickets = []
+            if sig.mt5_tickets:
+                try: tickets = _json.loads(sig.mt5_tickets)
+                except Exception: tickets = []
+            elif sig.mt5_ticket:
+                tickets = [sig.mt5_ticket]
+
+            # ── PENDING (mai fillati): cancella (Tier 2, vale anche in flatten)
+            if sig.status == "pending":
+                cancelled_n = 0
+                if mt5 and tickets and not is_paper:
+                    for t in tickets:
+                        if mt5.orders_get(ticket=t):
+                            mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": t})
+                            cancelled_n += 1
+                if not is_paper and tickets and cancelled_n == 0 and mt5:
+                    # nessun pending broker trovato (forse gia' fillato in posizione?)
+                    still_open = any(mt5.positions_get(ticket=t) for t in tickets)
+                    if still_open:
+                        pass  # verra' gestito dal ramo flatten sotto se do_flatten
+                sig.status = "cancelled"
+                sig.closed_at = now
+                sig.updated_at = now
+                sig.notes = (sig.notes or "") + f" [{reason}: pending cancellato]"
+                _append_event(sig, "news_cancelled", 0, now)
+                db.add(sig)
+                log(f"[NewsFilter] #{sig.id} {sig.symbol} pending cancellato ({cancelled_n} ordini broker) — {reason}")
+                continue
+
+            # ── OPEN/TP1/TP2: flatten solo se dovuto (Tier 3 / venerdi')
+            if not do_flatten:
+                continue
+            if is_paper:
+                price = get_current_price(sig.symbol)
+                close_price = price or sig.actual_entry_price or sig.entry_price
+                sig.status = "closed"
+                sig.exit_price = close_price
+                sig.closed_at = now
+                sig.updated_at = now
+                _append_event(sig, "closed", close_price, now)
+                _recalc_paper(sig)
+                sig.notes = (sig.notes or "") + f" [{reason}: flatten paper]"
+                db.add(sig)
+                log(f"[NewsFilter] paper #{sig.id} {sig.symbol} flatten @ {close_price} pnl={sig.pnl_usd}")
+            else:
+                closed_n = 0
+                for t in tickets:
+                    if mt5 and mt5.positions_get(ticket=t):
+                        if mt5_trader.close_position(t, sig.symbol):
+                            closed_n += 1
+                    elif mt5 and mt5.orders_get(ticket=t):
+                        mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": t})
+                if closed_n > 0:
+                    sig.status = "closed"
+                    sig.closed_at = now
+                    sig.updated_at = now
+                    sig.notes = (sig.notes or "") + f" [{reason}: flatten {closed_n} posizioni]"
+                    # pnl reale dai deal (stessa logica del TG close)
+                    try:
+                        import time as _t
+                        _t.sleep(0.8)
+                        total_real = 0.0
+                        for t in tickets:
+                            deals = mt5.history_deals_get(position=t) if mt5 else None
+                            if not deals: continue
+                            for d in deals:
+                                if d.entry == mt5.DEAL_ENTRY_OUT:
+                                    total_real += float(d.profit) + float(getattr(d, 'commission', 0) or 0) + float(getattr(d, 'swap', 0) or 0)
+                        if total_real != 0.0:
+                            sig.pnl_usd = round(total_real, 2)
+                    except Exception as _e:
+                        log(f"[NewsFilter] #{sig.id} pnl reale err: {_e}")
+                    db.add(sig)
+                    log(f"[NewsFilter] #{sig.id} {sig.symbol} FLATTEN: {closed_n} posizioni chiuse, pnl={sig.pnl_usd} — {reason}")
+        db.commit()
+        if ev_flatten:
+            nf.mark_flatten_done(ev_flatten.id, db)
+    finally:
+        db.close()
 
 
 async def _check_open_signals():

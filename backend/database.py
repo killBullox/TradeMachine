@@ -133,7 +133,28 @@ class RiskSettings(Base):
     # simulazione what-if. Nessuna interazione MT5 reale.
     excluded_symbols = Column(Text, nullable=True)  # JSON array es. ["EURJPY","USOIL"]
     allowed_hours = Column(Text, nullable=True)     # JSON array int 0-23 (Roma). None=tutte
+    # ─── News filter (post-mortem #570: CPI gap -8166$) ───
+    news_filter_enabled = Column(Boolean, default=True)   # blocco entry + flatten attorno a news
+    friday_flatten_enabled = Column(Boolean, default=True) # chiusura totale venerdi' sera (weekend gap)
     updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class NewsEvent(Base):
+    """Eventi macro high-impact (CPI/NFP/FOMC...). Attorno a questi eventi:
+    - [T-10min, T+5min]: blocco nuovi ingressi (market + pending)
+    - [T-10min]: cancellazione pending non fillati
+    - [T-5min] se flatten=True: chiusura totale posizioni aperte
+    event_time e' UTC."""
+    __tablename__ = "news_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(120), nullable=False)          # es. "US CPI (June)"
+    event_time = Column(DateTime, nullable=False)       # UTC
+    currency = Column(String(10), default="USD")
+    impact = Column(String(20), default="high")
+    flatten = Column(Boolean, default=True)             # chiudi posizioni aperte a T-5
+    flatten_done = Column(Boolean, default=False)       # idempotenza runner
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class JournalEntry(Base):
@@ -293,6 +314,12 @@ def init_db():
             conn.commit()
         if "allowed_hours" not in rs_existing:
             conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN allowed_hours TEXT"))
+            conn.commit()
+        if "news_filter_enabled" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN news_filter_enabled BOOLEAN DEFAULT 1"))
+            conn.commit()
+        if "friday_flatten_enabled" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN friday_flatten_enabled BOOLEAN DEFAULT 1"))
             conn.commit()
         # Migrazione mt5_accounts
         try:

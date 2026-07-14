@@ -56,6 +56,12 @@ async def lifespan(app: FastAPI):
     # Handler globale per eccezioni asyncio non gestite
     asyncio.get_event_loop().set_exception_handler(_handle_asyncio_exception)
     init_db()
+    # Seed eventi news high-impact noti (idempotente)
+    try:
+        import news_filter
+        news_filter.seed_default_events()
+    except Exception as _e:
+        safe_print(f"[Startup] news seed err: {_e}")
     # Carica account MT5 attivo dal DB (sovrascrive .env se presente)
     mt5_trader._load_active_account()
     # Ripristina stato auto-trade dal DB
@@ -728,6 +734,79 @@ class RiskSettingsIn(BaseModel):
     entry_tolerance_pips: float = 3.0
     trail_stop_enabled: bool = False
     max_margin_pct_per_trade: float = 50.0
+    news_filter_enabled: bool = True
+    friday_flatten_enabled: bool = True
+
+
+# ─── News events (news filter #570) ─────────────────────────────────────────
+
+class NewsEventIn(BaseModel):
+    name: str
+    event_time_roma: str            # "YYYY-MM-DD HH:MM" ora di Roma
+    flatten: bool = True
+    currency: str = "USD"
+    impact: str = "high"
+
+
+@app.get("/api/news-events")
+def list_news_events(db: Session = Depends(get_db)):
+    from database import NewsEvent
+    from zoneinfo import ZoneInfo
+    utc, roma = ZoneInfo("UTC"), ZoneInfo("Europe/Rome")
+    events = db.query(NewsEvent).order_by(NewsEvent.event_time).all()
+    now = datetime.utcnow()
+    return {
+        "events": [{
+            "id": e.id, "name": e.name,
+            "event_time_utc": e.event_time.isoformat(),
+            "event_time_roma": e.event_time.replace(tzinfo=utc).astimezone(roma).strftime("%Y-%m-%d %H:%M"),
+            "currency": e.currency, "impact": e.impact,
+            "flatten": bool(e.flatten), "flatten_done": bool(e.flatten_done),
+            "past": e.event_time < now,
+        } for e in events],
+    }
+
+
+@app.post("/api/news-events")
+def add_news_event(body: NewsEventIn, db: Session = Depends(get_db)):
+    from database import NewsEvent
+    from zoneinfo import ZoneInfo
+    try:
+        roma_dt = datetime.strptime(body.event_time_roma, "%Y-%m-%d %H:%M")
+        utc_dt = roma_dt.replace(tzinfo=ZoneInfo("Europe/Rome")).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Formato data: YYYY-MM-DD HH:MM (ora Roma)")
+    ev = NewsEvent(name=body.name, event_time=utc_dt, currency=body.currency,
+                   impact=body.impact, flatten=body.flatten)
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+    return {"ok": True, "id": ev.id}
+
+
+@app.delete("/api/news-events/{event_id}")
+def delete_news_event(event_id: int, db: Session = Depends(get_db)):
+    from database import NewsEvent
+    ev = db.query(NewsEvent).filter(NewsEvent.id == event_id).first()
+    if not ev:
+        raise HTTPException(status_code=404, detail="Evento non trovato")
+    db.delete(ev)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/news-filter/status")
+def news_filter_status(db: Session = Depends(get_db)):
+    import news_filter as nf
+    blocked = nf.entry_blocked(db=db)
+    ev_fl = nf.flatten_due(db=db)
+    return {
+        "enabled": nf.is_enabled(db),
+        "friday_flatten_enabled": nf.is_friday_flatten_enabled(db),
+        "entry_blocked": blocked,
+        "flatten_pending": ev_fl.name if ev_fl else None,
+        "friday_flatten_due": nf.friday_flatten_due(db=db),
+    }
 
 
 @app.get("/api/performance/equity-curve")
@@ -992,6 +1071,8 @@ def get_risk_settings_api(db: Session = Depends(get_db)):
         "entry_tolerance_pips": getattr(rs, "entry_tolerance_pips", None) or 3.0,
         "trail_stop_enabled": bool(getattr(rs, "trail_stop_enabled", False)),
         "max_margin_pct_per_trade": getattr(rs, "max_margin_pct_per_trade", None) or 50.0,
+        "news_filter_enabled": bool(getattr(rs, "news_filter_enabled", True) if getattr(rs, "news_filter_enabled", None) is not None else True),
+        "friday_flatten_enabled": bool(getattr(rs, "friday_flatten_enabled", True) if getattr(rs, "friday_flatten_enabled", None) is not None else True),
     }
 
 
@@ -1008,6 +1089,8 @@ async def update_risk_settings(body: RiskSettingsIn, db: Session = Depends(get_d
     rs.entry_tolerance_pips = body.entry_tolerance_pips
     rs.trail_stop_enabled = body.trail_stop_enabled
     rs.max_margin_pct_per_trade = body.max_margin_pct_per_trade
+    rs.news_filter_enabled = body.news_filter_enabled
+    rs.friday_flatten_enabled = body.friday_flatten_enabled
     rs.updated_at = datetime.utcnow()
     db.commit()
     async def _run(): await asyncio.get_event_loop().run_in_executor(None, risk_module.recalculate_all)

@@ -484,6 +484,20 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         _append_trade_log_mt5(sig, "mt5_skip", "auto_trade disabled")
         return []
 
+    # ─── NEWS FILTER Tier 1 (post-mortem #570) ───
+    # Nessun nuovo ordine (market o pending) nella finestra di una news
+    # high-impact. Copre TUTTE le vie: signal, reenter, replay, enter_now,
+    # retry manuale — tutte passano da qui.
+    try:
+        import news_filter as _nf
+        _news_reason = _nf.entry_blocked()
+        if _news_reason:
+            log(f"#{sig.id} place_orders: BLOCCATO da news filter: {_news_reason}")
+            _append_trade_log_mt5(sig, "news_blocked", _news_reason)
+            return []
+    except Exception as _nf_e:
+        log(f"#{sig.id} news filter check err (procedo): {_nf_e}")
+
     mt5 = _get_mt5()
     if mt5 is None:
         log(f"#{sig.id} place_orders: _get_mt5() returned None (account={MT5_ACCOUNT}, server={MT5_SERVER}, path={MT5_PATH})")
