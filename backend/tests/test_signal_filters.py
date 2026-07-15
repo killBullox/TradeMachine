@@ -543,3 +543,63 @@ class TestModifySlFloatCast:
         # e produce float
         v = round(float(4116), 2)
         assert isinstance(v, float) and v == 4116.0
+
+
+class TestPaperResiduoSLPostTP:
+    """Bug #571: paper in tp1 con SL a BE toccato → residuo va chiuso."""
+
+    def test_residuo_chiuso_su_sl_post_tp1(self, filter_db, fake_mt5):
+        from database import Signal
+        from price_service import _update_realtime, _append_event
+        from datetime import datetime
+        db = filter_db()
+        try:
+            now = datetime.utcnow()
+            sig = Signal(
+                telegram_msg_id=99900, symbol="GBPJPY", direction="buy",
+                entry_price=217.40, entry_price_high=217.45,
+                actual_entry_price=217.424, stoploss=217.434,  # BE post-TP1
+                tp1=217.55, tp2=217.70, tp3=217.85,
+                status="tp1", position_size=6.87,
+                is_filtered=True, filter_reason="test", raw_message="t",
+                created_at=now, entered_at=now,
+            )
+            import json as _j
+            sig.trade_log = _j.dumps([
+                {"ts": now.isoformat()+"Z", "event": "entry", "price": 217.424},
+                {"ts": now.isoformat()+"Z", "event": "tp1", "price": 217.55},
+            ])
+            db.add(sig); db.commit(); db.refresh(sig)
+            # prezzo sotto il BE → residuo chiuso
+            _update_realtime(db, sig, price=217.38, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.closed_at is not None, "residuo NON chiuso!"
+            assert sig.status == "tp1"          # parziale resta
+            assert sig.exit_price == 217.434    # fill al BE
+            assert sig.pnl_usd is not None
+        finally:
+            db.close()
+
+    def test_residuo_resta_aperto_sopra_sl(self, filter_db, fake_mt5):
+        from database import Signal
+        from price_service import _update_realtime
+        from datetime import datetime
+        import json as _j
+        db = filter_db()
+        try:
+            now = datetime.utcnow()
+            sig = Signal(
+                telegram_msg_id=99901, symbol="GBPJPY", direction="buy",
+                entry_price=217.40, actual_entry_price=217.424, stoploss=217.434,
+                tp1=217.55, tp2=217.70, tp3=217.85,
+                status="tp1", position_size=6.87,
+                is_filtered=True, filter_reason="test", raw_message="t",
+                created_at=now, entered_at=now,
+                trade_log=_j.dumps([{"ts": now.isoformat()+"Z", "event": "entry", "price": 217.424}]),
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            _update_realtime(db, sig, price=217.60, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.closed_at is None  # sopra il BE: resta vivo
+        finally:
+            db.close()

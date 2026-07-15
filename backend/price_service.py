@@ -966,6 +966,23 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
             log(f"[Monitor] SL HIT {sig.symbol} #{sig.id} @ {price:.5f}")
             return
 
+    # PAPER post-TP1/TP2: nei reali i residui hanno lo SL sul broker che chiude
+    # da solo (BE/trail). Nei paper NESSUNO chiude i residui se lo SL viene
+    # toccato dopo un TP parziale (bug #571: BUY in tp1 con BE 217.434 e prezzo
+    # sotto, floating -165$ senza fine). Chiudi il residuo allo SL: status
+    # resta tpN (parziale incassato), closed_at settato.
+    if is_paper and sig.status in ("tp1", "tp2") and sig.stoploss:
+        if (is_buy and price <= sig.stoploss) or (not is_buy and price >= sig.stoploss):
+            sig.exit_price = sig.stoploss
+            sig.closed_at = now
+            sig.updated_at = now
+            _append_event(sig, "sl_hit", sig.stoploss, now)
+            _recalc_paper(sig)
+            db.add(sig)
+            db.commit()
+            log(f"[Monitor] paper #{sig.id} {sig.symbol} residuo chiuso a SL {sig.stoploss} (status {sig.status})")
+            return
+
     # TP checks — prende il più alto raggiunto
     tps = [(3, sig.tp3), (2, sig.tp2), (1, sig.tp1)]
     for tp_num, tp_price in tps:
