@@ -206,6 +206,25 @@ REENTER_PATTERN = re.compile(
 # rientrera' in futuro (bug #568 14/07: "will plan re-entry here" eseguito
 # come reenter immediato → -177$ in 24s). Presente/imperativo ("re-enter now",
 # "can re-enter here") resta reenter.
+# Messaggio TG che sposta ESPLICITAMENTE lo SL a un TP specifico ("SL to TP2",
+# "move stop to target 1"). In modalita' trail-a-BE questa e' l'unica eccezione:
+# si onora il TP indicato invece di BE. Richiede contesto SL/stop + TP/target N
+# ravvicinati (max ~20 char) per evitare falsi positivi.
+TRAIL_TO_TP_PATTERN = re.compile(
+    r'\b(?:sl|s/l|stop\s*-?\s*loss|stoploss|stop)\b[^\n]{0,20}?\b(?:tp|t/p|target)\s*([123])\b',
+    re.IGNORECASE
+)
+
+
+def detect_explicit_tp_trail(text: str):
+    """Ritorna il numero di TP (1/2/3) se il messaggio dice esplicitamente di
+    spostare lo SL a quel TP, altrimenti None."""
+    if not text:
+        return None
+    m = TRAIL_TO_TP_PATTERN.search(text)
+    return int(m.group(1)) if m else None
+
+
 REENTER_FUTURE_PATTERN = re.compile(
     r'\b(?:will\s+(?:plan|re.?enter|look|wait|watch)'
     r'|plan(?:ning)?\s+(?:to\s+|a\s+)?re.?ent(?:er|ry)'

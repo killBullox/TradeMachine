@@ -1927,6 +1927,37 @@ def get_current_price(symbol: str) -> Optional[float]:
     return None
 
 
+def compute_trail_sl(sig, pip_size: float, tp_level_hit: int = 0,
+                     message: str = None):
+    """Livello di SL per il trail. Regola (decisione 16/07, backtest XAUUSD +38%):
+      - DEFAULT: dopo il primo TP, SL a BE (+1 pip nel verso del profitto), e
+        NON progredisce. Lascia respirare il residuo verso i TP successivi.
+      - ECCEZIONE: se il messaggio TG dice ESPLICITAMENTE di spostare lo SL a
+        un TP ("SL to TP2"), si onora quel TP.
+    Ritorna (target_sl, label) oppure (None, None) se non calcolabile.
+    tp_level_hit resta nella firma per compatibilita' ma non attiva piu' la
+    progressione automatica (era la vecchia logica TP2->TP1)."""
+    if not sig.actual_entry_price or pip_size <= 0:
+        return None, None
+    is_buy = (sig.direction or "buy").lower() == "buy"
+    tps = [sig.tp1, sig.tp2, sig.tp3]
+    anchor = None
+    label = "BE"
+    try:
+        from parser import detect_explicit_tp_trail
+        exp = detect_explicit_tp_trail(message) if message else None
+    except Exception:
+        exp = None
+    if exp and tps[exp - 1] is not None:
+        anchor = float(tps[exp - 1])
+        label = f"TP{exp}(esplicito)"
+    else:
+        anchor = float(sig.actual_entry_price)
+        label = "BE"
+    target_sl = round(anchor + pip_size, 5) if is_buy else round(anchor - pip_size, 5)
+    return target_sl, label
+
+
 def fix_price_typo(value: float, anchor_price: float, digits: int = 2,
                    min_allowed: Optional[float] = None,
                    max_allowed: Optional[float] = None,
@@ -3127,10 +3158,10 @@ def sync_positions() -> list:
                         pass
 
                     if pip_size > 0:
-                        if tp_levels_hit >= 2 and sig.tp1:
-                            target_sl = round(float(sig.tp1) + pip_size, 5) if is_buy else round(float(sig.tp1) - pip_size, 5)
-                            trail_label = "TP1+1pip"
-                        else:
+                        # Trail a BE (no progressione). L'auto-trail non ha un
+                        # messaggio del trader, quindi nessuna eccezione TP: BE.
+                        target_sl, trail_label = compute_trail_sl(sig, pip_size, tp_levels_hit, message=None)
+                        if target_sl is None:
                             target_sl = round(sig.actual_entry_price + pip_size, 5) if is_buy else round(sig.actual_entry_price - pip_size, 5)
                             trail_label = "BE+1pip"
 

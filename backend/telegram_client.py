@@ -1177,25 +1177,18 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 db.add(sig)
                                 log(f"[TargetDone] paper #{sig.id} pending → cancelled")
                             elif trail_explicit and sig.status in ("open", "tp1", "tp2"):
-                                # Trail esplicito: SL a BE/TP1/TP2 +1pip come i reali
+                                # Trail a BE (default) + eccezione TP esplicito, come i reali
                                 try:
                                     from risk import get_spec as _gspec
                                     pip_p = _gspec(sig.symbol)["pip"]
-                                    is_buy_p = (sig.direction or "").lower() == "buy"
-                                    if tp_level_hit >= 3 and sig.tp2:
-                                        anchor_p, lbl = float(sig.tp2), "TP2+1pip"
-                                    elif tp_level_hit >= 2 and sig.tp1:
-                                        anchor_p, lbl = float(sig.tp1), "TP1+1pip"
-                                    else:
-                                        anchor_p, lbl = (sig.actual_entry_price or sig.entry_price), "BE+1pip"
-                                    if anchor_p and pip_p:
-                                        new_sl_p = round(anchor_p + pip_p, 5) if is_buy_p else round(anchor_p - pip_p, 5)
+                                    new_sl_p, lbl = mt5_trader.compute_trail_sl(sig, pip_p, tp_level_hit, message=text)
+                                    if new_sl_p is not None:
                                         old_sl_p = sig.stoploss
                                         sig.stoploss = new_sl_p
                                         sig.updated_at = datetime.utcnow()
                                         _append_trade_log(sig, "sl_move_trail_tg",
-                                            f"TG trail esplicito (paper): SL {old_sl_p} → {new_sl_p} ({lbl})",
-                                            {"new_sl": new_sl_p, "old_sl": old_sl_p, "trail_label": lbl, "trigger": "trail_explicit_paper"})
+                                            f"TG trail (paper): SL {old_sl_p} → {new_sl_p} ({lbl})",
+                                            {"new_sl": new_sl_p, "old_sl": old_sl_p, "trail_label": lbl, "trigger": "trail_paper"})
                                         db.add(sig)
                                         log(f"[TargetDone] paper #{sig.id} SL → {new_sl_p} ({lbl})")
                                 except Exception as _pe:
@@ -1217,17 +1210,8 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 from mt5_trader import MT5_SYMBOL_MAP as _MAP
                                 sym_info = mt5_inst.symbol_info(_MAP.get(sig.symbol.upper(), sig.symbol))
                                 pip_size = sym_info.point * 10 if sym_info else 0
-                                is_buy = (sig.direction or "").lower() == "buy"
-                                anchor = None
-                                if tp_level_hit >= 3 and sig.tp2:
-                                    anchor = float(sig.tp2); trail_label = "TP2+1pip"
-                                elif tp_level_hit >= 2 and sig.tp1:
-                                    anchor = float(sig.tp1); trail_label = "TP1+1pip"
-                                else:
-                                    anchor = sig.actual_entry_price or sig.entry_price
-                                    trail_label = "BE+1pip"
-                                if anchor and pip_size > 0:
-                                    be_sl = round(anchor + pip_size, 5) if is_buy else round(anchor - pip_size, 5)
+                                # Trail a BE (default) + eccezione TP esplicito nel msg.
+                                be_sl, trail_label = mt5_trader.compute_trail_sl(sig, pip_size, tp_level_hit, message=text)
                             except Exception:
                                 be_sl = None
                         if mt5_inst:
@@ -1350,12 +1334,9 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                 from risk import get_spec as _gspec2
                                 pip_pp = _gspec2(sig.symbol)["pip"]
                                 is_buy_pp = (sig.direction or "").lower() == "buy"
-                                if sig.status == "tp2" and sig.tp1:
-                                    anchor_pp, lbl_pp = float(sig.tp1), "TP1+1pip"
-                                else:
-                                    anchor_pp, lbl_pp = (sig.actual_entry_price or sig.entry_price), "BE+1pip"
-                                if anchor_pp and pip_pp:
-                                    tsl = round(anchor_pp + pip_pp, 5) if is_buy_pp else round(anchor_pp - pip_pp, 5)
+                                # Trail a BE (default) + eccezione TP esplicito nel msg
+                                tsl, lbl_pp = mt5_trader.compute_trail_sl(sig, pip_pp, 0, message=text)
+                                if tsl is not None:
                                     cur = sig.stoploss
                                     degrade = cur is not None and ((is_buy_pp and tsl <= cur) or (not is_buy_pp and tsl >= cur))
                                     if not degrade:
@@ -1396,17 +1377,10 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         if pip2 <= 0:
                             continue
                         is_buy2 = (sig.direction or "").lower() == "buy"
-                        # Trail = lock del TP PRECEDENTE (passo indietro).
-                        # status=tp2 (TP2 hit) → SL = TP1+1pip (locka TP1)
-                        # status=tp1 (TP1 hit) → SL = entry+1pip (BE+1pip)
-                        if sig.status == "tp2" and sig.tp1:
-                            anchor2 = float(sig.tp1); label2 = "TP1+1pip"
-                        else:
-                            anchor2 = sig.actual_entry_price or sig.entry_price
-                            label2 = "BE+1pip"
-                        if not anchor2:
+                        # Trail a BE (default) + eccezione TP esplicito nel msg.
+                        target_sl2, label2 = mt5_trader.compute_trail_sl(sig, pip2, 0, message=text)
+                        if target_sl2 is None:
                             continue
-                        target_sl2 = round(anchor2 + pip2, 5) if is_buy2 else round(anchor2 - pip2, 5)
                         # Per BUY non degradare: solo se nuovo SL > corrente
                         cur_sl2 = sig.stoploss
                         if cur_sl2 is not None:
