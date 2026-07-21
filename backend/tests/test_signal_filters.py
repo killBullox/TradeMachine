@@ -603,3 +603,67 @@ class TestPaperResiduoSLPostTP:
             assert sig.closed_at is None  # sopra il BE: resta vivo
         finally:
             db.close()
+
+
+class TestNoRiprocessoChiusi:
+    """Bug #592: paper chiuso post-TP1 (closed_at set, status tp1) veniva
+    ripescato dal monitor ogni 15s → sl_hit duplicati all'infinito, pnl -437k."""
+
+    def test_paper_chiuso_non_riprocessato(self, filter_db, fake_mt5):
+        from database import Signal
+        from price_service import _update_realtime
+        from datetime import datetime
+        import json as _j
+        db = filter_db()
+        try:
+            now = datetime.utcnow()
+            sig = Signal(
+                telegram_msg_id=99950, symbol="GBPJPY", direction="buy",
+                entry_price=218.55, actual_entry_price=218.589, stoploss=218.40,
+                tp1=218.70, tp2=218.85, tp3=219.00,
+                status="tp1", position_size=4.07,
+                exit_price=218.40, closed_at=now,     # gia' chiuso
+                is_filtered=True, filter_reason="test", raw_message="t",
+                created_at=now, entered_at=now,
+                trade_log=_j.dumps([
+                    {"ts": now.isoformat()+"Z", "event": "entry", "price": 218.589},
+                    {"ts": now.isoformat()+"Z", "event": "tp1", "price": 218.70},
+                    {"ts": now.isoformat()+"Z", "event": "sl_hit", "price": 218.40},
+                ]),
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            before = len(_j.loads(sig.trade_log))
+            # 5 cicli di monitor col prezzo sotto lo SL: NON deve aggiungere nulla
+            for _ in range(5):
+                _update_realtime(db, sig, price=218.30, now=datetime.utcnow())
+            db.refresh(sig)
+            after = len(_j.loads(sig.trade_log))
+            assert after == before, f"eventi duplicati! {before} -> {after}"
+        finally:
+            db.close()
+
+    def test_reale_con_ticket_mai_toccato(self, filter_db, fake_mt5):
+        """Garanzia sui REALI: un trade con ticket MT5 non viene toccato dal
+        monitor, ne' prima ne' dopo il fix."""
+        from database import Signal
+        from price_service import _update_realtime
+        from datetime import datetime
+        db = filter_db()
+        try:
+            now = datetime.utcnow()
+            sig = Signal(
+                telegram_msg_id=99951, symbol="XAUUSD", direction="buy",
+                entry_price=4000.0, actual_entry_price=4001.0, stoploss=3995.0,
+                tp1=4004.0, tp2=4008.0, tp3=4011.0,
+                status="open", position_size=1.41,
+                mt5_ticket=123456, mt5_tickets="[123456,123457,123458]",
+                is_filtered=False, raw_message="t", created_at=now, entered_at=now,
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            # prezzo sotto lo SL: un paper si chiuderebbe, un reale NO
+            _update_realtime(db, sig, price=3990.0, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.status == "open", "monitor ha toccato un trade REALE!"
+            assert sig.closed_at is None
+        finally:
+            db.close()

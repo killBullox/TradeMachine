@@ -840,8 +840,17 @@ def _news_protection_tick():
 async def _check_open_signals():
     db = SessionLocal()
     try:
+        # closed_at IS NULL: un trade gia' chiuso non va MAI riprocessato.
+        # Serve perche' i paper chiusi post-TP1 restano in status tp1/tp2 per
+        # conservare il parziale incassato (bug #592: senza questo filtro il
+        # monitor li ripescava ogni 15s riappendendo sl_hit all'infinito →
+        # 1315 eventi duplicati e pnl a -437k).
+        # SICURO SUI REALI: _update_realtime esce subito per i trade con ticket
+        # MT5 (o con MT5 attivo), quindi per loro questo filtro e' un no-op;
+        # il loro stato lo gestisce sync_positions con query separate.
         signals = db.query(Signal).filter(
-            Signal.status.in_(["pending", "open", "tp1", "tp2"])
+            Signal.status.in_(["pending", "open", "tp1", "tp2"]),
+            Signal.closed_at.is_(None),
         ).all()
 
         if not signals:
@@ -888,6 +897,10 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
     """State machine real-time per un singolo segnale."""
     # Segnali MT5: stato autorevole da sync_positions, non toccare
     if sig.mt5_ticket or sig.mt5_tickets:
+        return
+    # Trade gia' chiuso: mai riprocessare (doppia sicurezza oltre al filtro
+    # nella query del monitor — bug #592 dei sl_hit duplicati all'infinito).
+    if sig.closed_at is not None:
         return
     is_paper = bool(getattr(sig, "is_filtered", False))
     # Segnali senza ticket con MT5 abilitato: sono stati rigettati/mancati, non trackare.
