@@ -667,3 +667,65 @@ class TestNoRiprocessoChiusi:
             assert sig.closed_at is None
         finally:
             db.close()
+
+
+class TestNuovoSimboloAutoFiltrato:
+    """Simbolo mai tradato → filtrato di default + aggiunto a excluded_symbols
+    (post-mortem #597 EURGBP: primo signal di un simbolo nuovo finiva sul reale)."""
+
+    def _mk(self, SessionLocal, symbol, sid_offset=0):
+        from database import Signal
+        from datetime import datetime
+        db = SessionLocal()
+        try:
+            sig = Signal(
+                telegram_msg_id=90000 + sid_offset, symbol=symbol, direction="buy",
+                entry_price=1.0, stoploss=0.99, tp1=1.01, tp2=1.02, tp3=1.03,
+                status="pending", raw_message="t", created_at=datetime.utcnow(),
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            return sig.id
+        finally:
+            db.close()
+
+    def test_simbolo_mai_visto_e_nuovo(self, filter_db):
+        from signal_filters import is_symbol_ever_traded
+        sid = self._mk(filter_db, "EURGBP")
+        db = filter_db()
+        try:
+            # escludendo se stesso, EURGBP non e' mai apparso → nuovo
+            assert is_symbol_ever_traded("EURGBP", db, exclude_signal_id=sid) is False
+        finally:
+            db.close()
+
+    def test_simbolo_gia_apparso_non_nuovo(self, filter_db):
+        from signal_filters import is_symbol_ever_traded
+        first = self._mk(filter_db, "EURGBP", 1)
+        second = self._mk(filter_db, "EURGBP", 2)
+        db = filter_db()
+        try:
+            # il secondo EURGBP ha un precedente → NON nuovo
+            assert is_symbol_ever_traded("EURGBP", db, exclude_signal_id=second) is True
+        finally:
+            db.close()
+
+    def test_auto_exclude_aggiunge_a_lista(self, filter_db):
+        from signal_filters import auto_exclude_symbol, get_filter_config
+        db = filter_db()
+        try:
+            auto_exclude_symbol("EURGBP", db)
+        finally:
+            db.close()
+        cfg = get_filter_config()
+        assert "EURGBP" in cfg["excluded_symbols"]
+
+    def test_xauusd_gia_tradato_non_impattato(self, filter_db):
+        """Garanzia: XAUUSD (gia' tradato) non viene mai visto come nuovo."""
+        from signal_filters import is_symbol_ever_traded
+        self._mk(filter_db, "XAUUSD", 1)  # storico
+        new_xau = self._mk(filter_db, "XAUUSD", 2)
+        db = filter_db()
+        try:
+            assert is_symbol_ever_traded("XAUUSD", db, exclude_signal_id=new_xau) is True
+        finally:
+            db.close()

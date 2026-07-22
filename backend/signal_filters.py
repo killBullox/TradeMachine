@@ -82,6 +82,27 @@ def get_filter_config(db=None) -> dict:
     }
 
 
+def is_symbol_ever_traded(symbol: str, db, exclude_signal_id=None) -> bool:
+    """True se il simbolo e' gia' apparso in un signal PRECEDENTE (qualsiasi
+    stato, reale o paper). Usato per riconoscere i simboli MAI visti prima:
+    quelli nuovi vanno filtrati di default finche' l'utente non li sblocca."""
+    from database import Signal
+    q = db.query(Signal).filter(Signal.symbol == symbol.upper())
+    if exclude_signal_id is not None:
+        q = q.filter(Signal.id != exclude_signal_id)
+    return db.query(q.exists()).scalar()
+
+
+def auto_exclude_symbol(symbol: str, db) -> None:
+    """Aggiunge il simbolo alla lista excluded_symbols (persistente) se non
+    gia' presente. Cosi' anche i signal FUTURI dello stesso simbolo restano
+    filtrati finche' l'utente non lo rimuove dalla UI."""
+    excluded, _ = _load_filter_config(db)
+    if symbol.upper() not in excluded:
+        excluded.append(symbol.upper())
+        set_filter_config(excluded_symbols=excluded, db=db)
+
+
 def set_filter_config(excluded_symbols: list = None, allowed_hours: list = None, db=None):
     """Aggiorna i filtri in DB. Passa None per lasciare un campo invariato.
     Passa [] o lista vuota per pulire/azzerare."""

@@ -979,6 +979,23 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         log(f"[Filter] #{sig.id} {sig.symbol} → is_filtered=True ({_filter_reason})")
                 except Exception as _e:
                     log(f"[Filter] errore check signal #{getattr(sig,'id','?')}: {_e}")
+            # NUOVO SIMBOLO MAI TRADATO: filtrato di default (no MT5) finche' l'utente
+            # non lo sblocca dalla UI. Evita che un simbolo mai visto (#597 EURGBP)
+            # finisca sul conto reale senza approvazione. Lo aggiunge alla lista
+            # esclusi persistente, cosi' anche i signal futuri restano filtrati.
+            if sig and not getattr(sig, "is_filtered", False):
+                try:
+                    from signal_filters import is_symbol_ever_traded, auto_exclude_symbol
+                    if not is_symbol_ever_traded(sig.symbol, db, exclude_signal_id=sig.id):
+                        auto_exclude_symbol(sig.symbol, db)
+                        reason = f"Nuovo simbolo mai tradato ({sig.symbol.upper()}): filtrato di default fino a sblocco manuale"
+                        sig.is_filtered = True
+                        sig.filter_reason = reason
+                        _append_trade_log(sig, "filtered", reason)
+                        db.add(sig); db.commit()
+                        log(f"[Filter] #{sig.id} {sig.symbol} NUOVO simbolo → is_filtered=True + aggiunto a excluded_symbols")
+                except Exception as _e:
+                    log(f"[Filter] errore check nuovo simbolo #{getattr(sig,'id','?')}: {_e}")
             # Auto-trading: piazza ordine MT5 se abilitato (skip se filtrato)
             if sig and not getattr(sig, "is_filtered", False):
                 try:
@@ -1386,6 +1403,21 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         if cur_sl2 is not None:
                             if is_buy2 and target_sl2 <= cur_sl2: continue
                             if not is_buy2 and target_sl2 >= cur_sl2: continue
+                        # GUARDRAIL (l'istruzione book/secure puo' arrivare dall'LLM):
+                        # muovo lo SL SOLO se il trade e' DAVVERO in profitto secondo i
+                        # NOSTRI dati (prezzo oltre l'entry nel verso giusto), non fidandomi
+                        # della sola interpretazione del messaggio. Un eventuale falso
+                        # positivo dell'LLM non puo' cosi' toccare un trade non in profitto.
+                        try:
+                            cur_px2 = mt5_trader.get_current_price(sig.symbol)
+                            entry2 = sig.actual_entry_price or sig.entry_price
+                            if cur_px2 and entry2:
+                                in_profit2 = (is_buy2 and cur_px2 > entry2) or (not is_buy2 and cur_px2 < entry2)
+                                if not in_profit2:
+                                    log(f"[TrailStandalone] #{sig.id} {sig.symbol} NON in profitto (px={cur_px2} entry={entry2}) → skip")
+                                    continue
+                        except Exception:
+                            pass
                         tickets2 = _json.loads(sig.mt5_tickets) if sig.mt5_tickets else [sig.mt5_ticket]
                         moved2 = 0
                         for t in tickets2:
