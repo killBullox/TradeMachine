@@ -80,10 +80,22 @@ CLASSIFICAZIONE TYPE:
   "Near First Target" / "Approaching Target" → status_text="near_target"
   "Safe Trail in Profits" / "Running in profits" / "Hold Book Or Trail Accordingly" /
     "Hold And Trail" / "Book or Trail" / "Trail Accordingly" / "Trail your SL" /
-    qualunque istruzione esplicita a fare trail dello stop loss → status_text="trail_active".
+    "Safe Can Book Here" / "Can Book Here" / "Safe to book" / "Book Here" /
+    "Secure Here" / "Secure Profit" / "Lock Here" / "Lock Profit Now" /
+    qualunque istruzione a MESSA IN SICUREZZA / book / secure / lock del profitto su
+    un trade GIA' APERTO IN PROFITTO → status_text="trail_active".
     IMPORTANTE: questa categoria deve catturare TUTTE le variazioni linguistiche con cui
-    il trader chiede di muovere lo SL in profitto, non solo i pattern letterali sopra.
-  "$XXX Profit Running" → status_text="in_profit"
+    il trader chiede di muovere lo SL in profitto o di mettere in sicurezza, non solo i
+    pattern letterali sopra.
+    DISAMBIGUAZIONE "book": la parola "book" indica MESSA IN SICUREZZA (trail_active)
+    SOLO quando il messaggio si riferisce a un trade gia' aperto e in profitto (tipico:
+    reply al segnale, oppure accompagnato da "profit running", "in profit", "safe").
+    Se invece "book"/"buy"/"sell" introduce un NUOVO ingresso con livelli di prezzo
+    (es. "Book XAUUSD 4121", "Buy near 4000") → NON e' trail_active, e' un signal/enter.
+    PRIORITA': se un messaggio contiene SIA "$XXX Profit Running" SIA un'istruzione di
+    book/secure/trail (es. "$900 Profit Running... Safe Can Book Here"), VINCE
+    l'istruzione → status_text="trail_active" (non "in_profit").
+  "$XXX Profit Running" (SENZA alcuna istruzione di book/secure/trail) → status_text="in_profit"
   Solo "XAUUSD | 4550 To 4555" senza altro → status_text="price_update"
   Altrimenti → status_text="general"
   Estrai price_from e price_to dal pattern "X To Y" o "X to Y" se presente.

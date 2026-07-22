@@ -3158,10 +3158,13 @@ def sync_positions() -> list:
                         pass
 
                     if pip_size > 0:
-                        # Trail a BE (no progressione). L'auto-trail non ha un
-                        # messaggio del trader, quindi nessuna eccezione TP: BE.
-                        target_sl, trail_label = compute_trail_sl(sig, pip_size, tp_levels_hit, message=None)
-                        if target_sl is None:
+                        # AUTO-trail (toggle ON, nessun messaggio trader): logica
+                        # ORIGINALE invariata — progressiva. La modifica a BE vale
+                        # SOLO per i trail guidati dai messaggi del trader.
+                        if tp_levels_hit >= 2 and sig.tp1:
+                            target_sl = round(float(sig.tp1) + pip_size, 5) if is_buy else round(float(sig.tp1) - pip_size, 5)
+                            trail_label = "TP1+1pip"
+                        else:
                             target_sl = round(sig.actual_entry_price + pip_size, 5) if is_buy else round(sig.actual_entry_price - pip_size, 5)
                             trail_label = "BE+1pip"
 
