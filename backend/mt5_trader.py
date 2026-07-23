@@ -3210,6 +3210,44 @@ def sync_positions() -> list:
                             # cosi' la UI mostra il valore corrente invece dell'originale del segnale.
                             sig.stoploss = target_sl
 
+            # ─── BE a TP1 (feature INDIPENDENTE dall'auto-trail sopra) ───
+            # Appena colpito il primo TP, porta lo SL a BE (+/-1pip) sui ticket
+            # residui e lascia li'. Gated da be_at_tp1_enabled (default ON).
+            # NON dipende da trail_stop_enabled: l'auto-trail resta separato e
+            # invariato. Solo restringimento (mai allarga lo SL).
+            if tp1_hit and open_count > 0 and sig.actual_entry_price:
+                try:
+                    from risk import get_risk_settings as _grs_be
+                    _be_on = bool(_grs_be().get("be_at_tp1_enabled", True))
+                except Exception:
+                    _be_on = True
+                if _be_on:
+                    pip_be = 0.0
+                    try:
+                        _si_be = mt5.symbol_info(MT5_SYMBOL_MAP.get(sig.symbol.upper(), sig.symbol))
+                        if _si_be:
+                            pip_be = _si_be.point * 10
+                    except Exception:
+                        pass
+                    if pip_be > 0:
+                        be_sl = round(sig.actual_entry_price + pip_be, 5) if is_buy else round(sig.actual_entry_price - pip_be, 5)
+                        moved_be = []
+                        for ticket in tickets:
+                            pos_or_ord = open_positions.get(ticket) or pending_orders.get(ticket)
+                            if pos_or_ord is None:
+                                continue
+                            cur = getattr(pos_or_ord, 'sl', None)
+                            if cur is not None and cur > 0:
+                                if is_buy and cur >= be_sl: continue
+                                if not is_buy and cur <= be_sl: continue
+                            if modify_sl(ticket, be_sl, sig.symbol):
+                                moved_be.append(ticket)
+                        if moved_be:
+                            _append_trade_log_mt5(sig, "be_at_tp1",
+                                f"TP1 raggiunto: SL portato a BE {be_sl} sui {len(moved_be)} ticket residui (BE a TP1)",
+                                {"price": be_sl, "tickets": moved_be})
+                            sig.stoploss = be_sl
+
             # Aggiorna P&L live (somma profit aperte + chiuse parziali).
             # GUARD: per signal gia' completed (closed_at settato), NON sovrascrivere
             # pnl_usd. Su cicli sync successivi total_profit puo' tornare 0 perche'

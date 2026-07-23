@@ -136,6 +136,10 @@ class RiskSettings(Base):
     # ─── News filter (post-mortem #570: CPI gap -8166$) ───
     news_filter_enabled = Column(Boolean, default=True)   # blocco entry + flatten attorno a news
     friday_flatten_enabled = Column(Boolean, default=True) # chiusura totale venerdi' sera (weekend gap)
+    # BE a TP1: appena colpito il primo TP, porta lo SL a BE e lascia li'.
+    # Feature INDIPENDENTE dall'auto-trail (trail_stop_enabled): quello resta
+    # com'e' (progressivo). Default ON (backtest XAUUSD +12.7%).
+    be_at_tp1_enabled = Column(Boolean, default=True)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -320,6 +324,9 @@ def init_db():
             conn.commit()
         if "friday_flatten_enabled" not in rs_existing:
             conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN friday_flatten_enabled BOOLEAN DEFAULT 1"))
+            conn.commit()
+        if "be_at_tp1_enabled" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN be_at_tp1_enabled BOOLEAN DEFAULT 1"))
             conn.commit()
         # Migrazione mt5_accounts
         try:

@@ -736,6 +736,7 @@ class RiskSettingsIn(BaseModel):
     max_margin_pct_per_trade: float = 50.0
     news_filter_enabled: bool = True
     friday_flatten_enabled: bool = True
+    be_at_tp1_enabled: bool = True
 
 
 # ─── News events (news filter #570) ─────────────────────────────────────────
@@ -1073,6 +1074,7 @@ def get_risk_settings_api(db: Session = Depends(get_db)):
         "max_margin_pct_per_trade": getattr(rs, "max_margin_pct_per_trade", None) or 50.0,
         "news_filter_enabled": bool(getattr(rs, "news_filter_enabled", True) if getattr(rs, "news_filter_enabled", None) is not None else True),
         "friday_flatten_enabled": bool(getattr(rs, "friday_flatten_enabled", True) if getattr(rs, "friday_flatten_enabled", None) is not None else True),
+        "be_at_tp1_enabled": bool(getattr(rs, "be_at_tp1_enabled", True) if getattr(rs, "be_at_tp1_enabled", None) is not None else True),
     }
 
 
@@ -1091,6 +1093,7 @@ async def update_risk_settings(body: RiskSettingsIn, db: Session = Depends(get_d
     rs.max_margin_pct_per_trade = body.max_margin_pct_per_trade
     rs.news_filter_enabled = body.news_filter_enabled
     rs.friday_flatten_enabled = body.friday_flatten_enabled
+    rs.be_at_tp1_enabled = body.be_at_tp1_enabled
     rs.updated_at = datetime.utcnow()
     db.commit()
     async def _run(): await asyncio.get_event_loop().run_in_executor(None, risk_module.recalculate_all)

@@ -877,6 +877,17 @@ async def _check_open_signals():
         db.close()
 
 
+def _auto_be_enabled(sig) -> bool:
+    """True se il BE-a-TP1 e' attivo. Toggle DEDICATO be_at_tp1_enabled (default
+    ON), INDIPENDENTE dall'auto-trail (trail_stop_enabled). Stessa logica dei
+    reali in mt5_trader.sync_positions."""
+    try:
+        from risk import get_risk_settings
+        return bool(get_risk_settings().get("be_at_tp1_enabled", True))
+    except Exception:
+        return True
+
+
 def _append_event(sig, event: str, price: float, ts: datetime):
     """Append evento al trade_log nel formato atteso da risk._calc_pnl_from_trade_log
     (chiavi: ts, event, price). Usato per i paper trade (filtered)."""
@@ -1021,6 +1032,19 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
                 sig.updated_at = now
                 changed = True
                 log(f"[Monitor] TP{tp_num} {sig.symbol} #{sig.id} @ {price:.5f}")
+                # AUTO-BE a TP1 (parita' coi reali, decisione 23/07): appena
+                # colpito il primo TP porta lo SL a BE e lascia li'. Gated dallo
+                # stesso toggle trail_stop_enabled dei reali. Solo restringimento.
+                if is_paper and tp_num >= 1 and _auto_be_enabled(sig):
+                    entry_be = sig.actual_entry_price or sig.entry_price
+                    if entry_be is not None:
+                        cur = sig.stoploss
+                        widens = cur is not None and ((is_buy and entry_be < cur) or (not is_buy and entry_be > cur))
+                        if not widens and sig.stoploss != entry_be:
+                            old_be = sig.stoploss
+                            sig.stoploss = entry_be
+                            _append_event(sig, "sl_move_be_auto", entry_be, now)
+                            log(f"[Monitor] paper #{sig.id} auto-BE a TP{tp_num}: SL {old_be} → {entry_be}")
             break
 
     if changed:

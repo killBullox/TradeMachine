@@ -137,6 +137,15 @@ function RiskPanel() {
               Weekend flatten (ven 22:45)
             </label>
           </div>
+          <div className="flex items-center gap-2">
+            <input type="checkbox" checked={settings.be_at_tp1_enabled !== false}
+              onChange={e => setSettings(s => ({...s, be_at_tp1_enabled: e.target.checked}))}
+              className="w-4 h-4 rounded" id="be-tp1-toggle" />
+            <label htmlFor="be-tp1-toggle" className="text-xs text-slate-400"
+              title="Appena colpito il TP1, porta lo SL a breakeven sui ticket residui e lascia lì. Indipendente dall'auto-trail. Backtest XAUUSD +12.7%.">
+              BE a TP1 (SL a pari appena TP1)
+            </label>
+          </div>
         </div>
         <div className="flex items-end">
           <div className="w-full">

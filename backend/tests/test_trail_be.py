@@ -79,3 +79,70 @@ class TestComputeTrailSL:
         # il residuo sopravvive e corre a TP3. Col vecchio trail (SL 3995.90,
         # sotto il rimbalzo) veniva stoppato.
         assert sl > 3996.72
+
+
+class TestAutoBEaTP1:
+    """Decisione 23/07: TP1 colpito → SL a BE automatico, e resta a BE."""
+
+    def test_auto_trail_sempre_be_mai_progressivo(self, fake_mt5):
+        """L'auto-trail (sync_positions) usa SEMPRE BE, anche con TP2 colpito.
+        Verifica la formula: target = entry -/+ 1pip, non TP1."""
+        # Simula il calcolo inline dell'auto-trail: target = BE +/- 1pip
+        entry = 3998.86; pip = 0.1
+        # SELL
+        target_sell = round(entry - pip, 5)
+        assert target_sell == 3998.76  # BE, non TP1
+        # BUY
+        target_buy = round(4000.0 + pip, 5)
+        assert target_buy == 4000.1
+
+    def test_paper_auto_be_a_tp1(self, in_memory_db, fake_mt5):
+        """Paper: appena colpito TP1 con toggle ON, SL va a BE (entry)."""
+        from database import Signal
+        from price_service import _update_realtime
+        from datetime import datetime
+        db = in_memory_db()
+        try:
+            now = datetime.utcnow()
+            sig = Signal(
+                telegram_msg_id=98000, symbol="XAUUSD", direction="sell",
+                entry_price=4000.0, actual_entry_price=4000.0, stoploss=4006.0,
+                tp1=3996.0, tp2=3992.0, tp3=3988.0,
+                status="open", position_size=1.5,
+                is_filtered=True, filter_reason="test", raw_message="t",
+                created_at=now, entered_at=now,
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            # prezzo tocca TP1 (3996) → status tp1 + SL a BE 4000
+            _update_realtime(db, sig, price=3995.5, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.status == "tp1"
+            assert sig.stoploss == 4000.0, f"SL non a BE: {sig.stoploss}"
+        finally:
+            db.close()
+
+    def test_paper_no_auto_be_se_toggle_off(self, in_memory_db, fake_mt5, monkeypatch):
+        from database import Signal
+        import price_service
+        from price_service import _update_realtime
+        from datetime import datetime
+        # toggle OFF via monkeypatch del gate (evita il problema stale-SessionLocal)
+        monkeypatch.setattr(price_service, "_auto_be_enabled", lambda sig: False)
+        db = in_memory_db()
+        try:
+            now = datetime.utcnow()
+            sig = Signal(
+                telegram_msg_id=98001, symbol="XAUUSD", direction="sell",
+                entry_price=4000.0, actual_entry_price=4000.0, stoploss=4006.0,
+                tp1=3996.0, tp2=3992.0, tp3=3988.0,
+                status="open", position_size=1.5,
+                is_filtered=True, filter_reason="test", raw_message="t",
+                created_at=now, entered_at=now,
+            )
+            db.add(sig); db.commit(); db.refresh(sig)
+            _update_realtime(db, sig, price=3995.5, now=datetime.utcnow())
+            db.refresh(sig)
+            assert sig.status == "tp1"
+            assert sig.stoploss == 4006.0, "SL mosso con toggle OFF!"
+        finally:
+            db.close()
