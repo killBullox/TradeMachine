@@ -180,6 +180,21 @@ def _append_trade_log(sig, event: str, detail: str, extra: dict = None):
     sig.trade_log = _json.dumps(log_list)
 
 
+# Anti-churn (Fix #613/#616): un repost con livelli identici (entro 0.3%) entro
+# questa finestra da una posizione GIA' aperta -> si tiene il vecchio e si salta
+# il nuovo, invece di chiudere in perdita e riaprire un trade equivalente.
+CHURN_WINDOW_MIN = 10
+
+
+def keep_old_on_rapid_duplicate(opened_at, now, has_open_pos, window_min=CHURN_WINDOW_MIN):
+    """True se il vecchio trade va TENUTO (e il repost saltato): posizione aperta
+    e apertura entro `window_min` minuti. Puro, per testabilita'."""
+    if not has_open_pos or opened_at is None:
+        return False
+    age_min = (now - opened_at).total_seconds() / 60.0
+    return 0 <= age_min <= window_min
+
+
 def _save_signal(db, parsed: ParsedSignal, msg_id: int):
     # Duplicato per stesso msg_id
     existing = db.query(Signal).filter(Signal.telegram_msg_id == msg_id).first()
@@ -813,6 +828,24 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             in_strong_profit = dir_ok and progress > 0.5
                     if in_strong_profit:
                         log(f"[Duplicate] msg={msg_id} match #{cand.id} ma in profitto >50% verso TP1 → SKIP nuovo, tieni vecchio")
+                        return
+                    # ─── ANTI-CHURN repost rapido (Fix #613/#616) ───
+                    # Livelli identici (entro 0.3%) entro CHURN_WINDOW_MIN da una
+                    # posizione GIA' aperta: chiuderla per riaprire un trade
+                    # equivalente realizzerebbe solo la perdita corrente + doppio
+                    # spread e produrrebbe due trade dallo stesso segnale. Tieni il
+                    # vecchio, salta il nuovo. Rischio invariato (vecchio gia'
+                    # dimensionato a target). Solo posizioni gia' fillate: un pending
+                    # non ancora riempito non ha churn (nessuna perdita realizzata).
+                    has_open_pos = any(mt5_inst_dup.positions_get(ticket=t) for t in active_tickets)
+                    _opened = cand.entered_at or cand.created_at
+                    if keep_old_on_rapid_duplicate(_opened, datetime.utcnow(), has_open_pos):
+                        _age = round((datetime.utcnow() - _opened).total_seconds() / 60.0, 1)
+                        _append_trade_log(cand, "duplicate_kept_old",
+                            f"Repost identico {_age}min dopo apertura: tengo il vecchio, salto il nuovo (anti-churn #613/#616).",
+                            {"duplicate_msg": msg_id, "age_min": _age})
+                        db.add(cand); db.commit()
+                        log(f"[Duplicate] msg={msg_id} match #{cand.id} aperto {_age}min fa → tengo vecchio, salto nuovo (anti-churn)")
                         return
                     # Tenta close del vecchio
                     cancelled_pend = 0; closed_pos = 0; failed_tk = []

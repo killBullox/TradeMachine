@@ -1039,19 +1039,28 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
                     else:
                         log(f"#{sig.id} TP{i}={tp_f} fuori scala ma {len(candidates)} candidati ambigui senza proiezione - lascio com'e'")
 
-    # Validazione coerenza direzione: scarta singoli TP ancora invalidi
+    # Validazione coerenza direzione: prima TENTA di correggere i TP dal lato
+    # sbagliato (typo single-digit ancorato all'ordinamento dei target, Fix #609),
+    # poi scarta solo quelli ancora invalidi.
     for i in range(1, 4):
         tp_val = getattr(sig, f'tp{i}', None)
         if tp_val is None:
             continue
         tp_f = float(tp_val)
-        if is_buy and tp_f <= float(entry):
-            log(f"#{sig.id} TP{i}={tp_f} sotto entry {entry} (BUY) — TP{i} scartato")
-            _append_trade_log_mt5(sig, "mt5_tp_skip", f"TP{i}={tp_f} sotto entry {entry} — scartato")
-            setattr(sig, f'tp{i}', None)
-        elif not is_buy and tp_f >= float(entry):
-            log(f"#{sig.id} TP{i}={tp_f} sopra entry {entry} (SELL) — TP{i} scartato")
-            _append_trade_log_mt5(sig, "mt5_tp_skip", f"TP{i}={tp_f} sopra entry {entry} — scartato")
+        wrong_side = (is_buy and tp_f <= float(entry)) or (not is_buy and tp_f >= float(entry))
+        if not wrong_side:
+            continue
+        _tps = {j: getattr(sig, f'tp{j}', None) for j in (1, 2, 3)}
+        fixed = fix_tp_by_ordering(tp_f, i, _tps, float(entry), is_buy, digits)
+        if fixed is not None:
+            log(f"#{sig.id} TP{i}={tp_f} dal lato sbagliato — corretto a {fixed} (typo, ordinamento target)")
+            _append_trade_log_mt5(sig, "mt5_tp_fix",
+                f"TP{i} corretto da {tp_f} a {fixed} (typo single-digit, ancorato all'ordinamento dei target)")
+            setattr(sig, f'tp{i}', fixed)
+        else:
+            side = "sotto" if is_buy else "sopra"
+            log(f"#{sig.id} TP{i}={tp_f} {side} entry {entry} — TP{i} scartato")
+            _append_trade_log_mt5(sig, "mt5_tp_skip", f"TP{i}={tp_f} {side} entry {entry} — scartato")
             setattr(sig, f'tp{i}', None)
 
     entry = _round_price(float(entry), digits)
@@ -1353,7 +1362,23 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     ep_low_f  = float(sig.entry_price)      if sig.entry_price      else None
     ep_high_f = float(sig.entry_price_high) if sig.entry_price_high else None
     if ep_low_f and ep_high_f:
-        size_entry = max(ep_low_f, ep_high_f) if is_buy else min(ep_low_f, ep_high_f)
+        _tp1c = float(sig.tp1) if sig.tp1 else None
+        _slc = float(sl_raw) if sl_raw else None
+        _cur = None
+        try:
+            _tk = mt5.symbol_info_tick(mt5_sym)
+            if _tk:
+                _cur = float(_tk.ask if is_buy else _tk.bid) or None
+        except Exception:
+            _cur = None
+        size_entry, _se_fixed = coherent_size_entry(ep_low_f, ep_high_f, _tp1c, _slc, is_buy, _cur)
+        if _se_fixed is not None:
+            # Un bordo del range era incoerente coi target (es. #580 "4000-99"
+            # -> 4099 sopra TP1): sizing spostato sul bordo valido per evitare
+            # il sotto/sovra-dimensionamento.
+            log(f"#{sig.id} size_entry incoerente {_se_fixed} -> {size_entry} (SL={_slc}/TP1={_tp1c})")
+            _append_trade_log_mt5(sig, "size_entry_fix",
+                f"Bordo entry {_se_fixed} incoerente coi target: sizing su {size_entry}")
     else:
         size_entry = ep_low_f or ep_high_f or float(entry)
     n = len(tps_raw)
@@ -1925,6 +1950,107 @@ def get_current_price(symbol: str) -> Optional[float]:
     except Exception:
         pass
     return None
+
+
+def coherent_size_entry(ep_low, ep_high, tp1, sl, is_buy, current_price=None):
+    """Prezzo su cui DIMENSIONARE, coerente coi target E conservativo sul
+    rischio (Fix #580).
+
+    Regola base (#284): si usa il bordo piu' LONTANO dallo SL (worst-case fill).
+    Se quel bordo e' fuori dalla zona valida (BUY: SL<v<TP1; SELL: TP1<v<SL) —
+    tipico di un typo del range, es. "4000-99" -> 4099 sopra TP1 — si usa il
+    valore piu' LONTANO dallo SL tra i bordi coerenti E il prezzo corrente.
+
+    INVARIANTE RISCHIO: si sceglie sempre il piu' lontano dallo SL disponibile,
+    cosi' la distanza usata non SOTTOSTIMA mai il fill reale → i lotti non
+    sovra-dimensionano → il rischio non supera MAI il max risk. Nel dubbio si
+    lascia il bordo originale (worst-case), che al piu' sotto-dimensiona (sicuro).
+
+    Ritorna (size_entry, original_se_se_corretto). Il secondo e' None se nessuna
+    correzione e' stata fatta."""
+    if ep_low is None or ep_high is None:
+        return (ep_low if ep_low is not None else ep_high), None
+    se = max(ep_low, ep_high) if is_buy else min(ep_low, ep_high)
+    if tp1 is None or sl is None:
+        return se, None
+    def _coh(v):
+        return (sl < v < tp1) if is_buy else (tp1 < v < sl)
+    if _coh(se):
+        return se, None
+    # bordo fuori zona: candidati = bordi coerenti + prezzo corrente coerente
+    cands = [b for b in (ep_low, ep_high) if _coh(b)]
+    if current_price is not None and _coh(current_price):
+        cands.append(current_price)
+    if not cands:
+        return se, None  # niente di coerente: lascio il worst-case (sotto-size = sicuro)
+    # il PIU' LONTANO dallo SL tra i coerenti → non sotto-stima mai il fill
+    safe = max(cands) if is_buy else min(cands)
+    return safe, se
+
+
+def fix_tp_by_ordering(tp_bad, idx, tps, entry, is_buy, digits):
+    """Corregge un TP dal lato sbagliato tentando un cambio single-digit,
+    ancorato all'ORDINAMENTO dei TP validi (Fix #609).
+
+    Es. BUY entry ~4098, TP1=4101, TP2=4006 (typo), TP3=4112: l'unico candidato
+    single-digit di 4006 che sta tra TP1 e TP3 e' 4106 -> corretto. Se non esiste
+    un candidato UNICO coerente ritorna None (il chiamante scarta il TP, come
+    prima). Non tocca i lotti totali (solo l'allocazione), quindi il rischio resta
+    invariato.
+
+    tps: dict {1: v|None, 2: v|None, 3: v|None} coi valori correnti dei TP."""
+    # Bordi di ordinamento dai TP validi (lato giusto dell'entry)
+    prev_v = None  # neighbor a indice minore
+    next_v = None  # neighbor a indice maggiore
+    for j in (1, 2, 3):
+        if j == idx:
+            continue
+        v = tps.get(j)
+        if v is None:
+            continue
+        vf = float(v)
+        ok_side = (vf > entry) if is_buy else (vf < entry)
+        if not ok_side:
+            continue
+        if j < idx:
+            prev_v = vf if prev_v is None else (max(prev_v, vf) if is_buy else min(prev_v, vf))
+        else:
+            next_v = vf if next_v is None else (min(next_v, vf) if is_buy else max(next_v, vf))
+    if is_buy:
+        lo = max([x for x in (entry, prev_v) if x is not None])
+        hi = next_v
+    else:
+        hi = min([x for x in (entry, prev_v) if x is not None])
+        lo = next_v
+    # Candidati single-digit di tp_bad che stanno (strettamente) nell'intervallo
+    s = f"{tp_bad:.{digits}f}" if digits else f"{int(tp_bad)}"
+    seen = set(); cands = set()
+    for k, ch in enumerate(s):
+        if not ch.isdigit():
+            continue
+        for d in "0123456789":
+            if d == ch:
+                continue
+            cs = s[:k] + d + s[k+1:]
+            try:
+                c = float(cs)
+            except ValueError:
+                continue
+            if c in seen or c <= 0:
+                continue
+            seen.add(c)
+            if is_buy:
+                if c <= lo:
+                    continue
+                if hi is not None and c >= hi:
+                    continue
+            else:
+                if c >= hi:
+                    continue
+                if lo is not None and c <= lo:
+                    continue
+            cands.add(round(c, digits) if digits else round(c))
+    return next(iter(cands)) if len(cands) == 1 else None
 
 
 def compute_trail_sl(sig, pip_size: float, tp_level_hit: int = 0,
