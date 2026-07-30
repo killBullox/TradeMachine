@@ -157,15 +157,20 @@ CLASSIFICAZIONE TYPE:
 
 ▸ "risky_flag" — segnala rischio elevato: "highly risky", "#risky", "aggressive", "#RiskyTrade"
 
-▸ "news_warning" — AVVISO di news/volatilita' imminente che invita a NON entrare o
-  stare fuori dal mercato. ESEMPI:
-  "High impact news soon", "Big news today, stay out", "No trades before the news",
-  "Wait for the news", "Careful today, news coming", "Avoid trading now, news",
-  "NFP/CPI/FOMC in X minutes, no entries".
-  Ha PRIORITA' su "ignore", "close" e "update/trail": un avviso di news NON e' una
-  chiusura ne' un trail. Serve solo a bloccare temporaneamente i nuovi ingressi.
-  NON e' news_warning: un commento generico su una news gia' passata senza invito a
-  restare fuori ("CPI came in hot") → "ignore".
+▸ "news_warning" — SOLO se il trader da' un'ISTRUZIONE ESPLICITA di NON entrare /
+  stare fuori dal mercato ADESSO. ESEMPI VALIDI:
+  "Stay out", "No trades now", "Don't enter", "Avoid trading", "No entries before
+  the news", "Wait for the news, no entries".
+  NON e' news_warning (classifica "ignore"):
+  - BOLLETTINI/ANNUNCI informativi di eventi schedulati, tipicamente con orario,
+    forecast o previous: "GBP BoE Interest Rate Decision is scheduled at 16:30,
+    forecast 3.75% vs previous 3.75%", "CPI due tomorrow", "FOMC at 20:00". Sono
+    FYI automatici, NON istruzioni: gli eventi schedulati veri li gestisce il
+    calendario economico.
+  - commenti generici senza uno STOP chiaro al trading: "big news today",
+    "careful", "volatile session", "CPI came in hot".
+  REGOLA: serve un chiaro comando di NON tradare. La sola menzione di news o di un
+  evento (anche con orario/forecast) NON basta -> "ignore".
 
 ▸ "ignore" — watchlist ("add X to watchlist"), livelli giornalieri ("Support: ..."),
   commenti senza azione ("good morning", news generiche gia' passate).

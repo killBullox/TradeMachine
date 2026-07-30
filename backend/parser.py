@@ -202,24 +202,21 @@ CLOSE_PATTERNS = [
 ]
 CLOSE_PATTERN = re.compile('|'.join(CLOSE_PATTERNS), re.IGNORECASE)
 
-# Avviso news dal trader (backup del calendario, post-mortem FOMC #622/#623):
-# frasi che invitano a NON entrare per news/volatilita' imminente. Conservativo
-# per evitare falsi positivi. Un avviso e' per natura sul FUTURO, quindi NON si
-# applica l'esclusione futuro (a differenza del reenter).
+# Avviso news dal trader (backup del calendario, post-mortem FOMC #622/#623).
+# STRETTO di proposito: scatta SOLO su un'ISTRUZIONE esplicita di non tradare
+# adesso, MAI su un bollettino informativo ("BoE scheduled at 16:30, forecast
+# 3.75%") o su commenti generici ("big news today"). I bollettini di eventi
+# schedulati li gestisce il calendario economico, non questo backup.
 NEWS_WARNING_PATTERNS = [
-    r'\bhigh[\s-]*impact\s+news\b',
-    r'\bbig\s+news\b',
-    r'\bnews\s+(?:soon|coming|ahead|time|release|in\s+\d+)\b',
-    r'\bbefore\s+(?:the\s+)?news\b',
-    r'\bwait\s+for\s+(?:the\s+)?news\b',
     r'\bstay\s+out\b',
     r'\bno\s+trad(?:e|es|ing)\b',
-    r'\bno\s+entries\b',
-    r'\bavoid\s+trading\b',
-    r'\b(?:careful|caution)\b.{0,20}\bnews\b',
-    r'\bnews\b.{0,20}\b(?:stay\s+out|no\s+trade|careful|caution|wait)\b',
+    r'\bno\s+(?:new\s+)?entries\b',
+    r"\bdon['`’]?t\s+(?:trade|enter|open)\b",
+    r'\bdo\s+not\s+(?:trade|enter|open)\b',
+    r'\bavoid\s+(?:trading|entries|entry|new\s+entries)\b',
+    r'\bwait\s+for\s+(?:the\s+)?news\b',
 ]
-NEWS_WARNING_PATTERN = re.compile('|'.join(NEWS_WARNING_PATTERNS), re.IGNORECASE | re.DOTALL)
+NEWS_WARNING_PATTERN = re.compile('|'.join(NEWS_WARNING_PATTERNS), re.IGNORECASE)
 
 # Pattern per "rientra nel trade" — riaprire l'ultimo segnale chiuso
 REENTER_PATTERN = re.compile(

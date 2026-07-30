@@ -7,12 +7,13 @@ from datetime import datetime, timedelta
 class TestClassificazione:
     @pytest.mark.parametrize("txt", [
         "High impact news soon, stay out",
-        "Big news today",
         "No trades before the news",
         "Wait for the news guys",
-        "Careful today, news coming",
         "Avoid trading now",
         "No entries until after the news",
+        "Stay out now, big news",
+        "Don't enter, news in 5 minutes",
+        "Do not trade before CPI",
     ])
     def test_avvisi_news(self, fake_mt5, txt):
         from parser import parse_message, ParsedNewsWarning
@@ -25,6 +26,12 @@ class TestClassificazione:
         "Everyone close the trade now",
         "Move SL to 4550",
         "Good morning traders",
+        # STRETTO (post-mortem BoE 30/07): bollettini informativi e commenti
+        # generici NON devono bloccare — li gestisce il calendario, non il backup.
+        "Big news today",
+        "Careful today, volatile session",
+        "GBP Bank of England (BoE) Interest Rate Decision is scheduled at 16:30 IST. The forecast is 3.75% compared to the previous 3.75%.",
+        "US CPI due tomorrow at 14:30",
     ])
     def test_non_confuso(self, fake_mt5, txt):
         from parser import parse_message
