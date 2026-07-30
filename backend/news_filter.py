@@ -81,6 +81,11 @@ def entry_blocked(now_utc: datetime = None, db=None) -> Optional[str]:
     if db is None:
         db = SessionLocal(); close = True
     try:
+        # Backup dal trader (post-mortem FOMC #622/#623): se il trader ha
+        # avvisato di news, blocca gli ingressi fino a trader_block_until.
+        tb = _trader_block_reason(db, now_utc)
+        if tb:
+            return tb
         if not is_enabled(db):
             return None
         for ev in _upcoming_events(db, now_utc):
@@ -94,6 +99,23 @@ def entry_blocked(now_utc: datetime = None, db=None) -> Optional[str]:
         return None
     finally:
         if close: db.close()
+
+
+def _trader_block_reason(db, now_utc: datetime) -> Optional[str]:
+    """Motivazione se e' attivo un blocco temporaneo innescato da un avviso news
+    del trader (RiskSettings.trader_block_until), None altrimenti. Auto-scade."""
+    from database import RiskSettings
+    try:
+        rs = db.query(RiskSettings).first()
+        if rs is None or not getattr(rs, "trader_news_backup_enabled", True):
+            return None
+        until = getattr(rs, "trader_block_until", None)
+        if until and now_utc < until:
+            return (f"Avviso news dal trader: ingressi BLOCCATI fino alle "
+                    f"{until.strftime('%H:%M')} UTC (backup news).")
+    except Exception:
+        return None
+    return None
 
 
 def flatten_due(now_utc: datetime = None, db=None):

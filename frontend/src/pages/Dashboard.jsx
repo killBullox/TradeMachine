@@ -18,6 +18,50 @@ function StatCard({ label, value, icon: Icon, color }) {
   )
 }
 
+function NewsWidget() {
+  const [events, setEvents] = useState([])
+  const [blocked, setBlocked] = useState(null)
+
+  const load = () => {
+    Promise.all([
+      fetch('/api/news-events').then(r => r.json()).catch(() => ({ events: [] })),
+      fetch('/api/news-filter/status').then(r => r.json()).catch(() => null),
+    ]).then(([ev, st]) => {
+      setEvents((ev.events || []).filter(e => !e.past).slice(0, 3))
+      setBlocked(st?.entry_blocked || null)
+    })
+  }
+  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t) }, [])
+
+  return (
+    <div>
+      <h2 className="text-sm font-semibold text-slate-400 mb-3 uppercase tracking-wider flex items-center gap-2">
+        <Calendar size={14} /> Prossime news
+        {blocked && (
+          <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full bg-red-600/40 text-red-200 font-semibold normal-case tracking-normal">
+            FINESTRA NEWS IN CORSO — ingressi bloccati
+          </span>
+        )}
+      </h2>
+      <div className="card space-y-2">
+        {events.length === 0 && <p className="text-xs text-slate-500">Nessuna news high-impact in arrivo.</p>}
+        {events.map(e => {
+          const auto = (e.source || 'manual') === 'forexfactory'
+          return (
+            <div key={e.id} className="flex items-center gap-3 text-xs">
+              <span className="font-mono text-slate-400 w-28 flex-shrink-0">{e.event_time_roma}</span>
+              <span className="text-slate-200 flex-1 min-w-0 truncate">{e.name}</span>
+              <span className="text-[10px] px-1.5 py-0.5 bg-slate-700/60 text-slate-300 rounded flex-shrink-0">{e.currency || 'USD'}</span>
+              {e.flatten && <span className="text-[10px] px-1.5 py-0.5 bg-orange-600/25 text-orange-300 rounded font-semibold flex-shrink-0">FLATTEN</span>}
+              <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${auto ? 'bg-sky-600/25 text-sky-300' : 'bg-purple-600/25 text-purple-300'}`}>{auto ? 'AUTO' : 'MAN'}</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function MT5Panel() {
   const [mt5, setMt5] = useState(null)
   const [toggling, setToggling] = useState(false)
@@ -166,6 +210,7 @@ export default function Dashboard({ wsEvents }) {
 
       <PropMonitor />
       <MT5Panel />
+      <NewsWidget />
 
       {/* Stats */}
       {perf && (

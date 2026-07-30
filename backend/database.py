@@ -140,6 +140,11 @@ class RiskSettings(Base):
     # Feature INDIPENDENTE dall'auto-trail (trail_stop_enabled): quello resta
     # com'e' (progressivo). Default ON (backtest XAUUSD +12.7%).
     be_at_tp1_enabled = Column(Boolean, default=True)
+    # ─── Backup news dal trader (post-mortem FOMC 29/07 #622/#623) ───
+    # Se il trader avvisa di news ("stay out", "big news"), blocca gli ingressi
+    # fino a questo istante (UTC). Rete di sicurezza secondaria al calendario.
+    trader_news_backup_enabled = Column(Boolean, default=True)
+    trader_block_until = Column(DateTime, nullable=True)  # UTC; None = nessun blocco trader
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -158,6 +163,11 @@ class NewsEvent(Base):
     impact = Column(String(20), default="high")
     flatten = Column(Boolean, default=True)             # chiudi posizioni aperte a T-5
     flatten_done = Column(Boolean, default=False)       # idempotenza runner
+    # ─── Sorgente evento ───
+    # "manual" = inserito a mano da UI; "forexfactory" = auto dal feed calendario.
+    # external_key = chiave stabile per upsert idempotente degli eventi auto.
+    source = Column(String(20), default="manual")
+    external_key = Column(String(200), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -328,6 +338,23 @@ def init_db():
         if "be_at_tp1_enabled" not in rs_existing:
             conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN be_at_tp1_enabled BOOLEAN DEFAULT 1"))
             conn.commit()
+        if "trader_news_backup_enabled" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN trader_news_backup_enabled BOOLEAN DEFAULT 1"))
+            conn.commit()
+        if "trader_block_until" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN trader_block_until DATETIME"))
+            conn.commit()
+        # Migrazione news_events (colonne sorgente/upsert additive)
+        try:
+            ne_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(news_events)")).fetchall()]
+            if ne_existing:
+                if "source" not in ne_existing:
+                    conn.execute(sa.text("ALTER TABLE news_events ADD COLUMN source VARCHAR(20) DEFAULT 'manual'"))
+                if "external_key" not in ne_existing:
+                    conn.execute(sa.text("ALTER TABLE news_events ADD COLUMN external_key VARCHAR(200)"))
+                conn.commit()
+        except Exception:
+            pass
         # Migrazione mt5_accounts
         try:
             mt5_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(mt5_accounts)")).fetchall()]

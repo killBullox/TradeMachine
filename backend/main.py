@@ -56,12 +56,21 @@ async def lifespan(app: FastAPI):
     # Handler globale per eccezioni asyncio non gestite
     asyncio.get_event_loop().set_exception_handler(_handle_asyncio_exception)
     init_db()
-    # Seed eventi news high-impact noti (idempotente)
+    # Seed eventi news high-impact noti (idempotente, fallback se il feed e' giu')
     try:
         import news_filter
         news_filter.seed_default_events()
     except Exception as _e:
         safe_print(f"[Startup] news seed err: {_e}")
+    # Primo refresh calendario economico (best-effort, non blocca lo startup).
+    # In executor per non bloccare l'event loop sul fetch HTTP.
+    async def _first_calendar_refresh():
+        try:
+            import economic_calendar as _ec
+            await asyncio.get_event_loop().run_in_executor(None, _ec.refresh_events)
+        except Exception as _e:
+            safe_print(f"[Startup] econ calendar refresh err: {_e}")
+    asyncio.create_task(_first_calendar_refresh())
     # Carica account MT5 attivo dal DB (sovrascrive .env se presente)
     mt5_trader._load_active_account()
     # Ripristina stato auto-trade dal DB
@@ -737,6 +746,7 @@ class RiskSettingsIn(BaseModel):
     news_filter_enabled: bool = True
     friday_flatten_enabled: bool = True
     be_at_tp1_enabled: bool = True
+    trader_news_backup_enabled: bool = True
 
 
 # ─── News events (news filter #570) ─────────────────────────────────────────
@@ -763,6 +773,7 @@ def list_news_events(db: Session = Depends(get_db)):
             "event_time_roma": e.event_time.replace(tzinfo=utc).astimezone(roma).strftime("%Y-%m-%d %H:%M"),
             "currency": e.currency, "impact": e.impact,
             "flatten": bool(e.flatten), "flatten_done": bool(e.flatten_done),
+            "source": getattr(e, "source", "manual") or "manual",
             "past": e.event_time < now,
         } for e in events],
     }
@@ -808,6 +819,21 @@ def news_filter_status(db: Session = Depends(get_db)):
         "flatten_pending": ev_fl.name if ev_fl else None,
         "friday_flatten_due": nf.friday_flatten_due(db=db),
     }
+
+
+@app.get("/api/economic-calendar/status")
+def economic_calendar_status():
+    """Stato dell'ultimo refresh del feed calendario economico."""
+    import economic_calendar as ec
+    return ec.last_refresh_info()
+
+
+@app.post("/api/economic-calendar/refresh")
+async def economic_calendar_refresh():
+    """Forza un refresh del calendario economico dal feed (USD High-impact)."""
+    import economic_calendar as ec
+    res = await asyncio.get_event_loop().run_in_executor(None, ec.refresh_events)
+    return {"ok": bool(res.get("source_ok")), **res, **ec.last_refresh_info()}
 
 
 @app.get("/api/performance/equity-curve")
@@ -1075,6 +1101,7 @@ def get_risk_settings_api(db: Session = Depends(get_db)):
         "news_filter_enabled": bool(getattr(rs, "news_filter_enabled", True) if getattr(rs, "news_filter_enabled", None) is not None else True),
         "friday_flatten_enabled": bool(getattr(rs, "friday_flatten_enabled", True) if getattr(rs, "friday_flatten_enabled", None) is not None else True),
         "be_at_tp1_enabled": bool(getattr(rs, "be_at_tp1_enabled", True) if getattr(rs, "be_at_tp1_enabled", None) is not None else True),
+        "trader_news_backup_enabled": bool(getattr(rs, "trader_news_backup_enabled", True) if getattr(rs, "trader_news_backup_enabled", None) is not None else True),
     }
 
 
@@ -1094,6 +1121,7 @@ async def update_risk_settings(body: RiskSettingsIn, db: Session = Depends(get_d
     rs.news_filter_enabled = body.news_filter_enabled
     rs.friday_flatten_enabled = body.friday_flatten_enabled
     rs.be_at_tp1_enabled = body.be_at_tp1_enabled
+    rs.trader_news_backup_enabled = body.trader_news_backup_enabled
     rs.updated_at = datetime.utcnow()
     db.commit()
     async def _run(): await asyncio.get_event_loop().run_in_executor(None, risk_module.recalculate_all)

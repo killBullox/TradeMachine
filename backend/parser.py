@@ -75,6 +75,13 @@ class ParsedReenter:
 
 
 @dataclass
+class ParsedNewsWarning:
+    """Avviso dal trader di news/volatilita' imminente: invita a stare fuori.
+    Backup del calendario economico (post-mortem FOMC #622/#623)."""
+    raw: str
+
+
+@dataclass
 class ParsedEnterNow:
     """Istruzione di entrare ORA su un signal ancora attivo (per chi non era
     riuscito a entrare al primo signal). NON e' un rientro post-chiusura."""
@@ -195,6 +202,25 @@ CLOSE_PATTERNS = [
 ]
 CLOSE_PATTERN = re.compile('|'.join(CLOSE_PATTERNS), re.IGNORECASE)
 
+# Avviso news dal trader (backup del calendario, post-mortem FOMC #622/#623):
+# frasi che invitano a NON entrare per news/volatilita' imminente. Conservativo
+# per evitare falsi positivi. Un avviso e' per natura sul FUTURO, quindi NON si
+# applica l'esclusione futuro (a differenza del reenter).
+NEWS_WARNING_PATTERNS = [
+    r'\bhigh[\s-]*impact\s+news\b',
+    r'\bbig\s+news\b',
+    r'\bnews\s+(?:soon|coming|ahead|time|release|in\s+\d+)\b',
+    r'\bbefore\s+(?:the\s+)?news\b',
+    r'\bwait\s+for\s+(?:the\s+)?news\b',
+    r'\bstay\s+out\b',
+    r'\bno\s+trad(?:e|es|ing)\b',
+    r'\bno\s+entries\b',
+    r'\bavoid\s+trading\b',
+    r'\b(?:careful|caution)\b.{0,20}\bnews\b',
+    r'\bnews\b.{0,20}\b(?:stay\s+out|no\s+trade|careful|caution|wait)\b',
+]
+NEWS_WARNING_PATTERN = re.compile('|'.join(NEWS_WARNING_PATTERNS), re.IGNORECASE | re.DOTALL)
+
 # Pattern per "rientra nel trade" — riaprire l'ultimo segnale chiuso
 REENTER_PATTERN = re.compile(
     r'\b(?:enter\s+again|re.?enter|reopen|open\s+again)\b',
@@ -235,7 +261,7 @@ REENTER_FUTURE_PATTERN = re.compile(
 
 
 def classify_message(text: str) -> str:
-    """Restituisce: 'signal' | 'update' | 'sl_move' | 'close' | 'level' | 'watchlist' | 'other'"""
+    """Restituisce: 'signal' | 'update' | 'sl_move' | 'close' | 'news_warning' | 'level' | 'watchlist' | 'reenter' | 'other'"""
     clean = text.lower()
 
     if LEVEL_PATTERN.search(text):
@@ -249,6 +275,11 @@ def classify_message(text: str) -> str:
 
     if CLOSE_PATTERN.search(text):
         return 'close'
+
+    # news_warning dopo close (un "exit now" esplicito resta chiusura) ma prima
+    # di sl_move/update: un avviso di news blocca gli ingressi, non muove SL.
+    if NEWS_WARNING_PATTERN.search(text):
+        return 'news_warning'
 
     if SL_MOVE_PATTERN.search(text):
         return 'sl_move'
@@ -545,6 +576,8 @@ def parse_message(text: str):
         return msg_type, parse_close(text)
     elif msg_type == 'reenter':
         return msg_type, parse_reenter(text)
+    elif msg_type == 'news_warning':
+        return msg_type, ParsedNewsWarning(raw=text)
     elif msg_type == 'level':
         return msg_type, parse_level(text)
     elif msg_type == 'watchlist':

@@ -195,6 +195,71 @@ def keep_old_on_rapid_duplicate(opened_at, now, has_open_pos, window_min=CHURN_W
     return 0 <= age_min <= window_min
 
 
+# Backup news dal trader (post-mortem FOMC #622/#623): durata blocco ingressi.
+TRADER_NEWS_BLOCK_MIN = 30
+
+
+def apply_trader_news_block(db, minutes: int = TRADER_NEWS_BLOCK_MIN):
+    """Attiva il blocco ingressi per un avviso news del trader: imposta
+    RiskSettings.trader_block_until = now + minutes e cancella i pending non
+    filled (reali + paper). Azione sicura: i pending non sono posizioni, nessuna
+    perdita realizzata. Ritorna (until_utc | None, cancelled_count).
+    Rispetta il toggle trader_news_backup_enabled (default ON)."""
+    from database import RiskSettings, Signal
+    from datetime import timedelta
+    import json as _jl, mt5_trader as _mt5t
+    rs = db.query(RiskSettings).first()
+    if rs is None:
+        rs = RiskSettings(); db.add(rs)
+    if not getattr(rs, "trader_news_backup_enabled", True):
+        return None, 0
+    until = datetime.utcnow() + timedelta(minutes=minutes)
+    if not rs.trader_block_until or rs.trader_block_until < until:
+        rs.trader_block_until = until
+    db.commit()
+    cancelled = 0
+    try:
+        pend = db.query(Signal).filter(
+            Signal.status == "pending", Signal.closed_at.is_(None)).all()
+        mt5 = _mt5t._get_mt5() if _mt5t.is_enabled() else None
+        for sig in pend:
+            if getattr(sig, "is_filtered", False):
+                # paper: nessun MT5, marca cancelled per parita' what-if
+                sig.status = "cancelled"; sig.closed_at = datetime.utcnow()
+                sig.updated_at = datetime.utcnow()
+                _append_trade_log(sig, "trader_news_block",
+                    "Paper pending cancellato per avviso news dal trader.")
+                db.add(sig); cancelled += 1
+                continue
+            if not mt5:
+                continue
+            tk = []
+            if sig.mt5_tickets:
+                try: tk = _jl.loads(sig.mt5_tickets)
+                except Exception: tk = []
+            elif sig.mt5_ticket:
+                tk = [sig.mt5_ticket]
+            removed = 0
+            for t in tk:
+                if mt5.orders_get(ticket=t):
+                    r = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": t})
+                    if r and r.retcode == mt5.TRADE_RETCODE_DONE:
+                        removed += 1
+            if removed:
+                sig.status = "cancelled"; sig.closed_at = datetime.utcnow()
+                sig.updated_at = datetime.utcnow()
+                _append_trade_log(sig, "trader_news_block",
+                    f"Pending reale cancellato per avviso news dal trader ({removed} ordini).")
+                db.add(sig); cancelled += 1
+        if cancelled:
+            db.commit()
+    except Exception as e:
+        log(f"[TraderNews] cancel pending err: {str(e)[:120]}")
+        try: db.rollback()
+        except Exception: pass
+    return until, cancelled
+
+
 def _save_signal(db, parsed: ParsedSignal, msg_id: int):
     # Duplicato per stesso msg_id
     existing = db.query(Signal).filter(Signal.telegram_msg_id == msg_id).first()
@@ -2036,6 +2101,26 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     "resistance": parsed.resistance_levels,
                 }
             })
+
+        elif msg_type == "news_warning":
+            # Backup del calendario (post-mortem FOMC #622/#623): il trader avvisa
+            # di news imminenti -> blocca gli ingressi per 30 min e cancella i
+            # pending non filled. NON tocca le posizioni aperte (testo a bassa
+            # confidenza; il flatten resta agli eventi schedulati del calendario).
+            try:
+                until, cancelled = apply_trader_news_block(db)
+                if until:
+                    log(f"[TraderNews] avviso news dal trader → ingressi bloccati "
+                        f"fino a {until.strftime('%H:%M')} UTC, {cancelled} pending cancellati")
+                    await broadcast_ws({
+                        "event": "trader_news_block",
+                        "data": {"until_utc": until.isoformat(), "cancelled": cancelled,
+                                 "text": text[:200]},
+                    })
+                else:
+                    log("[TraderNews] avviso news dal trader ignorato (backup OFF)")
+            except Exception as _e:
+                log(f"[TraderNews] errore: {str(_e)[:120]}")
 
         else:
             await broadcast_ws({

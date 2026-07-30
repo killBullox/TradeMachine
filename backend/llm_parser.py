@@ -28,7 +28,7 @@ quando estrai i contenuti semantici (es. "**1st Target** Done" significa "first 
 
 Schema:
 {
-  "type": "signal" | "close" | "sl_move" | "update" | "reenter" | "enter_now" | "risky_flag" | "ignore",
+  "type": "signal" | "close" | "sl_move" | "update" | "reenter" | "enter_now" | "risky_flag" | "news_warning" | "ignore",
   "symbol": "XAUUSD" | "BTCUSD" | "GBPJPY" | ... | null,
   "direction": "buy" | "sell" | null,
   "entry_type": "near" | "breakout" | null,
@@ -157,8 +157,18 @@ CLASSIFICAZIONE TYPE:
 
 ▸ "risky_flag" — segnala rischio elevato: "highly risky", "#risky", "aggressive", "#RiskyTrade"
 
+▸ "news_warning" — AVVISO di news/volatilita' imminente che invita a NON entrare o
+  stare fuori dal mercato. ESEMPI:
+  "High impact news soon", "Big news today, stay out", "No trades before the news",
+  "Wait for the news", "Careful today, news coming", "Avoid trading now, news",
+  "NFP/CPI/FOMC in X minutes, no entries".
+  Ha PRIORITA' su "ignore", "close" e "update/trail": un avviso di news NON e' una
+  chiusura ne' un trail. Serve solo a bloccare temporaneamente i nuovi ingressi.
+  NON e' news_warning: un commento generico su una news gia' passata senza invito a
+  restare fuori ("CPI came in hot") → "ignore".
+
 ▸ "ignore" — watchlist ("add X to watchlist"), livelli giornalieri ("Support: ..."),
-  commenti senza azione ("good morning", news generiche).
+  commenti senza azione ("good morning", news generiche gia' passate).
 
 ESTRAZIONE NUMERI:
 - "Near 4550-52" / "Near-4550-52" → entry_low=4550, entry_high=4552 (espandi: 52 dopo 4550 = 4552)
@@ -336,5 +346,9 @@ def llm_to_parsed(data: dict):
     elif msg_type == "risky_flag":
         # Gestito separatamente in telegram_client tramite reply
         return "risky_flag", data
+
+    elif msg_type == "news_warning":
+        # Backup news: gestito in telegram_client (blocca ingressi 30 min)
+        return "news_warning", data
 
     return "other", None

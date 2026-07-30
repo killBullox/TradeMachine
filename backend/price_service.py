@@ -713,6 +713,14 @@ async def start_price_monitor():
             await asyncio.get_event_loop().run_in_executor(None, _news_protection_tick)
         except Exception as e:
             log(f"[Monitor] Errore news protection: {str(e)[:100]}")
+        # Refresh calendario economico (throttled a 30 min dentro maybe_refresh).
+        # Popola NewsEvent con gli eventi USD-High -> la protezione news scatta
+        # da sola. Isolato: un errore qui non ferma il monitor.
+        try:
+            import economic_calendar as _ec
+            await asyncio.get_event_loop().run_in_executor(None, _ec.maybe_refresh)
+        except Exception as e:
+            log(f"[Monitor] Errore econ calendar refresh: {str(e)[:100]}")
         await asyncio.sleep(15)
 
 

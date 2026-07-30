@@ -146,6 +146,15 @@ function RiskPanel() {
               BE a TP1 (SL a pari appena TP1)
             </label>
           </div>
+          <div className="flex items-center gap-2">
+            <input type="checkbox" checked={settings.trader_news_backup_enabled !== false}
+              onChange={e => setSettings(s => ({...s, trader_news_backup_enabled: e.target.checked}))}
+              className="w-4 h-4 rounded" id="trader-news-toggle" />
+            <label htmlFor="trader-news-toggle" className="text-xs text-slate-400"
+              title="Se il trader avvisa di news imminenti ('stay out', 'big news'), blocca gli ingressi per 30 min e cancella i pending. Backup del calendario. Post-mortem FOMC #622/#623.">
+              Backup news dal trader (blocco 30 min)
+            </label>
+          </div>
         </div>
         <div className="flex items-end">
           <div className="w-full">
