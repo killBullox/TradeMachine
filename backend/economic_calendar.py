@@ -18,9 +18,11 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+# Solo "thisweek" e' disponibile su faireconomy (nextweek/thismonth danno 404).
+# Copre comunque tutti gli eventi imminenti: refresh ogni 30 min + blocco a
+# T-10min -> l'evento e' sempre in tabella con largo anticipo.
 FEED_URLS = [
     "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-    "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
 ]
 SOURCE = "forexfactory"
 REFRESH_EVERY_MIN = 30
