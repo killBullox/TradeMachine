@@ -1,7 +1,7 @@
 """Regressione del buco reale (FOMC 29/07): con l'evento FOMC in tabella, i due
 segnali #622 (19:55 Roma) e #623 (19:58 Roma) sarebbero stati BLOCCATI.
-FOMC 14:00 ET = 18:00 UTC = 20:00 Roma. Finestra ingressi [T-10, T+5] =
-[17:50, 18:05] UTC. Flatten [T-5, T] = [17:55, 18:00] UTC."""
+FOMC 14:00 ET = 18:00 UTC = 20:00 Roma. Finestra ingressi [T-10, T+15] =
+[17:50, 18:15] UTC. Flatten [T-5, T] = [17:55, 18:00] UTC."""
 import pytest
 from datetime import datetime
 
@@ -45,8 +45,10 @@ class TestFomcRegression:
             _add_fomc(db)
             # 17:40 UTC (19:40 Roma) = prima di T-10 -> non bloccato
             assert nf.entry_blocked(now_utc=datetime(2026, 7, 29, 17, 40, 0), db=db) is None
-            # 18:10 UTC (20:10 Roma) = dopo T+5 -> non bloccato
-            assert nf.entry_blocked(now_utc=datetime(2026, 7, 29, 18, 10, 0), db=db) is None
+            # 18:10 UTC (20:10 Roma) = ancora dentro T+15 -> BLOCCATO
+            assert nf.entry_blocked(now_utc=datetime(2026, 7, 29, 18, 10, 0), db=db) is not None
+            # 18:20 UTC (20:20 Roma) = dopo T+15 -> non bloccato
+            assert nf.entry_blocked(now_utc=datetime(2026, 7, 29, 18, 20, 0), db=db) is None
         finally:
             db.close()
 

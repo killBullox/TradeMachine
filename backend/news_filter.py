@@ -6,7 +6,7 @@ challenge bruciata). Un gap del genere e' possibile SOLO su release schedulate:
 i market maker ritirano la liquidita' in anticipo, in modo coordinato.
 
 Difese (tutte gated da RiskSettings.news_filter_enabled):
-  Tier 1 — blocco NUOVI ingressi (market + pending) in [T-10min, T+5min]
+  Tier 1 — blocco NUOVI ingressi (market + pending) in [T-10min, T+15min]
   Tier 2 — cancellazione pending non fillati a partire da T-10min
   Tier 3 — flatten totale posizioni aperte a partire da T-5min (event.flatten)
   Weekend — flatten venerdi' sera (RiskSettings.friday_flatten_enabled),
@@ -19,7 +19,10 @@ from typing import Optional
 
 # Finestre (minuti)
 ENTRY_BLOCK_BEFORE_MIN = 10
-ENTRY_BLOCK_AFTER_MIN = 5
+# T+15: dopo un evento high-impact la liquidita' resta sottile e gli spread
+# larghi anche 10-15 min (rischio gap tipo #570 non finisce a +5). Riapriamo agli
+# ingressi solo dopo 15 min. T-10 e flatten T-5 restano invariati.
+ENTRY_BLOCK_AFTER_MIN = 15
 PENDING_CANCEL_BEFORE_MIN = 10
 FLATTEN_BEFORE_MIN = 5
 

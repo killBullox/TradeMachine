@@ -32,15 +32,17 @@ class TestEntryBlock:
         assert nf.entry_blocked(ev_t - timedelta(minutes=9)) is not None
         # 1 minuto dopo → bloccato
         assert nf.entry_blocked(ev_t + timedelta(minutes=1)) is not None
-        # 4 min dopo → bloccato (fino a +5)
+        # 4 min dopo → bloccato (fino a +15)
         assert nf.entry_blocked(ev_t + timedelta(minutes=4)) is not None
+        # 14 min dopo → ancora bloccato (coda liquidita' sottile, fino a +15)
+        assert nf.entry_blocked(ev_t + timedelta(minutes=14)) is not None
 
     def test_fuori_finestra_libero(self, nf_db):
         import news_filter as nf
         ev_t = datetime(2026, 8, 12, 12, 30)
         _add_event(nf_db, "US CPI", ev_t)
         assert nf.entry_blocked(ev_t - timedelta(minutes=11)) is None
-        assert nf.entry_blocked(ev_t + timedelta(minutes=6)) is None
+        assert nf.entry_blocked(ev_t + timedelta(minutes=16)) is None
         assert nf.entry_blocked(ev_t - timedelta(hours=3)) is None
 
     def test_caso_570_sarebbe_bloccato(self, nf_db):

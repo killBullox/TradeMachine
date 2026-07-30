@@ -76,7 +76,7 @@ export default function NewsFilterPanel() {
       </div>
       <p className="text-xs text-slate-400 mb-3">
         Eventi USD high-impact caricati automaticamente dal calendario (Forex Factory). Attorno agli eventi:
-        blocco ingressi da -10 a +5 min · pending cancellati a -10 min · flatten posizioni a -5 min.
+        blocco ingressi da -10 a +15 min · pending cancellati a -10 min · flatten posizioni a -5 min.
         Flatten weekend: venerdì 22:45 Roma. Toggle globali nel Risk Management.
       </p>
 

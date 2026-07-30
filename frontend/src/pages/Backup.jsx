@@ -124,7 +124,7 @@ function RiskPanel() {
               onChange={e => setSettings(s => ({...s, news_filter_enabled: e.target.checked}))}
               className="w-4 h-4 rounded" id="news-filter-toggle" />
             <label htmlFor="news-filter-toggle" className="text-xs text-slate-400"
-              title="Blocca nuovi ingressi -10/+5 min attorno alle news high-impact, cancella i pending a -10 e chiude le posizioni aperte a -5 (eventi con flag Flatten). Post-mortem #570.">
+              title="Blocca nuovi ingressi -10/+15 min attorno alle news high-impact, cancella i pending a -10 e chiude le posizioni aperte a -5 (eventi con flag Flatten). Post-mortem #570.">
               News filter (blocco + flatten)
             </label>
           </div>
