@@ -1952,6 +1952,43 @@ def get_current_price(symbol: str) -> Optional[float]:
     return None
 
 
+def detect_tp_hits(closed_tickets, closed_reasons, tickets_order, tp1, tp2, tp3, is_buy):
+    """Rileva quali TP sono stati raggiunti dai ticket chiusi, ROBUSTO allo
+    slippage (caso #636: TP1 4057.00 riempito a 4057.07 su un SELL -> il confronto
+    di prezzo esatto falliva e l'auto-BE non scattava).
+
+    Un ticket chiuso in "TP" secondo il broker (motivo dal commento del deal) conta
+    come raggiunto per il SUO livello — dato dalla posizione in tickets_order, che
+    e' [ticket_TP1, ticket_TP2, ticket_TP3]. In fallback si usa il confronto di
+    prezzo (comportamento originale). Qualunque TP chiuso implica almeno TP1.
+
+    Ritorna (tp1_hit: bool, tp_levels_hit: int).
+    closed_tickets: lista di tuple (ticket, close_price, ...).
+    closed_reasons: dict {ticket: "TP"|"SL"|...}."""
+    levels = [(1, tp1), (2, tp2), (3, tp3)]
+    tp1_hit = False
+    tp_levels_hit = 0
+    for entry in closed_tickets:
+        tk = entry[0]
+        cp = entry[1]
+        if closed_reasons.get(tk) == "TP":
+            try:
+                lvl = list(tickets_order).index(tk) + 1
+            except (ValueError, TypeError):
+                lvl = 1  # e' comunque un TP -> almeno TP1
+            tp_levels_hit = max(tp_levels_hit, lvl)
+            if tp1 is not None:
+                tp1_hit = True
+        for tp_num, tp_price in levels:
+            if tp_price is None:
+                continue
+            if (is_buy and cp >= tp_price) or (not is_buy and cp <= tp_price):
+                tp_levels_hit = max(tp_levels_hit, tp_num)
+                if tp_num == 1:
+                    tp1_hit = True
+    return tp1_hit, tp_levels_hit
+
+
 def coherent_size_entry(ep_low, ep_high, tp1, sl, is_buy, current_price=None):
     """Prezzo su cui DIMENSIONARE, coerente coi target E conservativo sul
     rischio (Fix #580).
@@ -3198,10 +3235,8 @@ def sync_positions() -> list:
                                     log(f"#{sig.id} entered_at={sig.entered_at} (da deal di entrata)")
                                 break
 
-                    # Determina se è TP1
-                    if sig.tp1 and ((is_buy and close_price >= sig.tp1) or
-                                    (not is_buy and close_price <= sig.tp1)):
-                        tp1_hit = True
+                    # (tp1_hit / tp_levels_hit calcolati DOPO il loop via
+                    # detect_tp_hits, robusti allo slippage — caso #636)
                 else:
                     # Nessun deal trovato — controlla lo stato dell'ordine in history.
                     # Avatrade puo' rejectare ordini con comment 'deleted [no money]'
@@ -3243,6 +3278,15 @@ def sync_positions() -> list:
                         else:
                             log(f"#{sig.id} ticket={ticket} non trovato in MT5 dopo {int(sig_age/60)}min — orfano")
 
+            # ─── TP hit detection (robusta allo slippage, caso #636) ───
+            # Calcolata DOPO il loop: usa il motivo di chiusura del broker ("TP")
+            # oltre al prezzo, cosi' un TP riempito OLTRE il livello (es. TP1
+            # 4057.00 -> fill 4057.07 su un SELL) viene comunque riconosciuto e
+            # l'auto-BE / auto-trail scattano. Pilota SIA be_at_tp1 SIA l'auto-trail.
+            tp1_hit, tp_levels_hit = detect_tp_hits(
+                closed_tickets, closed_reasons, tickets,
+                sig.tp1, sig.tp2, sig.tp3, is_buy)
+
             # ─── SL trail logic ─────────────────────────────────────────────────
             # Se trail_stop_enabled e' attivo (per-trade override o default
             # globale), il bot muove auto lo SL al raggiungimento dei TP:
@@ -3265,15 +3309,8 @@ def sync_positions() -> list:
                         trail_enabled = False
 
                 if trail_enabled:
-                    # Determina il TP raggiunto piu' alto fra i ticket gia' chiusi
-                    tp_levels_hit = 0
-                    for tp_num, tp_price in [(1, sig.tp1), (2, sig.tp2), (3, sig.tp3)]:
-                        if tp_price is None:
-                            continue
-                        if any((is_buy and cp >= tp_price) or (not is_buy and cp <= tp_price)
-                               for _, cp, _, _ in closed_tickets):
-                            tp_levels_hit = max(tp_levels_hit, tp_num)
-
+                    # tp_levels_hit gia' calcolato sopra (detect_tp_hits, robusto
+                    # allo slippage). La logica del trail resta INVARIATA.
                     # Calcola pip_size del simbolo
                     pip_size = 0.0
                     try:
