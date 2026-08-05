@@ -250,9 +250,13 @@ def detect_explicit_tp_trail(text: str):
 
 REENTER_FUTURE_PATTERN = re.compile(
     r'\b(?:will\s+(?:plan|re.?enter|look|wait|watch)'
+    # contrazioni: "we'll/i'll/they'll re-enter" (bug #640: "We'll re-enter at
+    # lower levels" eseguito come reenter immediato -> -15$)
+    r"|(?:we|i|they|you|he|she)['’]ll\s+(?:plan\s+to\s+|look\s+to\s+|try\s+to\s+)?re.?enter"
     r'|plan(?:ning)?\s+(?:to\s+|a\s+)?re.?ent(?:er|ry)'
     r'|may\s+re.?enter|might\s+re.?enter'
-    r'|re.?ent(?:er|ry)\s+(?:later|soon|if))\b',
+    # "re-enter later/soon/if" e "re-enter at lower/higher/better levels" (#640)
+    r'|re.?ent(?:er|ry)\s+(?:later|soon|if|at\s+(?:a\s+)?(?:lower|higher|better|the)))\b',
     re.IGNORECASE
 )
 

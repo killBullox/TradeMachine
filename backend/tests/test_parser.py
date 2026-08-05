@@ -122,6 +122,22 @@ class TestReenterFuturo:
         from parser import classify_message
         assert classify_message("may re-enter later if price comes back") != "reenter"
 
+    def test_640_well_reenter_at_lower_non_e_reenter(self):
+        # #640 reale: contrazione "we'll" + "at lower levels" = futuro, NON comando
+        from parser import classify_message
+        t = classify_message("Again, price has reversed. We could see the 4,200 level soon. We'll re-enter at lower levels")
+        assert t != "reenter", f"classificato {t}!"
+
+    def test_reenter_at_lower_levels_non_e_reenter(self):
+        from parser import classify_message
+        assert classify_message("we will re-enter at lower levels") != "reenter"
+        assert classify_message("re-enter at higher levels") != "reenter"
+
+    def test_640_future_pattern_match(self):
+        from parser import REENTER_FUTURE_PATTERN as RF
+        assert RF.search("We'll re-enter at lower levels")
+        assert RF.search("re-enter at lower levels")
+
     def test_reenter_imperativo_resta_reenter(self):
         from parser import classify_message
         assert classify_message("SL hit, everyone re-enter here with same levels") == "reenter"

@@ -777,9 +777,14 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
     # il msg contiene chiaramente un pattern di reenter ("re enter", "re-enter",
     # "reenter", "enter again"), forza reenter. Cattura casi come #345-style:
     # "Sl hit In Sudden Spike Risky Can Re enter Here With Same Sl" → other.
+    # GUARD FUTURO (#640): NON forzare reenter se il msg e' un annuncio al futuro
+    # ("we'll re-enter at lower levels" -> l'LLM aveva gia' detto 'other', il
+    # fallback lo scavalcava eseguendo un reenter immediato -> -15$).
     if msg_type in ("other", "update", "ignore") and text:
         import re as _re_re
-        if _re_re.search(r'\b(re\s*-?\s*enter|reenter|enter\s+again|open\s+again)\b', text, _re_re.IGNORECASE):
+        from parser import REENTER_FUTURE_PATTERN as _RF
+        if (_re_re.search(r'\b(re\s*-?\s*enter|reenter|enter\s+again|open\s+again)\b', text, _re_re.IGNORECASE)
+                and not _RF.search(text)):
             from parser import ParsedReenter as _PR
             # Tenta a estrarre il simbolo dal testo (se presente)
             sym_m = _re_re.search(r'#([A-Z]{3,8})', text)
@@ -787,6 +792,8 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
             parsed = _PR(symbol=forced_sym, raw=text)
             msg_type = "reenter"
             log(f"[FallbackReenter] msg riclassificato 'other/update' → 'reenter' (sym={forced_sym})")
+        elif _RF.search(text):
+            log(f"[FallbackReenter] msg con 're-enter' ma al FUTURO -> NON eseguito (guard #640)")
 
     db = SessionLocal()
     try:
