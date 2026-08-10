@@ -2166,26 +2166,27 @@ async def mt5_close_signal(signal_id: int, db: Session = Depends(get_db)):
                 results.append({"ticket": t, "ok": False})
 
     all_ok = all(r["ok"] for r in results)
-    # Dopo la chiusura, calcola P&L reale da MT5 deal history
+    # Dopo la chiusura, calcola P&L reale da MT5 deal history.
     if all_ok and sig.status in ("open", "pending", "tp1", "tp2"):
         mt5 = mt5_trader._get_mt5()
         if mt5:
-            total_pnl = 0.0
             is_buy = sig.direction and sig.direction.lower() == "buy"
-            best_tp = 0
-            for t in tickets:
-                deals = mt5.history_deals_get(position=t)
-                if deals:
-                    for d in deals:
-                        if d.entry == mt5.DEAL_ENTRY_IN and not sig.actual_entry_price:
-                            sig.actual_entry_price = d.price
-                        if d.entry == mt5.DEAL_ENTRY_OUT:
-                            total_pnl += d.profit
-                            cp = d.price
-                            for tp_num, tp_val in [(3, sig.tp3), (2, sig.tp2), (1, sig.tp1)]:
-                                if tp_val and ((is_buy and cp >= tp_val) or (not is_buy and cp <= tp_val)):
-                                    best_tp = max(best_tp, tp_num)
-                                    break
+            # RETRY (fix #656): il deal di chiusura appena eseguito puo' non essere
+            # ancora nello storico (propagazione). Rileggiamo finche' ogni ticket
+            # fillato ha il suo deal OUT (complete=True), fino a ~10 tentativi.
+            total_pnl = 0.0; best_tp = 0; found_entry = None
+            for _attempt in range(10):
+                def _read_deals():
+                    return {t: (mt5.history_deals_get(position=t) or ()) for t in tickets}
+                deals_by = await asyncio.get_event_loop().run_in_executor(None, _read_deals)
+                total_pnl, best_tp, complete, found_entry = mt5_trader.summarize_closed_deals(
+                    deals_by, sig.tp1, sig.tp2, sig.tp3, is_buy,
+                    mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_OUT)
+                if complete:
+                    break
+                await asyncio.sleep(0.6)
+            if found_entry and not sig.actual_entry_price:
+                sig.actual_entry_price = found_entry
             if total_pnl != 0:
                 sig.pnl_usd = round(total_pnl, 2)
             # Se non abbiamo trovato deal ma c'è già un P&L, tienilo

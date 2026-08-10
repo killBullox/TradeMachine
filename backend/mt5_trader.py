@@ -1952,6 +1952,43 @@ def get_current_price(symbol: str) -> Optional[float]:
     return None
 
 
+def summarize_closed_deals(deals_by_ticket, tp1, tp2, tp3, is_buy, deal_in, deal_out):
+    """Somma i profitti dei deal OUT di piu' ticket dopo una chiusura, e segnala
+    se la chiusura e' COMPLETA (ogni ticket fillato ha gia' il suo deal OUT nello
+    storico). Serve a evitare la race del #656: leggere lo storico subito dopo una
+    chiusura manuale poteva mancare il deal appena creato (propagazione), lasciando
+    il pnl in difetto (mancava +497.74 del ticket chiuso a mano).
+
+    deals_by_ticket: {ticket: iterable_di_deal}. Ogni deal ha .entry/.price/.profit.
+    Ritorna (total_pnl, best_tp, complete, actual_entry).
+    complete=False se qualche ticket ha il deal IN ma NON ancora il deal OUT."""
+    total = 0.0
+    best_tp = 0
+    actual_entry = None
+    complete = True
+    tp_levels = [(3, tp3), (2, tp2), (1, tp1)]
+    for _tk, deals in deals_by_ticket.items():
+        deals = list(deals or [])
+        has_in = any(d.entry == deal_in for d in deals)
+        has_out = any(d.entry == deal_out for d in deals)
+        if has_in and actual_entry is None:
+            for d in deals:
+                if d.entry == deal_in:
+                    actual_entry = d.price
+                    break
+        if has_in and not has_out:
+            complete = False  # chiusura non ancora propagata nello storico
+        for d in deals:
+            if d.entry == deal_out:
+                total += d.profit
+                cp = d.price
+                for tp_num, tp_val in tp_levels:
+                    if tp_val and ((is_buy and cp >= tp_val) or (not is_buy and cp <= tp_val)):
+                        best_tp = max(best_tp, tp_num)
+                        break
+    return round(total, 2), best_tp, complete, actual_entry
+
+
 def detect_tp_hits(closed_tickets, closed_reasons, tickets_order, tp1, tp2, tp3, is_buy):
     """Rileva quali TP sono stati raggiunti dai ticket chiusi, ROBUSTO allo
     slippage (caso #636: TP1 4057.00 riempito a 4057.07 su un SELL -> il confronto
