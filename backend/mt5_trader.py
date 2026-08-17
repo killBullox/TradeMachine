@@ -1381,6 +1381,16 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
                 f"Bordo entry {_se_fixed} incoerente coi target: sizing su {size_entry}")
     else:
         size_entry = ep_low_f or ep_high_f or float(entry)
+    # ─── COERENZA size_entry vs FILL REALE (Fix #670) ───
+    # Se il fill effettivo (`entry`: MARKET corrente o LIMIT) e' piu' lontano
+    # dallo SL del bordo su cui abbiamo dimensionato, riallinea al fill: cosi' il
+    # rischio non supera il max anche sui MARKET entrati sopra il range.
+    _se_fill, _se_fill_changed = clamp_size_entry_to_fill(size_entry, entry, sl_raw, is_buy)
+    if _se_fill_changed:
+        log(f"#{sig.id} size_entry {size_entry} -> {_se_fill} (fill reale {entry} piu' lontano dallo SL)")
+        _append_trade_log_mt5(sig, "size_entry_fill_fix",
+            f"Sizing allineato al fill reale {entry} (era {size_entry}): evita rischio oltre max su MARKET sopra il range")
+        size_entry = _se_fill
     n = len(tps_raw)
     lots_total_raw = calc_position_size(sig.symbol, size_entry, sl_raw, risk_usd) if sl_raw else min_vol
     lots_total = _round_volume(lots_total_raw or min_vol, vol_step, min_vol, max_vol)
@@ -2060,6 +2070,28 @@ def coherent_size_entry(ep_low, ep_high, tp1, sl, is_buy, current_price=None):
     # il PIU' LONTANO dallo SL tra i coerenti → non sotto-stima mai il fill
     safe = max(cands) if is_buy else min(cands)
     return safe, se
+
+
+def clamp_size_entry_to_fill(size_entry, entry, sl, is_buy):
+    """Il prezzo su cui si DIMENSIONA deve stare almeno lontano dallo SL quanto il
+    FILL reale (`entry` = prezzo MARKET corrente o LIMIT). Fix #670.
+
+    Caso #670: "Buy Near 4387-88" entrato a MARKET 4389.35 (prezzo gia' salito
+    sopra il range) ma dimensionato sul bordo 4388 -> distanza SL sottostimata
+    (6pt invece di 7.35pt) -> +23% di rischio (-1229$ su max 1000$). Prendendo il
+    piu' LONTANO dallo SL tra size_entry e il fill reale, il rischio non supera
+    MAI il max. Mai up-sizing: se il fill e' piu' vicino allo SL (esecuzione
+    migliore) resta size_entry, cioe' la size prudente.
+
+    Ritorna (size_entry_aggiustato, cambiato: bool)."""
+    if entry is None or sl is None or size_entry is None:
+        return size_entry, False
+    try:
+        e = float(entry); float(sl); se = float(size_entry)
+    except (TypeError, ValueError):
+        return size_entry, False
+    new_se = max(se, e) if is_buy else min(se, e)
+    return new_se, abs(new_se - se) > 1e-9
 
 
 def fix_tp_by_ordering(tp_bad, idx, tps, entry, is_buy, digits):
