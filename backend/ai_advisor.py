@@ -339,21 +339,24 @@ REGOLE FERREE:
 - Considera i caveat del dossier (es. conteggi eventi = lower bound).
 - Rispondi in ITALIANO. Riferisci i trade come #id. Orari in ora Roma.
 
-SIMULAZIONE: ogni raccomandazione DEVE avere sim_type e sim_params. Se la
-raccomandazione e' esprimibile come una di queste regole deterministiche, il
-sistema ne calcolera' l'impatto ESATTO sul P&L storico. Regole disponibili
-(sim_params = stringa JSON):
-- exclude_hours      {"hours": [9, 10]}     evita trade in certe ore Roma
-- exclude_sessions   {"sessions": ["asia"]} evita sessioni (asia/londra/new_york/notte)
-- exclude_weekdays   {"weekdays": ["ven"]}  evita giorni (lun..dom)
-- exclude_direction  {"direction": "sell"}  evita una direzione
-- min_rr_tp1         {"min_rr": 0.5}        salta trade con R:R pianificato TP1 sotto soglia
-- cap_loss_at_risk   {}                     perdite mai oltre il max-risk del trade
-- scale_risk         {"factor": 0.5}        cambia il rischio per trade (P&L proporzionale)
-- exclude_near_news  {"minutes": 30}        evita entrate entro X min da una news
-Se la raccomandazione NON e' mappabile (es. gestione SL/BE/trailing, che
-richiede replay tick), usa sim_type="none" e sim_params="{}" e dillo nel
-detail. NON forzare una mappatura impropria."""
+CONSIGLI GIA' VERIFICATI (regola fondamentale — MAI autosmentirsi):
+Il dossier contiene "validated_rules_sweep": la batteria di regole GIA' testata
+e validata statisticamente dal motore di simulazione (gate: campione minimo,
+robustezza senza il miglior singolo trade, confidenza bootstrap).
+- Le raccomandazioni SIMULABILI devono venire ESCLUSIVAMENTE dalla lista
+  "promosse": copia sim_type e sim_params ESATTI dall'entry scelta. Cita nel
+  detail il delta, il campione (n_affected) e la confidenza bootstrap.
+- Le regole in "bocciate_interessanti" (delta positivo ma campione fragile o
+  concentrato su pochi trade) NON vanno MAI raccomandate: se rilevanti, citale
+  in patterns come "testato e scartato: <motivo del fail>". Questo e' il
+  valore: distinguere segnale da illusione statistica.
+- Le regole con delta negativo dimostrano che un'idea NON funziona: usale per
+  smontare false intuizioni (in patterns o trader_edge), mai in recommendations.
+- I consigli NON simulabili (gestione SL/BE/trailing: richiede replay tick,
+  latenza, processi operativi) restano leciti con sim_type="none" e
+  sim_params="{}", dichiarando nel detail che l'impatto non e' quantificato.
+- Se nessuna regola promossa esiste, dillo apertamente: meglio zero consigli
+  quantificati che consigli non verificati."""
 
 REPORT_SCHEMA = {
     "type": "object",
@@ -437,7 +440,15 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
     t0 = time.monotonic()
     report_date = _roma_now().strftime("%Y-%m-%d")
     try:
+        import sim_engine
         dossier = build_dossier(db)
+        # Sweep sistematico PRE-LLM: regole gia' testate/validate. L'LLM puo'
+        # raccomandare SOLO le promosse (le bocciate le cita come scartate).
+        try:
+            dossier["validated_rules_sweep"] = sim_engine.sweep(db)
+        except Exception as _e:
+            _log(f"sweep errore: {str(_e)[:120]}")
+            dossier["validated_rules_sweep"] = {"promosse": [], "bocciate_interessanti": []}
         sections, tin, tout = _call_llm(dossier)
         _attach_impacts(sections, db)
         rep = AiReport(report_date=report_date, model=ADVISOR_MODEL,
@@ -468,19 +479,35 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
 
 
 def _attach_impacts(sections: dict, db) -> None:
-    """Per ogni raccomandazione simulabile, calcola l'impatto ESATTO col motore
-    di simulazione e lo allega come rec['impact']. Errori isolati per singola
-    raccomandazione (una simulazione fallita non blocca il report)."""
+    """ENFORCEMENT anti-autosmentita: ogni raccomandazione simulabile viene
+    ri-validata dal motore (simulate + gate statistici). Se NON supera la
+    validazione viene DEGRADATA d'ufficio in sections['scartate_dalla_verifica']
+    — anche se l'LLM l'aveva proposta. Doppia cintura: prompt + codice."""
     import sim_engine
-    for rec in (sections or {}).get("recommendations", []):
+    recs = (sections or {}).get("recommendations", [])
+    kept, demoted = [], []
+    for rec in recs:
         st = rec.get("sim_type")
         if not st or st == "none":
+            kept.append(rec)          # non quantificabile: lecito, dichiarato
             continue
         try:
             params = json.loads(rec.get("sim_params") or "{}")
-            rec["impact"] = sim_engine.simulate(st, params, db)
+            rec["impact"] = sim_engine.validate(st, params, db)
         except Exception as e:
             rec["impact"] = {"ok": False, "error": str(e)[:200]}
+        v = (rec["impact"] or {}).get("validation") or {}
+        if rec["impact"].get("ok") and v.get("passed"):
+            kept.append(rec)
+        else:
+            rec["demotion_reason"] = (
+                "; ".join(v.get("fail_reasons", [])) or rec["impact"].get("error")
+                or "validazione statistica non superata")
+            demoted.append(rec)
+    if sections is not None:
+        sections["recommendations"] = kept
+        if demoted:
+            sections["scartate_dalla_verifica"] = demoted
 
 
 def _report_to_dict(rep) -> dict:

@@ -26,12 +26,23 @@ function ImpactBox({ impact }) {
   }
   const d = impact.delta_pnl
   const good = d > 0
+  const v = impact.validation
   return (
     <div className={`mt-2 rounded-lg p-2.5 text-xs border ${good ? 'border-emerald-700/50 bg-emerald-900/20' : d < 0 ? 'border-rose-700/50 bg-rose-900/20' : 'border-slate-700 bg-slate-800/40'}`}>
-      <p className="font-semibold mb-1">
+      <p className="font-semibold mb-1 flex items-center gap-2 flex-wrap">
         <span className={good ? 'text-emerald-300' : d < 0 ? 'text-rose-300' : 'text-slate-300'}>
           Impatto simulato: {d >= 0 ? '+' : ''}{d}$ ({impact.verdict})
         </span>
+        {v && v.passed && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-600/30 text-emerald-300 font-semibold">
+            ✓ VERIFICATA{v.bootstrap_confidence != null ? ` · confidenza ${Math.round(v.bootstrap_confidence * 100)}%` : ''}
+          </span>
+        )}
+        {v && !v.passed && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-600/30 text-amber-300 font-semibold">
+            ✗ NON VALIDATA
+          </span>
+        )}
       </p>
       <p className="text-slate-400">
         P&L: {impact.baseline.pnl}$ → <span className="text-slate-200">{impact.simulated.pnl}$</span>
@@ -40,6 +51,16 @@ function ImpactBox({ impact }) {
         {impact.trades_excluded > 0 && ` (${impact.trades_excluded} esclusi)`}
         {impact.trades_modified > 0 && ` (${impact.trades_modified} modificati)`}
       </p>
+      {v && (
+        <p className="text-slate-500 mt-1">
+          Campione: {v.n_affected} trade toccati ({v.category})
+          {v.top1_share != null && ` · miglior trade = ${Math.round(v.top1_share * 100)}% del delta`}
+          {v.delta_without_top1 != null && ` · senza top-1: ${v.delta_without_top1 >= 0 ? '+' : ''}${v.delta_without_top1}$`}
+        </p>
+      )}
+      {v && v.fail_reasons?.length > 0 && (
+        <p className="text-amber-400 mt-1">Motivi: {v.fail_reasons.join('; ')}</p>
+      )}
       <p className="text-slate-600 mt-1">Assunzioni: trade indipendenti, esclusioni non alterano i segnali successivi.</p>
     </div>
   )
@@ -235,6 +256,27 @@ export default function Advisor() {
                   )}
                 </div>
                 <p className="text-sm text-slate-300">{r.detail}</p>
+                <ImpactBox impact={r.impact} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {s?.scartate_dalla_verifica?.length > 0 && (
+        <div className="card p-5 border border-amber-700/30">
+          <h2 className="text-sm font-semibold text-amber-300 mb-3 uppercase tracking-wider flex items-center gap-2">
+            <AlertTriangle size={15} /> Proposte scartate dalla verifica statistica
+          </h2>
+          <p className="text-xs text-slate-500 mb-3">
+            Idee con numeri apparentemente buoni ma bocciate dai gate (campione insufficiente,
+            delta concentrato su pochi trade, o confidenza bootstrap bassa). Mostrate per trasparenza: NON eseguirle.
+          </p>
+          <div className="space-y-2">
+            {s.scartate_dalla_verifica.map((r, i) => (
+              <div key={i} className="bg-slate-800/40 rounded-lg p-3 opacity-80">
+                <p className="text-sm text-slate-300 font-semibold line-through decoration-amber-600/60">{r.title}</p>
+                <p className="text-xs text-amber-400 mt-0.5">✗ {r.demotion_reason}</p>
                 <ImpactBox impact={r.impact} />
               </div>
             ))}

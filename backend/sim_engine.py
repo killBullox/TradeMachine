@@ -33,6 +33,19 @@ SUPPORTED_RULES = ("exclude_hours", "exclude_sessions", "exclude_weekdays",
                    "exclude_direction", "min_rr_tp1", "cap_loss_at_risk",
                    "scale_risk", "exclude_near_news")
 
+# Regole STRUTTURALI (policy di sicurezza deterministiche, es. enforcement del
+# max-risk): esenti dai gate di campione/robustezza perche' non sono scommesse
+# su un pattern storico. Le regole PATTERN (esclusioni) invece devono superare
+# la validazione statistica per essere raccomandabili.
+STRUCTURAL_RULES = ("cap_loss_at_risk", "scale_risk")
+
+# Gate statistici per le regole pattern
+MIN_SAMPLE = 10           # trade toccati minimi perche' il campione conti
+TOP1_SHARE_MAX = 0.60     # il singolo trade migliore non puo' valere >60% del delta
+BOOTSTRAP_N = 500         # ricampionamenti (seed fisso -> deterministico)
+BOOTSTRAP_SEED = 42
+CONFIDENCE_MIN = 0.90     # frazione minima di ricampionamenti con delta > 0
+
 
 def _roma(dt):
     from zoneinfo import ZoneInfo
@@ -116,6 +129,60 @@ def _stats(pnls):
     }
 
 
+def _build_ctx(rule_type, db):
+    ctx = {"news_times": []}
+    if rule_type == "exclude_near_news":
+        try:
+            from database import NewsEvent
+            ctx["news_times"] = [e.event_time for e in db.query(NewsEvent).all()
+                                 if e.event_time]
+        except Exception:
+            pass
+    return ctx
+
+
+def _apply_decisions(rule_type, params, trades, ctx):
+    """Applica la regola a ogni trade. Ritorna lista (trade, action, new_pnl)."""
+    out = []
+    for t in trades:
+        action, new_pnl = _decide(rule_type, params or {}, t, ctx)
+        out.append((t, action, new_pnl))
+    return out
+
+
+def _contributions(decisions):
+    """Contributo di ogni trade al delta: exclude -> -pnl, modify -> new-old,
+    keep -> 0. delta totale = somma dei contributi."""
+    contribs = []
+    for t, action, new_pnl in decisions:
+        pnl = float(t.pnl_usd)
+        if action == "exclude":
+            contribs.append(-pnl)
+        elif action == "modify":
+            contribs.append(new_pnl - pnl)
+        else:
+            contribs.append(0.0)
+    return contribs
+
+
+def _bootstrap_confidence(contribs, n_resamples=BOOTSTRAP_N, seed=BOOTSTRAP_SEED):
+    """Frazione di ricampionamenti (storia ricampionata con replacement) in cui
+    la regola resta vantaggiosa (delta > 0). Seed fisso -> deterministico."""
+    import random
+    n = len(contribs)
+    if n == 0:
+        return 0.0
+    rng = random.Random(seed)
+    positive = 0
+    for _ in range(n_resamples):
+        s = 0.0
+        for _ in range(n):
+            s += contribs[rng.randrange(n)]
+        if s > 0:
+            positive += 1
+    return round(positive / n_resamples, 3)
+
+
 def simulate(rule_type: str, params: dict, db=None) -> dict:
     """Applica la regola a TUTTI i trade reali chiusi. Ritorna il confronto
     esatto baseline vs simulato. Mai solleva: errori -> {"ok": False, ...}."""
@@ -129,19 +196,12 @@ def simulate(rule_type: str, params: dict, db=None) -> dict:
         db = SessionLocal(); close = True
     try:
         trades = _real_closed_trades(db)
-        ctx = {"news_times": []}
-        if rule_type == "exclude_near_news":
-            try:
-                ctx["news_times"] = [e.event_time for e in db.query(NewsEvent).all()
-                                     if e.event_time]
-            except Exception:
-                pass
+        ctx = _build_ctx(rule_type, db)
         base_pnls, sim_pnls = [], []
         excluded, modified = [], []
-        for t in trades:
+        for t, action, new_pnl in _apply_decisions(rule_type, params, trades, ctx):
             pnl = float(t.pnl_usd)
             base_pnls.append(pnl)
-            action, new_pnl = _decide(rule_type, params or {}, t, ctx)
             if action == "exclude":
                 excluded.append({"id": t.id, "pnl": round(pnl, 2)})
             elif action == "modify":
@@ -170,6 +230,146 @@ def simulate(rule_type: str, params: dict, db=None) -> dict:
         return {"ok": False, "error": f"parametri invalidi: {str(e)[:200]}"}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
+    finally:
+        if close:
+            db.close()
+
+
+def validate(rule_type: str, params: dict, db=None) -> dict:
+    """Simulazione + VALIDAZIONE STATISTICA. Una regola e' "promossa"
+    (passed=True) solo se:
+      - delta > 0 (migliora il risultato storico)
+      - campione: >= MIN_SAMPLE trade toccati (regole pattern; le strutturali
+        tipo cap_loss_at_risk sono policy deterministiche, esenti)
+      - robustezza: il delta regge anche togliendo il singolo trade che
+        contribuisce di piu' (niente conclusioni da 1-2 outlier), e il top
+        contributore vale al massimo TOP1_SHARE_MAX del delta
+      - confidenza: in >= CONFIDENCE_MIN dei ricampionamenti bootstrap della
+        storia il delta resta positivo (seed fisso -> deterministico)
+    Ritorna il risultato di simulate() + blocco "validation". Mai solleva."""
+    from database import SessionLocal
+    from ai_advisor import _real_closed_trades
+    if rule_type not in SUPPORTED_RULES:
+        return {"ok": False, "error": f"regola non supportata: {rule_type}"}
+    close = False
+    if db is None:
+        db = SessionLocal(); close = True
+    try:
+        res = simulate(rule_type, params, db)
+        if not res.get("ok"):
+            return res
+        trades = _real_closed_trades(db)
+        ctx = _build_ctx(rule_type, db)
+        decisions = _apply_decisions(rule_type, params, trades, ctx)
+        contribs = _contributions(decisions)
+        delta = res["delta_pnl"]
+        n_affected = res["trades_excluded"] + res["trades_modified"]
+        structural = rule_type in STRUCTURAL_RULES
+
+        reasons = []
+        if delta <= 0:
+            reasons.append(f"non migliora il risultato (delta {delta}$)")
+        sample_ok = structural or n_affected >= MIN_SAMPLE
+        if not sample_ok:
+            reasons.append(f"campione insufficiente ({n_affected} trade toccati, minimo {MIN_SAMPLE})")
+
+        top1 = max(contribs) if contribs else 0.0
+        top1_share = round(top1 / delta, 3) if delta > 0 and top1 > 0 else None
+        delta_no_top1 = round(delta - top1, 2)
+        robust_ok = True
+        if not structural and delta > 0:
+            if delta_no_top1 <= 0:
+                robust_ok = False
+                reasons.append(f"fragile: senza il miglior singolo trade il delta crolla a {delta_no_top1}$")
+            elif top1_share is not None and top1_share > TOP1_SHARE_MAX:
+                robust_ok = False
+                reasons.append(f"concentrato: il singolo miglior trade vale il {round(top1_share*100)}% del delta")
+
+        confidence = None
+        conf_ok = True
+        if delta > 0 and sample_ok and robust_ok:
+            confidence = _bootstrap_confidence(contribs)
+            if not structural and confidence < CONFIDENCE_MIN:
+                conf_ok = False
+                reasons.append(f"confidenza bootstrap {round(confidence*100)}% sotto il minimo {round(CONFIDENCE_MIN*100)}%")
+
+        passed = (delta > 0) and sample_ok and robust_ok and conf_ok
+        res["validation"] = {
+            "passed": passed,
+            "category": "strutturale" if structural else "pattern",
+            "n_affected": n_affected,
+            "top1_share": top1_share,
+            "delta_without_top1": delta_no_top1,
+            "bootstrap_confidence": confidence,
+            "fail_reasons": reasons,
+        }
+        return res
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    finally:
+        if close:
+            db.close()
+
+
+def sweep(db=None, max_entries: int = 25) -> dict:
+    """Batteria sistematica PRE-LLM: testa e valida tutte le regole standard.
+    Ritorna {promosse: [...], bocciate_interessanti: [...]} compatte per il
+    dossier. Solo le PROMOSSE sono raccomandabili dall'LLM."""
+    from database import SessionLocal
+    close = False
+    if db is None:
+        db = SessionLocal(); close = True
+    try:
+        candidates = []
+        for h in range(24):
+            candidates.append(("exclude_hours", {"hours": [h]}))
+        for s in ("asia", "londra", "new_york", "notte"):
+            candidates.append(("exclude_sessions", {"sessions": [s]}))
+        for w in ("lun", "mar", "mer", "gio", "ven"):
+            candidates.append(("exclude_weekdays", {"weekdays": [w]}))
+        for dirn in ("buy", "sell"):
+            candidates.append(("exclude_direction", {"direction": dirn}))
+        for rr in (0.3, 0.5, 0.8, 1.0):
+            candidates.append(("min_rr_tp1", {"min_rr": rr}))
+        candidates.append(("cap_loss_at_risk", {}))
+        for f in (0.5, 0.75):
+            candidates.append(("scale_risk", {"factor": f}))
+        for m in (30, 60):
+            candidates.append(("exclude_near_news", {"minutes": m}))
+
+        promoted, rejected = [], []
+        for rule_type, params in candidates:
+            res = validate(rule_type, params, db)
+            if not res.get("ok"):
+                continue
+            v = res["validation"]
+            if v["n_affected"] == 0:
+                continue  # regola che non tocca nulla: rumore
+            entry = {
+                "sim_type": rule_type,
+                "sim_params": json.dumps(params),
+                "delta_pnl": res["delta_pnl"],
+                "n_affected": v["n_affected"],
+                "bootstrap_confidence": v["bootstrap_confidence"],
+                "top1_share": v["top1_share"],
+                "category": v["category"],
+            }
+            if v["passed"]:
+                promoted.append(entry)
+            elif res["delta_pnl"] > 0:
+                # sembrava buona ma bocciata: l'LLM DEVE saperlo (anti-illusione)
+                entry["fail_reasons"] = v["fail_reasons"]
+                rejected.append(entry)
+        promoted.sort(key=lambda e: -e["delta_pnl"])
+        rejected.sort(key=lambda e: -e["delta_pnl"])
+        return {
+            "note": ("Regole gia' testate e validate statisticamente sul campione "
+                     "storico. Solo le PROMOSSE sono raccomandabili."),
+            "gates": {"min_sample": MIN_SAMPLE, "top1_share_max": TOP1_SHARE_MAX,
+                      "bootstrap_confidence_min": CONFIDENCE_MIN},
+            "promosse": promoted[:max_entries],
+            "bocciate_interessanti": rejected[:max_entries],
+        }
     finally:
         if close:
             db.close()

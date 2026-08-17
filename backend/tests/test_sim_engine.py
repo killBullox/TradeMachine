@@ -153,12 +153,16 @@ class TestIntegrazioneReport:
             rep = ai_advisor.generate_report(db)
             assert rep["status"] == "ok"
             recs = rep["sections"]["recommendations"]
-            # 1: simulata con delta esatto (+50 escludendo il perdente delle 15)
-            assert recs[0]["impact"]["ok"] is True
-            assert recs[0]["impact"]["delta_pnl"] == 50.0
-            # 2: non simulabile -> nessun impact
-            assert "impact" not in recs[1]
-            # 3: parametri invalidi -> impact con ok=False, report comunque ok
-            assert recs[2]["impact"]["ok"] is False
+            demoted = rep["sections"].get("scartate_dalla_verifica", [])
+            # 1: delta +50 ma campione 1 trade -> DEGRADATA (validazione statistica)
+            assert len(recs) == 1  # resta solo la "none"
+            assert recs[0]["title"] == "Trailing SL"
+            titles_demoted = [r["title"] for r in demoted]
+            assert "Evita le 15" in titles_demoted
+            ev15 = next(r for r in demoted if r["title"] == "Evita le 15")
+            assert ev15["impact"]["delta_pnl"] == 50.0  # delta calcolato comunque
+            assert ev15["impact"]["validation"]["passed"] is False
+            # 3: parametri invalidi -> degradata con errore
+            assert "Rotta" in titles_demoted
         finally:
             db.close()
