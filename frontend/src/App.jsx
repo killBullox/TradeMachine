@@ -1,5 +1,5 @@
 import { Routes, Route, NavLink } from 'react-router-dom'
-import { LayoutDashboard, Bell, BookOpen, History, BarChart2, MessageSquare, RefreshCw, TrendingUp, Settings } from 'lucide-react'
+import { LayoutDashboard, Bell, BookOpen, History, BarChart2, MessageSquare, RefreshCw, TrendingUp, Settings, Brain } from 'lucide-react'
 import { useWebSocket } from './useWebSocket'
 import { useState, useEffect } from 'react'
 import { api } from './api'
@@ -13,6 +13,7 @@ import HistoryPage from './pages/HistoryPage'
 import Performance from './pages/Performance'
 import Messages from './pages/Messages'
 import Backup from './pages/Backup'
+import Advisor from './pages/Advisor'
 
 const NAV = [
   { to: '/',            label: 'Dashboard',   icon: LayoutDashboard },
@@ -21,6 +22,7 @@ const NAV = [
   { to: '/journal',     label: 'Journal',     icon: BookOpen },
   { to: '/history',     label: 'Storico',     icon: History },
   { to: '/performance', label: 'Performance', icon: BarChart2 },
+  { to: '/advisor',     label: 'AI Advisor',  icon: Brain },
   { to: '/messages',    label: 'Messaggi',    icon: MessageSquare },
   { to: '/backup',      label: 'Impostazioni', icon: Settings },
 ]
@@ -185,6 +187,7 @@ export default function App() {
           <Route path="/journal"     element={<Journal />} />
           <Route path="/history"     element={<HistoryPage />} />
           <Route path="/performance" element={<Performance />} />
+          <Route path="/advisor"     element={<Advisor />} />
           <Route path="/messages"    element={<Messages />} />
           <Route path="/backup"     element={<Backup />} />
         </Routes>

@@ -721,6 +721,13 @@ async def start_price_monitor():
             await asyncio.get_event_loop().run_in_executor(None, _ec.maybe_refresh)
         except Exception as e:
             log(f"[Monitor] Errore econ calendar refresh: {str(e)[:100]}")
+        # AI Advisor: report automatico giornaliero (throttled internamente,
+        # guardia persistita su DB). Isolato: un errore non ferma il monitor.
+        try:
+            import ai_advisor as _ai
+            await asyncio.get_event_loop().run_in_executor(None, _ai.maybe_run_daily)
+        except Exception as e:
+            log(f"[Monitor] Errore AI advisor daily: {str(e)[:100]}")
         await asyncio.sleep(15)
 
 

@@ -836,6 +836,35 @@ async def economic_calendar_refresh():
     return {"ok": bool(res.get("source_ok")), **res, **ec.last_refresh_info()}
 
 
+# ─── AI Advisor ──────────────────────────────────────────────────────────────
+
+@app.get("/api/advisor")
+def get_advisor(db: Session = Depends(get_db)):
+    """Ultimo report AI Advisor (sections + stats + metadati)."""
+    import ai_advisor
+    rep = ai_advisor.get_latest(db)
+    return {"report": rep}
+
+
+@app.post("/api/advisor/generate")
+async def advisor_generate():
+    """Rigenera il report on-demand (chiamata LLM: 30-90s)."""
+    import ai_advisor
+    rep = await asyncio.get_event_loop().run_in_executor(None, ai_advisor.generate_report)
+    return {"report": rep}
+
+
+@app.get("/api/advisor/history")
+def advisor_history(db: Session = Depends(get_db)):
+    from database import AiReport
+    rows = db.query(AiReport).order_by(AiReport.id.desc()).limit(30).all()
+    return {"reports": [{
+        "id": r.id, "report_date": r.report_date, "status": r.status,
+        "tokens_in": r.tokens_in, "tokens_out": r.tokens_out,
+        "duration_s": r.duration_s,
+    } for r in rows]}
+
+
 @app.get("/api/performance/equity-curve")
 def get_equity_curve(
     date_from: Optional[str] = Query(None),

@@ -272,6 +272,24 @@ class EmaCase(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AiReport(Base):
+    """AI Advisor: report generato (dossier statistico + sintesi LLM).
+    Un report al giorno automatico (dopo chiusura NY) + rigenerazioni on-demand.
+    report_date e' la data Roma "YYYY-MM-DD" (guardia daily restart-safe)."""
+    __tablename__ = "ai_reports"
+    id = Column(Integer, primary_key=True, index=True)
+    report_date = Column(String(10), index=True)   # data Roma YYYY-MM-DD
+    model = Column(String(50))                     # modello LLM usato
+    sections_json = Column(Text)                   # sintesi LLM strutturata (JSON)
+    stats_json = Column(Text)                      # dossier statistico completo (JSON)
+    tokens_in = Column(Integer, default=0)
+    tokens_out = Column(Integer, default=0)
+    duration_s = Column(Float, default=0.0)
+    status = Column(String(20), default="ok")      # ok | error
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     import sqlalchemy as sa
