@@ -387,12 +387,14 @@ def _call_llm(dossier: dict):
         raise RuntimeError("ANTHROPIC_API_KEY assente")
     user_msg = ("Analizza questo dossier e produci il report secondo lo schema.\n\n"
                 "DOSSIER:\n" + json.dumps(dossier, ensure_ascii=False, default=str))
+    # output_config via extra_body: funziona su qualsiasi versione dell'SDK
+    # (kwarg tipizzato solo nelle piu' recenti; sul wire e' identico).
     response = client.with_options(timeout=180.0).messages.create(
         model=ADVISOR_MODEL,
         max_tokens=16000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
-        output_config={"format": {"type": "json_schema", "schema": REPORT_SCHEMA}},
+        extra_body={"output_config": {"format": {"type": "json_schema", "schema": REPORT_SCHEMA}}},
     )
     if response.stop_reason == "refusal":
         raise RuntimeError("richiesta rifiutata dal modello (refusal)")
