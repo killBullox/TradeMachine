@@ -337,7 +337,23 @@ REGOLE FERREE:
 - Se un dato e' insufficiente per una conclusione, dillo (campione piccolo).
 - Raccomandazioni CONCRETE e azionabili, ordinate per impatto atteso.
 - Considera i caveat del dossier (es. conteggi eventi = lower bound).
-- Rispondi in ITALIANO. Riferisci i trade come #id. Orari in ora Roma."""
+- Rispondi in ITALIANO. Riferisci i trade come #id. Orari in ora Roma.
+
+SIMULAZIONE: ogni raccomandazione DEVE avere sim_type e sim_params. Se la
+raccomandazione e' esprimibile come una di queste regole deterministiche, il
+sistema ne calcolera' l'impatto ESATTO sul P&L storico. Regole disponibili
+(sim_params = stringa JSON):
+- exclude_hours      {"hours": [9, 10]}     evita trade in certe ore Roma
+- exclude_sessions   {"sessions": ["asia"]} evita sessioni (asia/londra/new_york/notte)
+- exclude_weekdays   {"weekdays": ["ven"]}  evita giorni (lun..dom)
+- exclude_direction  {"direction": "sell"}  evita una direzione
+- min_rr_tp1         {"min_rr": 0.5}        salta trade con R:R pianificato TP1 sotto soglia
+- cap_loss_at_risk   {}                     perdite mai oltre il max-risk del trade
+- scale_risk         {"factor": 0.5}        cambia il rischio per trade (P&L proporzionale)
+- exclude_near_news  {"minutes": 30}        evita entrate entro X min da una news
+Se la raccomandazione NON e' mappabile (es. gestione SL/BE/trailing, che
+richiede replay tick), usa sim_type="none" e sim_params="{}" e dillo nel
+detail. NON forzare una mappatura impropria."""
 
 REPORT_SCHEMA = {
     "type": "object",
@@ -355,8 +371,14 @@ REPORT_SCHEMA = {
                     "title": {"type": "string"},
                     "detail": {"type": "string"},
                     "priority": {"type": "string", "enum": ["alta", "media", "bassa"]},
+                    "sim_type": {"type": "string",
+                                 "enum": ["none", "exclude_hours", "exclude_sessions",
+                                          "exclude_weekdays", "exclude_direction",
+                                          "min_rr_tp1", "cap_loss_at_risk",
+                                          "scale_risk", "exclude_near_news"]},
+                    "sim_params": {"type": "string"},
                 },
-                "required": ["title", "detail", "priority"],
+                "required": ["title", "detail", "priority", "sim_type", "sim_params"],
                 "additionalProperties": False,
             },
         },
@@ -417,6 +439,7 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
     try:
         dossier = build_dossier(db)
         sections, tin, tout = _call_llm(dossier)
+        _attach_impacts(sections, db)
         rep = AiReport(report_date=report_date, model=ADVISOR_MODEL,
                        sections_json=json.dumps(sections, ensure_ascii=False),
                        stats_json=json.dumps(dossier, ensure_ascii=False, default=str),
@@ -442,6 +465,22 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
     finally:
         if close:
             db.close()
+
+
+def _attach_impacts(sections: dict, db) -> None:
+    """Per ogni raccomandazione simulabile, calcola l'impatto ESATTO col motore
+    di simulazione e lo allega come rec['impact']. Errori isolati per singola
+    raccomandazione (una simulazione fallita non blocca il report)."""
+    import sim_engine
+    for rec in (sections or {}).get("recommendations", []):
+        st = rec.get("sim_type")
+        if not st or st == "none":
+            continue
+        try:
+            params = json.loads(rec.get("sim_params") or "{}")
+            rec["impact"] = sim_engine.simulate(st, params, db)
+        except Exception as e:
+            rec["impact"] = {"ok": False, "error": str(e)[:200]}
 
 
 def _report_to_dict(rep) -> dict:

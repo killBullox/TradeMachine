@@ -1,11 +1,100 @@
 import { useEffect, useState } from 'react'
 import toast from 'react-hot-toast'
-import { Brain, TrendingUp, AlertTriangle, Shield, Search, Lightbulb } from 'lucide-react'
+import { Brain, TrendingUp, AlertTriangle, Shield, Search, Lightbulb, FlaskConical } from 'lucide-react'
 
 const PRIORITY_STYLE = {
   alta:  'bg-rose-600/25 text-rose-300',
   media: 'bg-amber-600/25 text-amber-300',
   bassa: 'bg-slate-600/40 text-slate-300',
+}
+
+const SIM_RULES = {
+  exclude_hours:     { label: 'Escludi ore (Roma)',        hint: 'es. 9,10',                    build: v => ({ hours: v.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n)) }) },
+  exclude_sessions:  { label: 'Escludi sessioni',          hint: 'asia, londra, new_york, notte', build: v => ({ sessions: v.split(',').map(s => s.trim()).filter(Boolean) }) },
+  exclude_weekdays:  { label: 'Escludi giorni',            hint: 'lun, mar, mer, gio, ven',     build: v => ({ weekdays: v.split(',').map(s => s.trim()).filter(Boolean) }) },
+  exclude_direction: { label: 'Escludi direzione',         hint: 'buy oppure sell',             build: v => ({ direction: v.trim() }) },
+  min_rr_tp1:        { label: 'R:R minimo su TP1',         hint: 'es. 0.5',                     build: v => ({ min_rr: parseFloat(v) }) },
+  cap_loss_at_risk:  { label: 'Cap perdite al max-risk',   hint: 'nessun parametro',            build: () => ({}) },
+  scale_risk:        { label: 'Scala rischio per trade',   hint: 'fattore, es. 0.5',            build: v => ({ factor: parseFloat(v) }) },
+  exclude_near_news: { label: 'Escludi entrate vicino news', hint: 'minuti, es. 30',            build: v => ({ minutes: parseInt(v) || 30 }) },
+}
+
+function ImpactBox({ impact }) {
+  if (!impact) return null
+  if (!impact.ok) {
+    return <p className="mt-2 text-xs text-amber-400">⚠ Simulazione non riuscita: {impact.error}</p>
+  }
+  const d = impact.delta_pnl
+  const good = d > 0
+  return (
+    <div className={`mt-2 rounded-lg p-2.5 text-xs border ${good ? 'border-emerald-700/50 bg-emerald-900/20' : d < 0 ? 'border-rose-700/50 bg-rose-900/20' : 'border-slate-700 bg-slate-800/40'}`}>
+      <p className="font-semibold mb-1">
+        <span className={good ? 'text-emerald-300' : d < 0 ? 'text-rose-300' : 'text-slate-300'}>
+          Impatto simulato: {d >= 0 ? '+' : ''}{d}$ ({impact.verdict})
+        </span>
+      </p>
+      <p className="text-slate-400">
+        P&L: {impact.baseline.pnl}$ → <span className="text-slate-200">{impact.simulated.pnl}$</span>
+        {' · '}Win rate: {impact.baseline.win_rate}% → {impact.simulated.win_rate}%
+        {' · '}Trade: {impact.baseline.trades} → {impact.simulated.trades}
+        {impact.trades_excluded > 0 && ` (${impact.trades_excluded} esclusi)`}
+        {impact.trades_modified > 0 && ` (${impact.trades_modified} modificati)`}
+      </p>
+      <p className="text-slate-600 mt-1">Assunzioni: trade indipendenti, esclusioni non alterano i segnali successivi.</p>
+    </div>
+  )
+}
+
+function Simulator() {
+  const [rule, setRule] = useState('min_rr_tp1')
+  const [paramText, setParamText] = useState('')
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState(null)
+
+  const run = async () => {
+    setRunning(true); setResult(null)
+    try {
+      const params = SIM_RULES[rule].build(paramText || '')
+      const res = await fetch('/api/advisor/simulate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: rule, params }),
+      }).then(r => r.json())
+      setResult(res)
+      if (!res.ok) toast.error(res.error || 'Simulazione fallita')
+    } catch (e) { toast.error(`Errore: ${e.message}`) }
+    finally { setRunning(false) }
+  }
+
+  return (
+    <div className="card p-5">
+      <h2 className="text-sm font-semibold text-violet-300 mb-3 uppercase tracking-wider flex items-center gap-2">
+        <FlaskConical size={15} /> Simulatore what-if
+      </h2>
+      <div className="flex gap-2 flex-wrap items-end mb-2">
+        <div>
+          <label className="text-xs text-slate-400 block mb-1">Regola</label>
+          <select value={rule} onChange={e => { setRule(e.target.value); setParamText(''); setResult(null) }}
+            className="px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white">
+            {Object.entries(SIM_RULES).map(([k, r]) => <option key={k} value={k}>{r.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-slate-400 block mb-1">Parametri ({SIM_RULES[rule].hint})</label>
+          <input value={paramText} onChange={e => setParamText(e.target.value)}
+            placeholder={SIM_RULES[rule].hint} disabled={rule === 'cap_loss_at_risk'}
+            className="px-3 py-2 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white w-52 disabled:opacity-40" />
+        </div>
+        <button onClick={run} disabled={running}
+          className="px-4 py-2 text-sm bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-lg font-medium">
+          {running ? 'Simulo…' : '▶ Simula'}
+        </button>
+      </div>
+      <p className="text-xs text-slate-500 mb-1">
+        Calcolo esatto sui trade reali storici: cosa sarebbe successo applicando la regola dall'inizio.
+      </p>
+      <ImpactBox impact={result} />
+    </div>
+  )
 }
 
 function KPI({ label, value, sub, color }) {
@@ -141,8 +230,12 @@ export default function Advisor() {
                     {r.priority}
                   </span>
                   <span className="text-sm font-semibold text-white">{r.title}</span>
+                  {r.sim_type && r.sim_type !== 'none' && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-600/25 text-violet-300">simulata</span>
+                  )}
                 </div>
                 <p className="text-sm text-slate-300">{r.detail}</p>
+                <ImpactBox impact={r.impact} />
               </div>
             ))}
           </div>
@@ -152,6 +245,8 @@ export default function Advisor() {
       {s?.confidence_note && (
         <p className="text-xs text-slate-500 italic">{s.confidence_note}</p>
       )}
+
+      <Simulator />
 
       {ex && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

@@ -854,6 +854,20 @@ async def advisor_generate():
     return {"report": rep}
 
 
+class SimulateIn(BaseModel):
+    type: str
+    params: dict = {}
+
+
+@app.post("/api/advisor/simulate")
+async def advisor_simulate(body: SimulateIn):
+    """Simula l'impatto ESATTO di una regola sui trade reali storici."""
+    import sim_engine
+    res = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: sim_engine.simulate(body.type, body.params))
+    return res
+
+
 @app.get("/api/advisor/history")
 def advisor_history(db: Session = Depends(get_db)):
     from database import AiReport
