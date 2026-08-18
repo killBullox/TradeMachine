@@ -51,13 +51,18 @@ CONFIDENCE_MIN = 0.90     # frazione minima di ricampionamenti con delta > 0
 # protezione attiva viene valutata SOLO sul periodo successivo all'attivazione
 # (problema residuo). I delta precedenti all'attivazione sono passato gia'
 # curato, non opportunita' future. Aggiornare questa lista a ogni nuova difesa.
+#
+# CONVENZIONE ANTI-ARTEFATTO: attiva_dal = primo giorno PIENAMENTE coperto
+# (giorno successivo al deploy). Un trade avvenuto poche ore prima del fix
+# nello stesso giorno NON deve mai comparire come "problema residuo": era
+# l'ultimo colpo del problema vecchio, non un buco della difesa.
 ACTIVE_PROTECTIONS = [
     {"key": "max_risk_fill_sizing",
      "nome": "Sizing sul fill reale (fix #670): il rischio non supera il max-risk nemmeno su fill fuori range",
-     "attiva_dal": "2026-08-17", "sim_type": "cap_loss_at_risk", "sim_params": {}},
+     "attiva_dal": "2026-08-18", "sim_type": "cap_loss_at_risk", "sim_params": {}},
     {"key": "news_filter",
      "nome": "News filter: blocco ingressi -10/+15 min, flatten -5, calendario USD-High automatico (dal 30/07) + backup avvisi trader",
-     "attiva_dal": "2026-07-14", "sim_type": "exclude_near_news", "sim_params": {"minutes": 30}},
+     "attiva_dal": "2026-07-15", "sim_type": "exclude_near_news", "sim_params": {"minutes": 30}},
     {"key": "be_at_tp1",
      "nome": "BE automatico a TP1 (SL a pari sui ticket residui)",
      "attiva_dal": "2026-07-23", "sim_type": None},

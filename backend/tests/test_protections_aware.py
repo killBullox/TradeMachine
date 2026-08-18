@@ -61,7 +61,7 @@ class TestSweepCoverage:
             assert "cap_loss_at_risk" not in promoted_types  # NON riproposta!
             cov = [e for e in sw["gia_coperte"] if e["sim_type"] == "cap_loss_at_risk"]
             assert len(cov) == 1
-            assert cov[0]["protezione_attiva_dal"] == "2026-08-17"
+            assert cov[0]["protezione_attiva_dal"] == "2026-08-18"
             # il danno storico e' attribuito al passato, non al futuro
             assert cov[0]["delta_storico_pre_protezione"] > 1000
             assert "NON raccomandare" in cov[0]["esito"]
@@ -101,7 +101,7 @@ class TestDossierEDemotion:
             prot = d["protezioni_attive"]
             assert len(prot) >= 5
             cap = next(p for p in prot if "670" in p["nome"])
-            assert cap["attiva_dal"] == "2026-08-17"
+            assert cap["attiva_dal"] == "2026-08-18"
             assert cap["problema_storico_totale_delta"] == 500.0
             assert cap["problema_residuo_dopo_attivazione"]["delta"] == 0.0
             assert cap["problema_residuo_dopo_attivazione"]["trade_toccati"] == 0
@@ -132,7 +132,7 @@ class TestDossierEDemotion:
             dem = rep["sections"]["scartate_dalla_verifica"]
             assert len(dem) == 1
             assert "coperta dalla protezione" in dem[0]["demotion_reason"]
-            assert "2026-08-17" in dem[0]["demotion_reason"]
+            assert "2026-08-18" in dem[0]["demotion_reason"]
         finally:
             db.close()
 
@@ -158,6 +158,6 @@ class TestDossierEDemotion:
             assert len(recs) == 1
             assert recs[0]["impact"]["validation"]["passed"] is True
             assert recs[0]["impact"]["delta_pnl"] == 300.0   # solo residuo post-fix
-            assert recs[0]["impact"]["covered_by"]["attiva_dal"] == "2026-08-17"
+            assert recs[0]["impact"]["covered_by"]["attiva_dal"] == "2026-08-18"
         finally:
             db.close()
