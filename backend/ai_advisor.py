@@ -312,6 +312,14 @@ def build_dossier(db=None) -> dict:
             _log(f"protezioni block err: {str(_e)[:120]}")
             d["protezioni_attive"] = []
 
+        # Regole AIA gia' in gestione utente (Monitor Test / Reale): l'advisor
+        # non deve riproporle come consigli nuovi, ma puo' commentarne l'esito.
+        try:
+            import advisor_rules as _ar
+            d["regole_aia_in_gestione"] = _ar.active_summary(db)
+        except Exception:
+            d["regole_aia_in_gestione"] = {"in_monitor_test": [], "attive_reali": []}
+
         # Entrate mancate (EMA)
         try:
             cases = db.query(EmaCase).all()
@@ -398,7 +406,12 @@ residuo validato).
   funzionando (in execution_gaps o patterns, coi numeri residui). Se una
   regola coperta compare comunque in "promosse" (problema residuo validato),
   allora la protezione NON basta: raccomanda il rafforzamento citando SOLO i
-  numeri del periodo residuo."""
+  numeri del periodo residuo.
+
+REGOLE GIA' IN GESTIONE UTENTE: il dossier contiene "regole_aia_in_gestione"
+(regole che l'utente ha gia' messo in Monitor Test o approvato in Monitor
+Reale). NON riproporle come raccomandazioni nuove: l'utente le sta gia'
+gestendo. Puoi commentarne l'andamento in patterns se rilevante."""
 
 REPORT_SCHEMA = {
     "type": "object",
@@ -533,6 +546,20 @@ def _attach_impacts(sections: dict, db) -> None:
         if not st or st == "none":
             kept.append(rec)          # non quantificabile: lecito, dichiarato
             continue
+        # Regola gia' in gestione utente (Monitor Test/Reale): non e' un
+        # consiglio nuovo, l'utente la sta gia' gestendo -> demotion.
+        try:
+            import advisor_rules as _ar
+            _params_chk = json.loads(rec.get("sim_params") or "{}")
+            existing = _ar.find_active(db, st, _params_chk)
+            if existing:
+                rec["demotion_reason"] = (
+                    f"gia' in gestione: Monitor {'Test' if existing.mode == 'test' else 'Reale'} "
+                    f"(regola #{existing.id}, attiva dal {existing.activated_at:%Y-%m-%d %H:%M} UTC)")
+                demoted.append(rec)
+                continue
+        except Exception:
+            pass
         # Regola coperta da protezione gia' attiva: si valuta SOLO il problema
         # residuo dopo l'attivazione. Consigliare l'esistente e' vietato.
         prot = sim_engine.COVERED_RULES.get(st)

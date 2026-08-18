@@ -869,6 +869,76 @@ async def advisor_simulate(body: SimulateIn):
     return res
 
 
+class RuleActionIn(BaseModel):
+    mode: str                      # "test" | "real"
+    sim_type: str
+    sim_params: dict = {}
+    title: str
+    source_detail: Optional[str] = None
+    expected: Optional[dict] = None
+
+
+@app.get("/api/advisor/rules")
+def advisor_rules_list(db: Session = Depends(get_db)):
+    """Monitor Test e Monitor Reale (sezioni distinte) con statistiche live."""
+    import advisor_rules
+    return advisor_rules.list_rules(db)
+
+
+@app.post("/api/advisor/rules")
+def advisor_rules_create(body: RuleActionIn, db: Session = Depends(get_db)):
+    """Monitora (test) o Approva (real) un consiglio -> crea la regola."""
+    import advisor_rules
+    return advisor_rules.create_rule(
+        body.sim_type, body.sim_params, body.title, body.mode,
+        expected=body.expected, source_detail=body.source_detail, db=db)
+
+
+@app.post("/api/advisor/rules/{rule_id}/promote")
+def advisor_rules_promote(rule_id: int, db: Session = Depends(get_db)):
+    """Dal Monitor Test: Approva -> Monitor Reale (il reale conta da ora)."""
+    import advisor_rules
+    return advisor_rules.promote_rule(rule_id, db)
+
+
+@app.post("/api/advisor/rules/{rule_id}/rollback")
+def advisor_rules_rollback(rule_id: int, db: Session = Depends(get_db)):
+    """Rollback: la regola si disattiva (da test o da reale). Storico conservato."""
+    import advisor_rules
+    return advisor_rules.rollback_rule(rule_id, db)
+
+
+class RecActionIn(BaseModel):
+    report_id: int
+    title: str
+    action: str                    # "rejected" | "test" | "real"
+
+
+@app.post("/api/advisor/rec-action")
+def advisor_rec_action(body: RecActionIn, db: Session = Depends(get_db)):
+    """Marca l'azione utente su un consiglio del report (persistita nel report,
+    cosi' il refresh della pagina non lo resuscita). Il rifiuto NON e'
+    permanente: l'advisor puo' riproporre lo stesso consiglio in futuro."""
+    from database import AiReport
+    rep = db.query(AiReport).filter(AiReport.id == body.report_id).first()
+    if not rep or not rep.sections_json:
+        raise HTTPException(status_code=404, detail="Report non trovato")
+    try:
+        sections = json.loads(rep.sections_json)
+    except Exception:
+        raise HTTPException(status_code=500, detail="sections illeggibili")
+    hit = False
+    for rec in sections.get("recommendations", []):
+        if rec.get("title") == body.title:
+            rec["user_action"] = body.action
+            hit = True
+    if not hit:
+        raise HTTPException(status_code=404, detail="Consiglio non trovato nel report")
+    rep.sections_json = json.dumps(sections, ensure_ascii=False)
+    db.commit()
+    return {"ok": True}
+
+
 @app.get("/api/advisor/history")
 def advisor_history(db: Session = Depends(get_db)):
     from database import AiReport

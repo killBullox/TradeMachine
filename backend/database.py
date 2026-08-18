@@ -290,6 +290,30 @@ class AiReport(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AdvisorRule(Base):
+    """Regola AIA gestita dall'utente (gestione consigli).
+    mode='test'  -> Monitor Test: NESSUN effetto reale, statistiche live di cosa
+                    sarebbe successo se la regola fosse attiva.
+    mode='real'  -> Monitor Reale: la regola AGISCE sui trade futuri (blocco a
+                    intake -> paper trade, o scala del rischio) + statistiche live.
+    Rollback: status='rolled_back' (la regola smette, lo storico resta).
+    Un consiglio rifiutato NON crea righe qui: l'advisor puo' riproporlo."""
+    __tablename__ = "advisor_rules"
+    id = Column(Integer, primary_key=True, index=True)
+    sim_type = Column(String(40), nullable=False)
+    sim_params = Column(Text, default="{}")            # JSON canonico
+    title = Column(String(300))
+    source_detail = Column(Text, nullable=True)        # detail del consiglio d'origine
+    mode = Column(String(10), default="test", index=True)   # test | real
+    status = Column(String(20), default="active", index=True)  # active | rolled_back
+    expected_json = Column(Text, nullable=True)        # impatto previsto al momento dell'azione
+    activated_at = Column(DateTime, default=datetime.utcnow)   # inizio del mode CORRENTE (UTC)
+    test_started_at = Column(DateTime, nullable=True)
+    real_started_at = Column(DateTime, nullable=True)
+    rolled_back_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     import sqlalchemy as sa

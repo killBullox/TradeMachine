@@ -167,13 +167,16 @@ def _stats(pnls):
 
 
 def _filter_since(trades, since):
-    """Se since ('YYYY-MM-DD') e' impostato, tiene solo i trade creati da quella
-    data in poi. Serve a valutare il PROBLEMA RESIDUO dopo l'attivazione di una
-    protezione, invece del passato gia' curato."""
+    """Se since e' impostato ('YYYY-MM-DD' oppure 'YYYY-MM-DD HH:MM:SS' UTC),
+    tiene solo i trade creati da quel momento in poi. Serve a valutare il
+    problema RESIDUO dopo una protezione, o il periodo di un Monitor AIA
+    (precisione al secondo: una regola attivata a meta' giornata non deve
+    contare i trade della mattina)."""
     if not since:
         return trades
     from datetime import datetime as _dt
-    cutoff = _dt.strptime(since, "%Y-%m-%d")
+    fmt = "%Y-%m-%d %H:%M:%S" if len(str(since)) > 10 else "%Y-%m-%d"
+    cutoff = _dt.strptime(str(since), fmt)
     return [t for t in trades if t.created_at and t.created_at >= cutoff]
 
 

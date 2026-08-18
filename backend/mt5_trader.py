@@ -1350,6 +1350,18 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     if getattr(sig, 'is_risky', False):
         risk_usd *= 0.5
         log(f"#{sig.id} segnale RISKY → rischio dimezzato a ${risk_usd:.2f}")
+    # Regola AIA scale_risk APPROVATA dall'utente (Monitor Reale): scala il
+    # rischio per trade. 1.0 se nessuna regola attiva.
+    try:
+        from advisor_rules import scale_risk_factor
+        _aia_f = scale_risk_factor()
+        if _aia_f != 1.0:
+            risk_usd *= _aia_f
+            log(f"#{sig.id} regola AIA scale_risk x{_aia_f} → rischio ${risk_usd:.2f}")
+            _append_trade_log_mt5(sig, "aia_scale_risk",
+                f"Rischio scalato x{_aia_f} da regola AIA approvata: ${risk_usd:.2f}")
+    except Exception:
+        pass
     # Calcola lotti totali sull'intero rischio, poi dividi per n ordini.
     # Per il dimensionamento usiamo il bordo del range PIÙ LONTANO dallo SL
     # come prezzo di riferimento, perché un BUY LIMIT/STOP nel range puo'

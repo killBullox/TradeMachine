@@ -1101,6 +1101,21 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         log(f"[Filter] #{sig.id} {sig.symbol} NUOVO simbolo → is_filtered=True + aggiunto a excluded_symbols")
                 except Exception as _e:
                     log(f"[Filter] errore check nuovo simbolo #{getattr(sig,'id','?')}: {_e}")
+            # REGOLE AIA APPROVATE (Monitor Reale): esclusioni decise dall'utente
+            # dalla pagina AI Advisor. Il segnale bloccato diventa PAPER trade,
+            # cosi' il monitor mostra anche quanto il blocco ha reso/costato.
+            if sig and not getattr(sig, "is_filtered", False):
+                try:
+                    from advisor_rules import check_signal_block
+                    _aia_reason = check_signal_block(sig, db)
+                    if _aia_reason:
+                        sig.is_filtered = True
+                        sig.filter_reason = _aia_reason
+                        _append_trade_log(sig, "filtered", f"Bloccato da regola AIA approvata: {_aia_reason}")
+                        db.add(sig); db.commit()
+                        log(f"[AIARule] #{sig.id} {sig.symbol} bloccato → paper ({_aia_reason})")
+                except Exception as _e:
+                    log(f"[AIARule] errore check #{getattr(sig,'id','?')}: {_e}")
             # Auto-trading: piazza ordine MT5 se abilitato (skip se filtrato)
             if sig and not getattr(sig, "is_filtered", False):
                 try:
