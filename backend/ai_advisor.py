@@ -287,6 +287,31 @@ def build_dossier(db=None) -> dict:
             "daily_pnl_last_15": dict(list(sorted(daily.items()))[-15:]),
         }
 
+        # Protezioni GIA' ATTIVE nel sistema, con data ed efficacia misurata:
+        # l'advisor NON deve consigliare cio' che esiste gia', ma valutarne
+        # l'effetto (problema residuo dopo l'attivazione vs storico precedente).
+        try:
+            import sim_engine as _se
+            prot_block = []
+            for p in _se.ACTIVE_PROTECTIONS:
+                entry = {"nome": p["nome"], "attiva_dal": p["attiva_dal"]}
+                if p.get("sim_type"):
+                    full = _se.simulate(p["sim_type"], p.get("sim_params") or {}, db)
+                    resid = _se.simulate(p["sim_type"], p.get("sim_params") or {}, db,
+                                         since=p["attiva_dal"])
+                    if full.get("ok") and resid.get("ok"):
+                        entry["problema_storico_totale_delta"] = full["delta_pnl"]
+                        entry["problema_residuo_dopo_attivazione"] = {
+                            "delta": resid["delta_pnl"],
+                            "trade_toccati": resid["trades_excluded"] + resid["trades_modified"],
+                            "trade_nel_periodo": resid["baseline"]["trades"],
+                        }
+                prot_block.append(entry)
+            d["protezioni_attive"] = prot_block
+        except Exception as _e:
+            _log(f"protezioni block err: {str(_e)[:120]}")
+            d["protezioni_attive"] = []
+
         # Entrate mancate (EMA)
         try:
             cases = db.query(EmaCase).all()
@@ -356,7 +381,24 @@ robustezza senza il miglior singolo trade, confidenza bootstrap).
   latenza, processi operativi) restano leciti con sim_type="none" e
   sim_params="{}", dichiarando nel detail che l'impatto non e' quantificato.
 - Se nessuna regola promossa esiste, dillo apertamente: meglio zero consigli
-  quantificati che consigli non verificati."""
+  quantificati che consigli non verificati.
+
+PROTEZIONI GIA' ATTIVE (regola fondamentale — mai consigliare l'esistente):
+Il dossier contiene "protezioni_attive" (difese gia' implementate nel sistema,
+con data di attivazione ed efficacia misurata) e lo sweep contiene
+"gia_coperte" (regole corrispondenti a protezioni esistenti, senza problema
+residuo validato).
+- MAI raccomandare una protezione gia' attiva o una regola in "gia_coperte":
+  sarebbe consigliare cio' che e' gia' stato fatto.
+- I delta STORICI precedenti all'attivazione di una protezione NON sono
+  opportunita' future: sono danni del passato gia' curati. Non presentarli
+  come guadagno ottenibile.
+- Al posto del consiglio, VALUTA L'EFFICACIA della protezione: se il problema
+  residuo dopo l'attivazione e' nullo o basso, di' che la difesa sta
+  funzionando (in execution_gaps o patterns, coi numeri residui). Se una
+  regola coperta compare comunque in "promosse" (problema residuo validato),
+  allora la protezione NON basta: raccomanda il rafforzamento citando SOLO i
+  numeri del periodo residuo."""
 
 REPORT_SCHEMA = {
     "type": "object",
@@ -491,18 +533,30 @@ def _attach_impacts(sections: dict, db) -> None:
         if not st or st == "none":
             kept.append(rec)          # non quantificabile: lecito, dichiarato
             continue
+        # Regola coperta da protezione gia' attiva: si valuta SOLO il problema
+        # residuo dopo l'attivazione. Consigliare l'esistente e' vietato.
+        prot = sim_engine.COVERED_RULES.get(st)
+        since = prot["attiva_dal"] if prot else None
         try:
             params = json.loads(rec.get("sim_params") or "{}")
-            rec["impact"] = sim_engine.validate(st, params, db)
+            rec["impact"] = sim_engine.validate(st, params, db, since=since)
+            if prot and rec["impact"].get("ok"):
+                rec["impact"]["covered_by"] = {"protezione": prot["nome"],
+                                               "attiva_dal": prot["attiva_dal"]}
         except Exception as e:
             rec["impact"] = {"ok": False, "error": str(e)[:200]}
         v = (rec["impact"] or {}).get("validation") or {}
         if rec["impact"].get("ok") and v.get("passed"):
             kept.append(rec)
         else:
-            rec["demotion_reason"] = (
-                "; ".join(v.get("fail_reasons", [])) or rec["impact"].get("error")
-                or "validazione statistica non superata")
+            base_reason = ("; ".join(v.get("fail_reasons", []))
+                           or rec["impact"].get("error")
+                           or "validazione statistica non superata")
+            if prot:
+                base_reason = (f"gia' coperta dalla protezione '{prot['nome']}' "
+                               f"(attiva dal {prot['attiva_dal']}); nel periodo successivo "
+                               f"il problema residuo non e' validato: {base_reason}")
+            rec["demotion_reason"] = base_reason
             demoted.append(rec)
     if sections is not None:
         sections["recommendations"] = kept

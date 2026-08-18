@@ -46,6 +46,38 @@ BOOTSTRAP_N = 500         # ricampionamenti (seed fisso -> deterministico)
 BOOTSTRAP_SEED = 42
 CONFIDENCE_MIN = 0.90     # frazione minima di ricampionamenti con delta > 0
 
+# ─── Protezioni GIA' ATTIVE nel sistema ──────────────────────────────────────
+# L'advisor non deve consigliare cio' che esiste gia': una regola coperta da una
+# protezione attiva viene valutata SOLO sul periodo successivo all'attivazione
+# (problema residuo). I delta precedenti all'attivazione sono passato gia'
+# curato, non opportunita' future. Aggiornare questa lista a ogni nuova difesa.
+ACTIVE_PROTECTIONS = [
+    {"key": "max_risk_fill_sizing",
+     "nome": "Sizing sul fill reale (fix #670): il rischio non supera il max-risk nemmeno su fill fuori range",
+     "attiva_dal": "2026-08-17", "sim_type": "cap_loss_at_risk", "sim_params": {}},
+    {"key": "news_filter",
+     "nome": "News filter: blocco ingressi -10/+15 min, flatten -5, calendario USD-High automatico (dal 30/07) + backup avvisi trader",
+     "attiva_dal": "2026-07-14", "sim_type": "exclude_near_news", "sim_params": {"minutes": 30}},
+    {"key": "be_at_tp1",
+     "nome": "BE automatico a TP1 (SL a pari sui ticket residui)",
+     "attiva_dal": "2026-07-23", "sim_type": None},
+    {"key": "anti_churn",
+     "nome": "Anti-churn duplicati: repost identico entro 10 min -> si tiene il vecchio trade",
+     "attiva_dal": "2026-07-29", "sim_type": None},
+    {"key": "sizing_coherence",
+     "nome": "Coerenza sizing entry (#580) e correzione TP con typo (#609)",
+     "attiva_dal": "2026-07-29", "sim_type": None},
+    {"key": "tp_slippage",
+     "nome": "Rilevazione TP robusta allo slippage (#636): auto-BE scatta anche su TP fillati oltre il livello",
+     "attiva_dal": "2026-08-04", "sim_type": None},
+    {"key": "future_guard",
+     "nome": "Guard annunci al futuro (#640): 'we'll re-enter' non viene eseguito come comando",
+     "attiva_dal": "2026-08-05", "sim_type": None},
+]
+
+# Mappa sim_type -> protezione che lo copre
+COVERED_RULES = {p["sim_type"]: p for p in ACTIVE_PROTECTIONS if p.get("sim_type")}
+
 
 def _roma(dt):
     from zoneinfo import ZoneInfo
@@ -129,6 +161,17 @@ def _stats(pnls):
     }
 
 
+def _filter_since(trades, since):
+    """Se since ('YYYY-MM-DD') e' impostato, tiene solo i trade creati da quella
+    data in poi. Serve a valutare il PROBLEMA RESIDUO dopo l'attivazione di una
+    protezione, invece del passato gia' curato."""
+    if not since:
+        return trades
+    from datetime import datetime as _dt
+    cutoff = _dt.strptime(since, "%Y-%m-%d")
+    return [t for t in trades if t.created_at and t.created_at >= cutoff]
+
+
 def _build_ctx(rule_type, db):
     ctx = {"news_times": []}
     if rule_type == "exclude_near_news":
@@ -183,8 +226,9 @@ def _bootstrap_confidence(contribs, n_resamples=BOOTSTRAP_N, seed=BOOTSTRAP_SEED
     return round(positive / n_resamples, 3)
 
 
-def simulate(rule_type: str, params: dict, db=None) -> dict:
-    """Applica la regola a TUTTI i trade reali chiusi. Ritorna il confronto
+def simulate(rule_type: str, params: dict, db=None, since: Optional[str] = None) -> dict:
+    """Applica la regola ai trade reali chiusi (tutti, o dal 'since' in poi per
+    valutare il problema residuo dopo una protezione). Ritorna il confronto
     esatto baseline vs simulato. Mai solleva: errori -> {"ok": False, ...}."""
     from database import SessionLocal, NewsEvent
     from ai_advisor import _real_closed_trades
@@ -195,7 +239,7 @@ def simulate(rule_type: str, params: dict, db=None) -> dict:
     if db is None:
         db = SessionLocal(); close = True
     try:
-        trades = _real_closed_trades(db)
+        trades = _filter_since(_real_closed_trades(db), since)
         ctx = _build_ctx(rule_type, db)
         base_pnls, sim_pnls = [], []
         excluded, modified = [], []
@@ -216,6 +260,7 @@ def simulate(rule_type: str, params: dict, db=None) -> dict:
         return {
             "ok": True,
             "rule": {"type": rule_type, "params": params or {}},
+            "since": since,
             "baseline": baseline,
             "simulated": simulated,
             "delta_pnl": delta,
@@ -235,7 +280,7 @@ def simulate(rule_type: str, params: dict, db=None) -> dict:
             db.close()
 
 
-def validate(rule_type: str, params: dict, db=None) -> dict:
+def validate(rule_type: str, params: dict, db=None, since: Optional[str] = None) -> dict:
     """Simulazione + VALIDAZIONE STATISTICA. Una regola e' "promossa"
     (passed=True) solo se:
       - delta > 0 (migliora il risultato storico)
@@ -255,10 +300,10 @@ def validate(rule_type: str, params: dict, db=None) -> dict:
     if db is None:
         db = SessionLocal(); close = True
     try:
-        res = simulate(rule_type, params, db)
+        res = simulate(rule_type, params, db, since=since)
         if not res.get("ok"):
             return res
-        trades = _real_closed_trades(db)
+        trades = _filter_since(_real_closed_trades(db), since)
         ctx = _build_ctx(rule_type, db)
         decisions = _apply_decisions(rule_type, params, trades, ctx)
         contribs = _contributions(decisions)
@@ -337,13 +382,18 @@ def sweep(db=None, max_entries: int = 25) -> dict:
         for m in (30, 60):
             candidates.append(("exclude_near_news", {"minutes": m}))
 
-        promoted, rejected = [], []
+        promoted, rejected, covered = [], [], []
         for rule_type, params in candidates:
-            res = validate(rule_type, params, db)
+            prot = COVERED_RULES.get(rule_type)
+            since = prot["attiva_dal"] if prot else None
+            # Regola coperta da protezione attiva: valutata SOLO sul periodo
+            # successivo all'attivazione (problema residuo). Il passato e' gia'
+            # curato e non e' un'opportunita'.
+            res = validate(rule_type, params, db, since=since)
             if not res.get("ok"):
                 continue
             v = res["validation"]
-            if v["n_affected"] == 0:
+            if v["n_affected"] == 0 and not prot:
                 continue  # regola che non tocca nulla: rumore
             entry = {
                 "sim_type": rule_type,
@@ -354,8 +404,21 @@ def sweep(db=None, max_entries: int = 25) -> dict:
                 "top1_share": v["top1_share"],
                 "category": v["category"],
             }
+            if prot:
+                entry["coperta_da"] = prot["nome"]
+                entry["protezione_attiva_dal"] = prot["attiva_dal"]
+                entry["valutazione"] = f"solo trade dal {prot['attiva_dal']} (problema residuo)"
+                full = simulate(rule_type, params, db)
+                entry["delta_storico_pre_protezione"] = round(
+                    (full.get("delta_pnl") or 0) - res["delta_pnl"], 2) if full.get("ok") else None
             if v["passed"]:
                 promoted.append(entry)
+            elif prot:
+                # coperta e senza problema residuo validato: la protezione basta
+                entry["fail_reasons"] = v["fail_reasons"]
+                entry["esito"] = ("protezione attiva e problema residuo non validato: "
+                                  "NON raccomandare, la difesa esistente sta lavorando")
+                covered.append(entry)
             elif res["delta_pnl"] > 0:
                 # sembrava buona ma bocciata: l'LLM DEVE saperlo (anti-illusione)
                 entry["fail_reasons"] = v["fail_reasons"]
@@ -364,11 +427,14 @@ def sweep(db=None, max_entries: int = 25) -> dict:
         rejected.sort(key=lambda e: -e["delta_pnl"])
         return {
             "note": ("Regole gia' testate e validate statisticamente sul campione "
-                     "storico. Solo le PROMOSSE sono raccomandabili."),
+                     "storico. Solo le PROMOSSE sono raccomandabili. Le regole "
+                     "coperte da protezioni attive sono valutate sul periodo "
+                     "successivo all'attivazione."),
             "gates": {"min_sample": MIN_SAMPLE, "top1_share_max": TOP1_SHARE_MAX,
                       "bootstrap_confidence_min": CONFIDENCE_MIN},
             "promosse": promoted[:max_entries],
             "bocciate_interessanti": rejected[:max_entries],
+            "gia_coperte": covered[:max_entries],
         }
     finally:
         if close:
