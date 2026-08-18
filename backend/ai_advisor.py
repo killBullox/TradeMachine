@@ -312,6 +312,16 @@ def build_dossier(db=None) -> dict:
             _log(f"protezioni block err: {str(_e)[:120]}")
             d["protezioni_attive"] = []
 
+        # Strategia del trader (contesto ICT): setup rilevati algoritmicamente
+        # dalle candele attorno a ogni entry (ict_engine), con esiti per setup,
+        # kill zone, premium/discount, with/counter trend.
+        try:
+            import ict_engine as _ict
+            d["strategia_trader"] = _ict.strategy_stats(db)
+        except Exception as _e:
+            _log(f"strategy stats err: {str(_e)[:120]}")
+            d["strategia_trader"] = {}
+
         # Regole AIA gia' in gestione utente (Monitor Test / Reale): l'advisor
         # non deve riproporle come consigli nuovi, ma puo' commentarne l'esito.
         try:
@@ -411,7 +421,26 @@ residuo validato).
 REGOLE GIA' IN GESTIONE UTENTE: il dossier contiene "regole_aia_in_gestione"
 (regole che l'utente ha gia' messo in Monitor Test o approvato in Monitor
 Reale). NON riproporle come raccomandazioni nuove: l'utente le sta gia'
-gestendo. Puoi commentarne l'andamento in patterns se rilevante."""
+gestendo. Puoi commentarne l'andamento in patterns se rilevante.
+
+STRATEGIA DEL TRADER (contesto ICT): il trader opera con concetti ICT/Smart
+Money. Il dossier contiene "strategia_trader": per ogni trade il sistema ha
+ricostruito il contesto dalle candele M5/M15 attorno all'entry e classificato
+il SETUP: sweep_reversal (entry dopo liquidity sweep), ob_retest (retest di
+order block), fvg_entry (entry dentro un fair value gap), bos_retest (break of
+structure con retest), bos_no_retest (BOS inseguito senza conferma),
+counter_trend (contro il bias M15), no_context. Con esiti per setup, kill zone
+(London/NY), premium/discount, with/counter trend.
+- La sezione "strategia_trader" del report e' il posto per la SINTESI: cosa fa
+  sistematicamente il trader, quali setup gli rendono e quali lo danneggiano,
+  cosa ignora o abusa (es. "entra spesso su BOS senza retest: X trade, WR Y%,
+  Z$ — dovrebbe aspettare conferme"), sempre coi numeri del dossier.
+- Un setup dannoso puo' diventare una raccomandazione SOLO se la regola
+  exclude_setup corrispondente e' nelle "promosse" dello sweep (stessi gate
+  statistici di tutto il resto). Copia sim_type/sim_params esatti.
+- Considera coverage: se pochi trade hanno contesto, dillo.
+- I setup sono approssimazioni algoritmiche consistenti di concetti in parte
+  discrezionali: parlane come "rilevati dal sistema", non come verita' assolute."""
 
 REPORT_SCHEMA = {
     "type": "object",
@@ -443,9 +472,12 @@ REPORT_SCHEMA = {
         "confidence_note": {"type": "string"},
     },
     "required": ["executive_summary", "trader_edge", "execution_gaps",
-                 "risk_profile", "patterns", "recommendations", "confidence_note"],
+                 "risk_profile", "patterns", "strategia_trader",
+                 "recommendations", "confidence_note"],
     "additionalProperties": False,
 }
+REPORT_SCHEMA["properties"]["strategia_trader"] = {
+    "type": "array", "items": {"type": "string"}}
 
 
 def _get_client():
@@ -496,6 +528,13 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
     report_date = _roma_now().strftime("%Y-%m-%d")
     try:
         import sim_engine
+        # Contesti ICT: calcola (incrementale) il contesto dei trade nuovi
+        # prima del dossier, cosi' strategia_trader e sweep li vedono.
+        try:
+            import ict_engine
+            ict_engine.ensure_contexts(db)
+        except Exception as _e:
+            _log(f"ensure_contexts err: {str(_e)[:120]}")
         dossier = build_dossier(db)
         # Sweep sistematico PRE-LLM: regole gia' testate/validate. L'LLM puo'
         # raccomandare SOLO le promosse (le bocciate le cita come scartate).

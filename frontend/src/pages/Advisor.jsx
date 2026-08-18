@@ -336,6 +336,7 @@ export default function Advisor() {
         </div>
       )}
 
+      <Section icon={Brain} title="Strategia del trader (contesto ICT)" items={s?.strategia_trader} color="text-brand-300" />
       <Section icon={TrendingUp} title="Edge del trader" items={s?.trader_edge} color="text-emerald-300" />
       <Section icon={AlertTriangle} title="Buchi di esecuzione" items={s?.execution_gaps} color="text-rose-300" />
       <Section icon={Shield} title="Profilo di rischio" items={s?.risk_profile} color="text-amber-300" />

@@ -314,6 +314,19 @@ class AdvisorRule(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class TradeContext(Base):
+    """Contesto ICT di un trade reale, calcolato deterministicamente dalle
+    candele M5/M15 attorno all'entry (ict_engine): setup primario + features
+    (bias, BOS/retest, FVG, OB, sweep, premium/discount, kill zone)."""
+    __tablename__ = "trade_contexts"
+    id = Column(Integer, primary_key=True, index=True)
+    signal_id = Column(Integer, unique=True, index=True, nullable=False)
+    setup = Column(String(40), index=True)      # sweep_reversal | ob_retest | ...
+    candles_ok = Column(Boolean, default=False)
+    features_json = Column(Text, nullable=True)
+    computed_at = Column(DateTime, default=datetime.utcnow)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     import sqlalchemy as sa

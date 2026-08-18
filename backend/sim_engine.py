@@ -31,7 +31,7 @@ CAVEATS = [
 
 SUPPORTED_RULES = ("exclude_hours", "exclude_sessions", "exclude_weekdays",
                    "exclude_direction", "min_rr_tp1", "cap_loss_at_risk",
-                   "scale_risk", "exclude_near_news")
+                   "scale_risk", "exclude_near_news", "exclude_setup")
 
 # Regole STRUTTURALI (policy di sicurezza deterministiche, es. enforcement del
 # max-risk): esenti dai gate di campione/robustezza perche' non sono scommesse
@@ -153,6 +153,11 @@ def _decide(rule_type, params, t, ctx):
         if ent and any(abs((ent - et).total_seconds()) <= minutes * 60 for et in ctx["news_times"]):
             return ("exclude", None)
         return ("keep", pnl)
+    if rule_type == "exclude_setup":
+        # Evita i trade con un dato setup ICT (contesto pre-calcolato da
+        # ict_engine). Trade senza contesto -> tenuti (conservativo).
+        setup = str(params["setup"])
+        return ("exclude", None) if ctx.get("setups", {}).get(t.id) == setup else ("keep", pnl)
     raise ValueError(f"regola non supportata: {rule_type}")
 
 
@@ -181,12 +186,19 @@ def _filter_since(trades, since):
 
 
 def _build_ctx(rule_type, db):
-    ctx = {"news_times": []}
+    ctx = {"news_times": [], "setups": {}}
     if rule_type == "exclude_near_news":
         try:
             from database import NewsEvent
             ctx["news_times"] = [e.event_time for e in db.query(NewsEvent).all()
                                  if e.event_time]
+        except Exception:
+            pass
+    if rule_type == "exclude_setup":
+        try:
+            from database import TradeContext
+            ctx["setups"] = {tc.signal_id: tc.setup for tc in
+                             db.query(TradeContext).filter(TradeContext.candles_ok == True).all()}  # noqa: E712
         except Exception:
             pass
     return ctx
@@ -389,6 +401,16 @@ def sweep(db=None, max_entries: int = 25) -> dict:
             candidates.append(("scale_risk", {"factor": f}))
         for m in (30, 60):
             candidates.append(("exclude_near_news", {"minutes": m}))
+        # Setup ICT presenti nei contesti calcolati (strategia del trader)
+        try:
+            from database import TradeContext
+            labels = {tc.setup for tc in db.query(TradeContext)
+                      .filter(TradeContext.candles_ok == True).all()}  # noqa: E712
+            for lbl in sorted(labels):
+                if lbl and lbl != "no_data":
+                    candidates.append(("exclude_setup", {"setup": lbl}))
+        except Exception:
+            pass
 
         promoted, rejected, covered = [], [], []
         for rule_type, params in candidates:
