@@ -385,6 +385,63 @@ export default function Advisor() {
         </div>
       )}
 
+      {/* REGOLE PROMOSSE DALLA VALIDAZIONE — azionabili SEMPRE, direttamente
+          dal motore (non dipendono da come l'LLM le ha descritte) */}
+      {(() => {
+        const inGestione = new Set([...rules.test, ...rules.real].map(r => `${r.sim_type}|${JSON.stringify(r.sim_params)}`))
+        const promosse = (report?.stats?.validated_rules_sweep?.promosse || [])
+          .filter(e => !inGestione.has(`${e.sim_type}|${JSON.stringify(JSON.parse(e.sim_params || '{}'))}`))
+        if (promosse.length === 0) return null
+        const act = async (e, mode) => {
+          const res = await fetch('/api/advisor/rules', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              mode, sim_type: e.sim_type, sim_params: JSON.parse(e.sim_params || '{}'),
+              title: `${e.sim_type} ${e.sim_params}`,
+              expected: { delta_pnl: e.delta_pnl, validation: { n_affected: e.n_affected, bootstrap_confidence: e.bootstrap_confidence } },
+            }),
+          }).then(r => r.json())
+          if (res.ok) toast.success(mode === 'test' ? 'Regola in Monitor Test' : 'Regola APPROVATA')
+          else toast.error(res.error || 'Errore')
+          load()
+        }
+        return (
+          <div className="card p-5 border border-sky-600/30">
+            <h2 className="text-sm font-semibold text-sky-300 mb-1 uppercase tracking-wider flex items-center gap-2">
+              <Shield size={15} /> Regole promosse dalla validazione
+            </h2>
+            <p className="text-xs text-slate-500 mb-3">
+              Regole che hanno superato TUTTI i gate statistici (campione, robustezza, bootstrap).
+              Azionabili direttamente, indipendentemente dalla prosa del report.
+            </p>
+            <div className="space-y-2">
+              {promosse.map((e, i) => (
+                <div key={i} className="bg-slate-800/60 rounded-lg p-3 flex items-center justify-between gap-2 flex-wrap">
+                  <div className="text-xs">
+                    <p className="text-sm font-semibold text-white font-mono">{e.sim_type} {e.sim_params}</p>
+                    <p className="text-slate-400">
+                      Delta validato: <span className={e.delta_pnl > 0 ? 'text-emerald-300 font-semibold' : 'text-rose-300'}>
+                        {e.delta_pnl >= 0 ? '+' : ''}{e.delta_pnl}$</span>
+                      {' · '}campione {e.n_affected} trade
+                      {e.bootstrap_confidence != null && ` · confidenza ${Math.round(e.bootstrap_confidence * 100)}%`}
+                      {e.coperta_da && <span className="text-amber-400"> · rafforzamento di protezione esistente</span>}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => act(e, 'test')} className="px-3 py-1.5 text-xs bg-violet-600 hover:bg-violet-500 text-white rounded-lg font-medium">
+                      🧪 Monitora
+                    </button>
+                    <button onClick={() => act(e, 'real')} className="px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-medium">
+                      ⚡ Approva
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
+
       {/* MONITOR TEST — nessun effetto reale, statistiche virtuali live */}
       <div className="card p-5 border border-violet-600/30">
         <h2 className="text-sm font-semibold text-violet-300 mb-1 uppercase tracking-wider flex items-center gap-2">
