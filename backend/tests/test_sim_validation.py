@@ -154,8 +154,9 @@ class TestSweepEDemotion:
             assert rep["status"] == "ok"
             secs = rep["sections"]
             # la fragile e' stata DEGRADATA, non presentata come consiglio
-            assert len(secs["recommendations"]) == 1
-            assert secs["recommendations"][0]["title"] == "Consiglio operativo"
+            non_synth = [r for r in secs["recommendations"] if not r.get("synthetic")]
+            assert len(non_synth) == 1
+            assert non_synth[0]["title"] == "Consiglio operativo"
             demoted = secs["scartate_dalla_verifica"]
             assert len(demoted) == 1
             assert "15" in demoted[0]["title"]
@@ -184,7 +185,7 @@ class TestSweepEDemotion:
             }
             monkeypatch.setattr(ai_advisor, "_call_llm", lambda d: (sections, 10, 10))
             rep = ai_advisor.generate_report(db)
-            recs = rep["sections"]["recommendations"]
+            recs = [r for r in rep["sections"]["recommendations"] if not r.get("synthetic")]
             assert len(recs) == 1
             assert recs[0]["impact"]["validation"]["passed"] is True
             assert "scartate_dalla_verifica" not in rep["sections"]

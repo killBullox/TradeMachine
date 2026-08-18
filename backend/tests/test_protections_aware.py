@@ -128,7 +128,8 @@ class TestDossierEDemotion:
             monkeypatch.setattr(ai_advisor, "_call_llm", lambda d: (sections, 10, 10))
             rep = ai_advisor.generate_report(db)
             assert rep["status"] == "ok"
-            assert len(rep["sections"]["recommendations"]) == 0
+            assert not [r for r in rep["sections"]["recommendations"]
+                        if not r.get("synthetic")]
             dem = rep["sections"]["scartate_dalla_verifica"]
             assert len(dem) == 1
             assert "coperta dalla protezione" in dem[0]["demotion_reason"]
@@ -154,7 +155,7 @@ class TestDossierEDemotion:
             }
             monkeypatch.setattr(ai_advisor, "_call_llm", lambda d: (sections, 10, 10))
             rep = ai_advisor.generate_report(db)
-            recs = rep["sections"]["recommendations"]
+            recs = [r for r in rep["sections"]["recommendations"] if not r.get("synthetic")]
             assert len(recs) == 1
             assert recs[0]["impact"]["validation"]["passed"] is True
             assert recs[0]["impact"]["delta_pnl"] == 300.0   # solo residuo post-fix

@@ -546,6 +546,7 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
             dossier["validated_rules_sweep"] = {"promosse": [], "bocciate_interessanti": []}
         sections, tin, tout = _call_llm(dossier)
         _attach_impacts(sections, db)
+        _ensure_promoted_actionable(sections, dossier.get("validated_rules_sweep") or {}, db)
         rep = AiReport(report_date=report_date, model=ADVISOR_MODEL,
                        sections_json=json.dumps(sections, ensure_ascii=False),
                        stats_json=json.dumps(dossier, ensure_ascii=False, default=str),
@@ -629,6 +630,58 @@ def _attach_impacts(sections: dict, db) -> None:
         sections["recommendations"] = kept
         if demoted:
             sections["scartate_dalla_verifica"] = demoted
+
+
+def _ensure_promoted_actionable(sections: dict, sweep: dict, db) -> None:
+    """GARANZIA STRUTTURALE: ogni regola PROMOSSA dallo sweep deve comparire tra
+    le raccomandazioni in forma AZIONABILE (sim_type+params corretti, quindi coi
+    bottoni Rifiuta/Monitora/Approva in UI). Se l'LLM l'ha descritta solo a
+    parole (sim_type='none') o l'ha omessa, il codice la aggiunge come
+    raccomandazione sintetica coi numeri del motore. Mai solleva."""
+    try:
+        import sim_engine
+        import advisor_rules as _ar
+        recs = sections.setdefault("recommendations", [])
+
+        def _canon(p):
+            try:
+                return json.dumps(json.loads(p) if isinstance(p, str) else (p or {}),
+                                  sort_keys=True)
+            except Exception:
+                return "{}"
+
+        claimed = {(r.get("sim_type"), _canon(r.get("sim_params")))
+                   for r in recs if r.get("sim_type") and r.get("sim_type") != "none"}
+        for e in sweep.get("promosse", []):
+            key = (e["sim_type"], _canon(e["sim_params"]))
+            if key in claimed:
+                continue
+            params = json.loads(e["sim_params"] or "{}")
+            # gia' in gestione utente? allora non va riproposta
+            if _ar.find_active(db, e["sim_type"], params):
+                continue
+            prot = sim_engine.COVERED_RULES.get(e["sim_type"])
+            impact = sim_engine.validate(e["sim_type"], params, db,
+                                         since=prot["attiva_dal"] if prot else None)
+            if not (impact.get("ok") and (impact.get("validation") or {}).get("passed")):
+                continue    # dev'essere ancora valida al momento del report
+            conf = e.get("bootstrap_confidence")
+            recs.append({
+                "title": f"Regola validata dal motore: {e['sim_type']} {e['sim_params']}",
+                "detail": (f"Promossa dallo sweep sistematico: delta {e['delta_pnl']}$ su "
+                           f"{e['n_affected']} trade toccati"
+                           + (f", confidenza bootstrap {round(conf * 100)}%" if conf is not None else "")
+                           + ". Aggiunta automaticamente dal motore perche' il report "
+                             "non la includeva in forma azionabile."),
+                "priority": "alta" if abs(e.get("delta_pnl") or 0) >= 1000 else "media",
+                "sim_type": e["sim_type"],
+                "sim_params": e["sim_params"],
+                "impact": impact,
+                "synthetic": True,
+            })
+            _log(f"raccomandazione sintetica aggiunta: {e['sim_type']} {e['sim_params']}")
+    except Exception as e:
+        _log(f"ensure_promoted_actionable err: {str(e)[:150]}")
 
 
 def _report_to_dict(rep) -> dict:

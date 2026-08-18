@@ -168,7 +168,10 @@ class TestAdvisorIntegration:
             }
             monkeypatch.setattr(ai_advisor, "_call_llm", lambda d: (sections, 10, 10))
             rep = ai_advisor.generate_report(db)
-            assert len(rep["sections"]["recommendations"]) == 0
+            # nessuna raccomandazione DELL'LLM sopravvive (le synthetic della
+            # garanzia promoted-actionable sono a parte e legittime)
+            assert not [r for r in rep["sections"]["recommendations"]
+                        if not r.get("synthetic")]
             dem = rep["sections"]["scartate_dalla_verifica"]
             assert "gia' in gestione: Monitor Test" in dem[0]["demotion_reason"]
         finally:
