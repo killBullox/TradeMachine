@@ -83,44 +83,30 @@ class TestReconcile:
         finally:
             db.close()
 
-    def test_none_type_omesso_riproposto_standing(self, in_memory_db, fake_mt5):
-        import advisor_registry as reg
-        db = in_memory_db()
-        try:
-            reg.reconcile({"recommendations": [_rec()]}, db, "2026-08-19")
-            # il giorno dopo l'LLM lo dimentica -> standing, riconferma NON bumpata
-            sections = {"recommendations": []}
-            reg.reconcile(sections, db, "2026-08-20")
-            assert len(sections["recommendations"]) == 1
-            st = sections["recommendations"][0]
-            assert st["standing"] is True
-            assert st["title"] == "Ridurre la latenza"
-            assert st["registry"]["last_confirmed"] == "2026-08-19"  # non oggi
-            assert st["azioni"]                                     # soluzioni conservate
-        finally:
-            db.close()
-
-    def test_none_type_senza_azioni_invalidata_non_standing(self, in_memory_db, fake_mt5):
-        """Policy 'solo azionabili': voce-chiacchiera pre-policy (senza azioni)
-        NON viene riproposta -> invalidata d'ufficio; se l'LLM la ripropone
-        CON azioni si riapre."""
+    def test_none_type_omesso_decade_mai_zombie(self, in_memory_db, fake_mt5):
+        """La validita' di un consiglio non quantificato la giudica SOLO l'LLM
+        col dossier di oggi: se non lo riconferma, DECADE (niente standing a
+        pappagallo con testo di ieri). Se lo ripropone in futuro, si riapre."""
         import advisor_registry as reg
         from database import AdvisorRec
         db = in_memory_db()
         try:
-            r = _rec(); r.pop("azioni")
-            reg.reconcile({"recommendations": [r]}, db, "2026-08-19")
+            reg.reconcile({"recommendations": [_rec()]}, db, "2026-08-19")
+            # il giorno dopo l'LLM non lo riconferma -> decade, NON standing
             sections = {"recommendations": []}
             reg.reconcile(sections, db, "2026-08-20")
             db.commit()
             assert sections["recommendations"] == []
+            inv = sections["registro_invalidati"]
+            assert len(inv) == 1 and "non riconfermato" in inv[0]["motivo"]
             e = db.query(AdvisorRec).one()
-            assert e.status == "invalidated" and "non azionabile" in e.invalid_reason
-            # riproposta CON azioni -> si riapre
+            assert e.status == "invalidated"
+            # riproposto dall'LLM -> si riapre con storico conservato
             reg.reconcile({"recommendations": [_rec()]}, db, "2026-08-21")
             db.commit()
             e = db.query(AdvisorRec).one()
-            assert e.status == "open" and e.azioni_json
+            assert e.status == "open" and e.first_seen == "2026-08-19"
+            assert e.times_seen == 2
         finally:
             db.close()
 

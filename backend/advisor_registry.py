@@ -193,20 +193,23 @@ def _reconcile_inner(sections: dict, db, report_date: str) -> None:
                 })
                 _log(f"invalidata: {entry.rec_key} ({reason[:80]})")
         else:
-            # none-type: nessuna rivalidazione possibile. Policy "solo
-            # azionabili": senza soluzioni concrete salvate NON viene
-            # riproposta (voci-chiacchiera pre-policy: invalidate d'ufficio;
-            # se l'LLM la ripropone CON azioni, l'upsert la riapre).
-            if not entry.azioni_json:
-                entry.status = "invalidated"
-                entry.invalid_reason = ("non azionabile: nessuna soluzione "
-                                        "concreta (policy 'solo raccomandazioni azionabili')")
-                entry.updated_at = datetime.utcnow()
-                continue
-            # azionabile: resta aperta e viene riproposta cosi' com'e'
-            # (last_confirmed NON aggiornato: in UI si vede che il report
-            # odierno non l'ha riconfermata)
-            recs.append(_standing_rec(entry))
+            # none-type: la validita' la giudica SOLO l'LLM col dossier di
+            # OGGI (il motore non puo' rivalidarla). Se oggi non l'ha
+            # riconfermata (stessa key), il consiglio DECADE: mai riproporre
+            # a pappagallo testo di ieri che i dati di oggi non supportano
+            # (successo con 'colocation' dopo la scomposizione latenza).
+            # Se l'LLM lo ripropone in futuro, l'upsert lo riapre da solo.
+            entry.status = "invalidated"
+            entry.invalid_reason = ("non riconfermato dal report odierno: "
+                                    "i dati attuali non lo supportano piu'")
+            entry.updated_at = datetime.utcnow()
+            sections.setdefault("registro_invalidati", []).append({
+                "key": entry.rec_key, "title": entry.title,
+                "first_seen": entry.first_seen,
+                "times_seen": entry.times_seen,
+                "motivo": entry.invalid_reason,
+            })
+            _log(f"none-type decaduta (non riconfermata): {entry.rec_key}")
 
 
 def _standing_rec(entry, impact: Optional[dict] = None) -> dict:
