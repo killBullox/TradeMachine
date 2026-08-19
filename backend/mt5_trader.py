@@ -3631,6 +3631,14 @@ def sync_positions() -> list:
                 sig.closed_at  = close_time
                 sig.pnl_usd    = round(total_profit, 2)
                 sig.updated_at = datetime.utcnow()
+                # Contesto ICT calcolato SUBITO alla chiusura (dati di fill
+                # definitivi): il Monitor Test AIA si aggiorna in near-real-time
+                # invece che al batch giornaliero.
+                try:
+                    import ict_engine as _ict
+                    _ict.save_context_if_missing(db, sig)
+                except Exception as _e:
+                    log(f"#{sig.id} ict context alla chiusura err: {str(_e)[:80]}")
                 # Build_mt5_trade_log solo se trade_log proprio vuoto (legacy)
                 if not sig.trade_log:
                     sig.trade_log = _build_mt5_trade_log(sig, closed_tickets, is_buy, new_status)

@@ -149,15 +149,34 @@ def active_rules(db, mode: Optional[str] = None):
 
 def check_signal_block(sig, db) -> Optional[str]:
     """Valuta il nuovo segnale contro le regole di ESCLUSIONE approvate (Monitor
-    Reale). Ritorna il motivo del blocco (-> paper trade) o None. Mai solleva."""
+    Reale). Ritorna il motivo del blocco (-> paper trade) o None. Mai solleva.
+
+    exclude_setup: il contesto ICT viene calcolato IN TEMPO REALE al momento
+    del segnale (candele fino ad adesso) — solo se una regola simile e' attiva,
+    per non aggiungere latenza quando non serve."""
     try:
         import sim_engine
         rules = [r for r in active_rules(db, mode="real")
-                 if r.sim_type in EXCLUSION_RULES]
+                 if r.sim_type in EXCLUSION_RULES or r.sim_type == "exclude_setup"]
         if not rules:
             return None
+        live_setup = None
+        setup_rules = [r for r in rules if r.sim_type == "exclude_setup"]
+        if setup_rules:
+            try:
+                import ict_engine
+                ctx_live = ict_engine.build_context_for_signal(sig)
+                live_setup = ctx_live.get("setup")
+                _log(f"#{sig.id} contesto ICT live all'intake: {live_setup}")
+            except Exception as e:
+                _log(f"#{sig.id} contesto ICT live err: {str(e)[:100]}")
         for r in rules:
             params = json.loads(r.sim_params or "{}")
+            if r.sim_type == "exclude_setup":
+                if live_setup and live_setup not in ("no_data", "no_context") \
+                        and live_setup == str(params.get("setup")):
+                    return f"{_FILTER_PREFIX}{r.id}: {r.title} (setup live: {live_setup})"
+                continue
             ctx = {"news_times": []}
             if r.sim_type == "exclude_near_news":
                 from database import NewsEvent

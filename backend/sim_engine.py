@@ -112,8 +112,10 @@ def _planned_rr_tp1(t) -> Optional[float]:
 
 def _decide(rule_type, params, t, ctx):
     """Ritorna ("keep", pnl) | ("exclude", None) | ("modify", new_pnl).
-    Solleva ValueError su parametri invalidi (validati al primo trade)."""
-    pnl = float(t.pnl_usd)
+    Solleva ValueError su parametri invalidi (validati al primo trade).
+    pnl_usd None (segnale nuovo all'intake, enforcement) -> 0.0: il pnl serve
+    solo alle simulazioni, la decisione keep/exclude non ne dipende."""
+    pnl = float(t.pnl_usd) if t.pnl_usd is not None else 0.0
     if rule_type == "exclude_hours":
         hours = [int(h) for h in params["hours"]]
         r = _roma(t.created_at)

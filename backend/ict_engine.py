@@ -323,20 +323,58 @@ def fetch_candles(symbol: str, timeframe_key: str, utc_from, utc_to):
 
 
 def build_context_for_signal(sig) -> dict:
-    """Contesto ICT per un singolo trade reale (fetch M5+M15 e classifica)."""
+    """Contesto ICT per un trade (fetch M5+M15 e classifica).
+    Funziona sia POST-fill (actual_entry_price noto: dato definitivo) sia
+    ALL'INTAKE per l'enforcement (fallback: prezzo corrente o entry segnale)."""
     try:
         from mt5_trader import get_mt5_symbol
         symbol = get_mt5_symbol(sig.symbol)
     except Exception:
         symbol = sig.symbol
-    entry_time = sig.entered_at or sig.created_at
-    entry_price = float(sig.actual_entry_price)
+    entry_time = sig.entered_at or sig.created_at or datetime.utcnow()
+    entry_price = None
+    if sig.actual_entry_price:
+        entry_price = float(sig.actual_entry_price)
+    else:
+        # intake: usa il prezzo corrente (approssimazione dichiarata) o l'entry
+        mt5 = _get_mt5()
+        try:
+            if mt5:
+                tick = mt5.symbol_info_tick(symbol)
+                if tick:
+                    entry_price = float(tick.ask if (sig.direction or "buy").lower() == "buy"
+                                        else tick.bid)
+        except Exception:
+            pass
+        if not entry_price and sig.entry_price:
+            entry_price = float(sig.entry_price)
+    if not entry_price:
+        return {"setup": "no_data", "candles_ok": False}
     m5 = fetch_candles(symbol, "M5", entry_time - timedelta(hours=M5_WINDOW_H),
                        entry_time + timedelta(minutes=10))
     m15 = fetch_candles(symbol, "M15", entry_time - timedelta(hours=M15_WINDOW_H),
                         entry_time)
     return classify_entry(m5, m15, entry_time, entry_price,
                           (sig.direction or "buy").lower())
+
+
+def save_context_if_missing(db, sig) -> Optional[str]:
+    """Calcola e salva il contesto ICT per un trade appena CHIUSO (dati di fill
+    definitivi) se non esiste gia'. Cosi' il Monitor Test si aggiorna subito,
+    senza aspettare il batch giornaliero. Ritorna il setup o None. Mai solleva."""
+    try:
+        from database import TradeContext
+        if db.query(TradeContext).filter(TradeContext.signal_id == sig.id).first():
+            return None
+        ctx = build_context_for_signal(sig)
+        db.add(TradeContext(signal_id=sig.id, setup=ctx.get("setup", "no_data"),
+                            candles_ok=bool(ctx.get("candles_ok")),
+                            features_json=json.dumps(ctx, ensure_ascii=False, default=str)))
+        _log(f"contesto ICT #{sig.id} alla chiusura: {ctx.get('setup')}")
+        return ctx.get("setup")
+    except Exception as e:
+        _log(f"save_context_if_missing #{getattr(sig, 'id', '?')} err: {str(e)[:100]}")
+        return None
 
 
 def ensure_contexts(db=None, max_new: int = 400) -> dict:
