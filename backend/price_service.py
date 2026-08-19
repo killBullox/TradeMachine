@@ -168,12 +168,15 @@ def get_ticks_mt5(symbol: str, since_utc: datetime, until_utc: Optional[datetime
         import MetaTrader5 as mt5
         mt5.symbol_select(mt5_sym, True)
 
-        # Offset server: aggiungiamo al datetime UTC per ottenere il "server time"
+        # Offset server: aggiungiamo al datetime UTC per ottenere il "server time".
+        # TZ-AWARE UTC obbligatorio: il wrapper MT5 converte i naive col fuso
+        # LOCALE della macchina (sul VPS con tz Roma la finestra usciva -2h).
+        from datetime import timezone as _tzu
         offset_s = _get_mt5_server_offset()
-        server_since = since_utc + timedelta(seconds=offset_s)
+        server_since = (since_utc + timedelta(seconds=offset_s)).replace(tzinfo=_tzu.utc)
 
         if until_utc:
-            server_until = until_utc + timedelta(seconds=offset_s)
+            server_until = (until_utc + timedelta(seconds=offset_s)).replace(tzinfo=_tzu.utc)
             raw = mt5.copy_ticks_range(mt5_sym, server_since, server_until, mt5.COPY_TICKS_ALL)
         else:
             raw = mt5.copy_ticks_from(mt5_sym, server_since, 500_000, mt5.COPY_TICKS_ALL)

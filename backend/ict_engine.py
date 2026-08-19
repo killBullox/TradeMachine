@@ -303,11 +303,15 @@ def fetch_candles(symbol: str, timeframe_key: str, utc_from, utc_to):
     if mt5 is None:
         return []
     try:
+        from datetime import timezone as _tz
         from mt5_time import detect_mt5_server_offset, mt5_epoch_to_utc
         off = detect_mt5_server_offset(symbol)
         tf = {"M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15}[timeframe_key]
-        srv_from = utc_from + timedelta(seconds=off)
-        srv_to = utc_to + timedelta(seconds=off)
+        # AWARE UTC obbligatorio: il wrapper MT5 converte i naive col fuso
+        # LOCALE della macchina -> sul VPS (tz Roma) la finestra arrivava
+        # spostata di 2h e il contesto era calcolato PRIMA dell'entry.
+        srv_from = (utc_from + timedelta(seconds=off)).replace(tzinfo=_tz.utc)
+        srv_to = (utc_to + timedelta(seconds=off)).replace(tzinfo=_tz.utc)
         rates = mt5.copy_rates_range(symbol, tf, srv_from, srv_to)
         if rates is None:
             return []

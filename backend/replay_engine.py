@@ -94,10 +94,15 @@ def fetch_ticks(symbol: str, utc_from, utc_to, attempts: int = 3):
         return []
     try:
         import time as _time
+        from datetime import timezone as _tz
         from mt5_time import detect_mt5_server_offset, mt5_epoch_to_utc
         off = detect_mt5_server_offset(symbol)
-        srv_from = utc_from + timedelta(seconds=off)
-        srv_to = utc_to + timedelta(seconds=off)
+        # AWARE UTC obbligatorio: il wrapper MT5 converte i naive col fuso
+        # LOCALE della macchina (bug trovato sul campo: finestra spostata di
+        # 2h sul VPS con tz Roma). Con tzinfo=UTC l'epoch e' esattamente lo
+        # pseudo-epoch server richiesto, su qualsiasi macchina.
+        srv_from = (utc_from + timedelta(seconds=off)).replace(tzinfo=_tz.utc)
+        srv_to = (utc_to + timedelta(seconds=off)).replace(tzinfo=_tz.utc)
         raw = None
         for att in range(attempts):
             raw = mt5.copy_ticks_range(symbol, srv_from, srv_to, mt5.COPY_TICKS_ALL)

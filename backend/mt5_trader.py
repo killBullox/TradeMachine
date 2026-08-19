@@ -436,7 +436,16 @@ def _analyze_late_catch_ticks(mt5, mt5_sym, sig, signal_ts, now_ts, pip_size):
         rng_high = max(ep_low, ep_high)
 
     try:
-        ticks = mt5.copy_ticks_range(mt5_sym, signal_ts, now_ts, mt5.COPY_TICKS_ALL)
+        # signal_ts/now_ts sono UTC naive: vanno portati a pseudo-epoch server
+        # E passati tz-aware UTC (il wrapper MT5 converte i naive col fuso
+        # LOCALE della macchina: sul VPS la finestra usciva spostata di ore e
+        # il verdetto late-catch era calcolato su tick sbagliati).
+        from datetime import timezone as _tzu
+        from mt5_time import detect_mt5_server_offset as _dso
+        _off = _dso(mt5_sym)
+        _srv_a = (signal_ts + timedelta(seconds=_off)).replace(tzinfo=_tzu.utc)
+        _srv_b = (now_ts + timedelta(seconds=_off)).replace(tzinfo=_tzu.utc)
+        ticks = mt5.copy_ticks_range(mt5_sym, _srv_a, _srv_b, mt5.COPY_TICKS_ALL)
     except Exception as e:
         log(f"#{sig.id} copy_ticks_range errore: {e}")
         return ("no_data", rng_low, rng_high, None)
