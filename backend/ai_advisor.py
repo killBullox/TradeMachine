@@ -251,8 +251,42 @@ def build_dossier(db=None) -> dict:
             except Exception:
                 pass
 
+        # Scomposizione latenza: la CATENA TECNICA (msg Telegram -> ordini sul
+        # broker) e' cosa nostra; l'attesa del fill (LIMIT che aspetta il
+        # pullback) e' struttura di mercato. Confonderle porta a raccomandare
+        # colocation inutili (misurato 2026-08-20: catena tecnica ~1,7s media).
+        tech_lat = []
+        try:
+            from database import Signal as _Sg
+            recent = (db.query(_Sg).filter(_Sg.trade_log.like("%mt5_placed%"))
+                      .order_by(_Sg.id.desc()).limit(150).all())
+            for s_ in recent:
+                try:
+                    lg = json.loads(s_.trade_log or "[]")
+                    t_recv = next((e.get("ts") for e in lg if e.get("event") == "received"), None)
+                    t_plc = next((e.get("ts") for e in lg if e.get("event") == "mt5_placed"), None)
+                    if t_recv and t_plc:
+                        dt_ = (datetime.fromisoformat(str(t_plc))
+                               - datetime.fromisoformat(str(t_recv))).total_seconds()
+                        if 0 <= dt_ < 300:
+                            tech_lat.append(dt_)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         out_of_range = [s for s in slippages if s > 0]
         d["execution"] = {
+            "latency_breakdown": {
+                "catena_tecnica_msg_to_broker_s": {
+                    "media": round(sum(tech_lat) / len(tech_lat), 1) if tech_lat else None,
+                    "max": round(max(tech_lat), 1) if tech_lat else None,
+                    "campione": len(tech_lat),
+                },
+                "nota": ("avg_fill_latency_s include l'ATTESA del pullback sui LIMIT "
+                         "(struttura di mercato, non riducibile con la tecnologia): la "
+                         "parte tecnica e' solo catena_tecnica_msg_to_broker_s."),
+            },
             "avg_slippage_beyond_range": round(sum(out_of_range) / len(out_of_range), 2) if out_of_range else 0.0,
             "max_slippage_beyond_range": round(max(out_of_range), 2) if out_of_range else 0.0,
             "fills_beyond_range": len(out_of_range),
@@ -473,6 +507,15 @@ trader): una raccomandazione esiste SOLO se porta con se' le soluzioni.
 - VIETATO raccomandare 'monitorare', 'presidiare', 'tracciare', 'valutare',
   'prestare attenzione': non sono azioni. Quelle considerazioni vanno in
   execution_gaps / risk_profile / patterns, NON in recommendations.
+- VIETATO anche il non-fare ('mantenere', 'non cambiare nulla'): se non c'e'
+  niente da fare, NESSUNA raccomandazione — lo stato lo dice gia' la UI.
+- LATENZA: usa execution.latency_breakdown. La catena tecnica (msg->broker)
+  e' gia' ~2s: MAI raccomandare colocation/ottimizzazioni infrastrutturali se
+  catena_tecnica e' gia' bassa. avg_fill_latency_s alto = attesa del pullback
+  sui LIMIT (mercato, non tecnologia): non e' riducibile con l'hardware.
+- SLIPPAGE oltre range: la regola quantificata e' abort_beyond_range
+  {"max_usd": X} (abort dell'ordine MARKET se il prezzo e' oltre X$ dal bordo
+  del range): raccomandala SOLO se promossa dallo sweep, coi numeri.
 - Un problema senza soluzione concreta NON genera una raccomandazione: lo
   descrivi nelle sezioni di analisi e basta. Meglio zero raccomandazioni che
   raccomandazioni-chiacchiera. Il codice sposta d'ufficio in 'osservazioni'
@@ -514,8 +557,8 @@ REPORT_SCHEMA = {
                                           "exclude_weekdays", "exclude_direction",
                                           "min_rr_tp1", "cap_loss_at_risk",
                                           "scale_risk", "exclude_near_news",
-                                          "exclude_setup", "mgmt_policy",
-                                          "entry_policy"]},
+                                          "exclude_setup", "abort_beyond_range",
+                                          "mgmt_policy", "entry_policy"]},
                     "sim_params": {"type": "string"},
                 },
                 "required": ["key", "title", "detail", "azioni", "priority",
@@ -656,7 +699,11 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
 
 
 _NON_AZIONI = ("monitorar", "presidiar", "tracciar", "osservar", "valutar",
-               "prestare attenzione", "tenere d'occhio", "attenzionar")
+               "prestare attenzione", "tenere d'occhio", "attenzionar",
+               # non-fare non e' un'azione: lo stato del sistema sta
+               # nell'empty-state, non in una raccomandazione
+               "mantenere", "non cambiare", "non applicare", "non aggiungere",
+               "non modificare", "lasciare invariat", "continuare a")
 
 
 def _enforce_actionable(sections: dict) -> None:

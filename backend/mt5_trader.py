@@ -1721,6 +1721,43 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     is_market = order_type in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL)
     action = mt5.TRADE_ACTION_DEAL if is_market else mt5.TRADE_ACTION_PENDING
 
+    # ── Regola AIA abort_beyond_range (Monitor Reale) ────────────────────────
+    # Solo per ordini MARKET: se il prezzo corrente e' oltre max_usd dal bordo
+    # avverso del range segnale, il fill sarebbe uno slippage inaccettabile ->
+    # trade abortito e convertito in PAPER (is_filtered), cosi' il monitor
+    # mostra quanto rende/costa il blocco. I LIMIT non c'entrano: fillano al
+    # livello, mai oltre il range.
+    if is_market:
+        try:
+            import advisor_rules as _arx
+            _abort = _arx.abort_beyond_rule()
+            if _abort:
+                _max_usd, _rid = _abort
+                _lo = float(sig.entry_price) if sig.entry_price else None
+                _hi = float(sig.entry_price_high) if sig.entry_price_high else _lo
+                if _lo is not None:
+                    _lo2, _hi2 = min(_lo, _hi or _lo), max(_lo, _hi or _lo)
+                    _px = current_ask if is_buy else current_bid
+                    _d = (_px - _hi2) if is_buy else (_lo2 - _px)
+                    if _d > _max_usd:
+                        from database import SessionLocal as _SLab
+                        msg = (f"MARKET abortito: prezzo {_px} oltre {round(_d, 2)}$ dal "
+                               f"range {_lo2}-{_hi2} (max {_max_usd}$, regola AIA #{_rid})")
+                        log(f"#{sig.id} {msg}")
+                        sig.is_filtered = True
+                        sig.filter_reason = f"Regola AIA #{_rid}: abort oltre {_max_usd}$ dal range (prezzo {_px})"
+                        _append_trade_log_mt5(sig, "aia_abort_beyond_range", msg,
+                                              {"px": _px, "beyond_usd": round(_d, 2),
+                                               "max_usd": _max_usd, "rule_id": _rid})
+                        _dbab = _SLab()
+                        try:
+                            _dbab.merge(sig); _dbab.commit()
+                        finally:
+                            _dbab.close()
+                        return []
+        except Exception as _e:
+            log(f"#{sig.id} abort_beyond_range check err (non blocco): {str(_e)[:100]}")
+
     order_type_names = {
         mt5.ORDER_TYPE_BUY: "BUY MARKET", mt5.ORDER_TYPE_SELL: "SELL MARKET",
         mt5.ORDER_TYPE_BUY_LIMIT: "BUY LIMIT", mt5.ORDER_TYPE_SELL_LIMIT: "SELL LIMIT",

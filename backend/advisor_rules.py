@@ -23,7 +23,10 @@ from datetime import datetime, timezone
 from typing import Optional
 
 EXCLUSION_RULES = ("exclude_hours", "exclude_sessions", "exclude_weekdays",
-                   "exclude_direction", "min_rr_tp1", "exclude_near_news")
+                   "exclude_direction", "min_rr_tp1", "exclude_near_news",
+                   "abort_beyond_range")   # abort: enforcement al momento
+                                           # dell'invio MARKET (mt5_trader),
+                                           # non all'intake (fill ignoto)
 MONITOR_ONLY_REAL = ("cap_loss_at_risk",)   # nessun enforcement reale sicuro
 
 _FILTER_PREFIX = "Regola AIA #"   # marker nel filter_reason dei trade bloccati
@@ -245,6 +248,34 @@ def check_signal_block(sig, db) -> Optional[str]:
     except Exception as e:
         _log(f"check_signal_block err: {str(e)[:120]}")
     return None
+
+
+def abort_beyond_rule(db=None):
+    """(max_usd, rule_id) della regola abort_beyond_range piu' severa attiva
+    in Monitor Reale, o None. Usata da mt5_trader al momento dell'invio
+    MARKET: se il prezzo corrente e' oltre max_usd dal bordo del range,
+    il trade viene abortito (-> paper). Mai solleva."""
+    from database import SessionLocal
+    close = False
+    if db is None:
+        db = SessionLocal(); close = True
+    try:
+        best = None
+        for r in active_rules(db, mode="real"):
+            if r.sim_type != "abort_beyond_range":
+                continue
+            try:
+                x = float(json.loads(r.sim_params or "{}").get("max_usd"))
+            except Exception:
+                continue
+            if x > 0 and (best is None or x < best[0]):
+                best = (x, r.id)
+        return best
+    except Exception:
+        return None
+    finally:
+        if close:
+            db.close()
 
 
 def scale_risk_factor(db=None) -> float:

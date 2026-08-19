@@ -32,7 +32,7 @@ CAVEATS = [
 SUPPORTED_RULES = ("exclude_hours", "exclude_sessions", "exclude_weekdays",
                    "exclude_direction", "min_rr_tp1", "cap_loss_at_risk",
                    "scale_risk", "exclude_near_news", "exclude_setup",
-                   "mgmt_policy", "entry_policy")
+                   "abort_beyond_range", "mgmt_policy", "entry_policy")
 
 # Regole valutate dal REPLAY TICK (replay_engine), non dal what-if trade-level:
 # simulate/validate le dispatchano. mgmt_policy = gestione alternativa
@@ -162,6 +162,25 @@ def _decide(rule_type, params, t, ctx):
         if ent and any(abs((ent - et).total_seconds()) <= minutes * 60 for et in ctx["news_times"]):
             return ("exclude", None)
         return ("keep", pnl)
+    if rule_type == "abort_beyond_range":
+        # Abort d'ingresso: se il fill e' avvenuto oltre max_usd dal bordo del
+        # range segnale (lato avverso: buy sopra il massimo, sell sotto il
+        # minimo), il trade non sarebbe stato preso. Fill dentro il range o
+        # dati mancanti -> tenuto (conservativo).
+        max_usd = float(params["max_usd"])
+        if max_usd <= 0:
+            raise ValueError(f"max_usd deve essere > 0: {max_usd}")
+        try:
+            ae = float(t.actual_entry_price) if t.actual_entry_price else None
+            lo = float(t.entry_price) if t.entry_price else None
+            hi = float(t.entry_price_high) if t.entry_price_high else lo
+        except (TypeError, ValueError):
+            ae = lo = hi = None
+        if ae is None or lo is None:
+            return ("keep", pnl)
+        lo2, hi2 = min(lo, hi or lo), max(lo, hi or lo)
+        d = (ae - hi2) if (t.direction or "").lower() == "buy" else (lo2 - ae)
+        return ("exclude", None) if d > max_usd else ("keep", pnl)
     if rule_type == "exclude_setup":
         # Evita i trade con un dato setup ICT (contesto pre-calcolato da
         # ict_engine). Trade senza contesto -> tenuti (conservativo).
@@ -416,6 +435,8 @@ def sweep(db=None, max_entries: int = 25) -> dict:
             candidates.append(("scale_risk", {"factor": f}))
         for m in (30, 60):
             candidates.append(("exclude_near_news", {"minutes": m}))
+        for x in (3.0, 5.0, 10.0, 15.0, 25.0):
+            candidates.append(("abort_beyond_range", {"max_usd": x}))
         # Setup ICT presenti nei contesti calcolati (strategia del trader)
         try:
             from database import TradeContext
