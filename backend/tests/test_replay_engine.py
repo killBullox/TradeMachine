@@ -139,6 +139,25 @@ class TestReplayEntry:
                               rp.BASELINE_MGMT)
         assert res["filled"] is False and "limit_never_filled" in res["events"]
 
+    def test_cap_lotti_su_entry_vicina_allo_sl(self):
+        """Entry alternativa a ridosso dello SL: senza cap i lotti esplodono."""
+        import replay_engine as rp
+        # entry market a 3994.8 con SL 3994: dist 0.8 -> lots 900/3/80 = 3.75
+        ticks = _ticks_buy([3994.5, 4005.2, 4010.3, 4015.5])
+        res = rp.replay_entry(ticks, "buy", 4000.0, 4001.0, SL, TPS, 900.0,
+                              rp.ENTRY_POLICIES["market_immediate"],
+                              rp.BASELINE_MGMT, max_lots_each=1.0)
+        assert res["filled"] is True
+        # pnl coerente con lots cappati a 1.0 (non 3.75): tp1+tp2+tp3 da 3994.8
+        expected = round(sum(1.0 * 100 * (tp - 3994.8) for tp in TPS), 2)
+        assert res["pnl"] == expected
+
+    def test_scope_solo_xauusd(self):
+        """Forex/BTC fuori scope v1: contract size e pip sono calibrati oro."""
+        import replay_engine as rp
+        sig = _fake_sig(symbol="GBPUSD")
+        assert rp.compute_for_signal(sig) is None
+
 
 def _fake_sig(**kw):
     base = dict(id=1, symbol="XAUUSD", direction="buy",

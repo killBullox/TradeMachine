@@ -84,18 +84,26 @@ def _get_mt5():
         return None
 
 
-def fetch_ticks(symbol: str, utc_from, utc_to):
+def fetch_ticks(symbol: str, utc_from, utc_to, attempts: int = 3):
     """Tick [{t(utc), bid, ask}] via MT5. Offset server centralizzato (mt5_time).
-    Ritorna [] su qualsiasi problema."""
+    Lo storico tick viene scaricato ON-DEMAND dal terminale: la prima richiesta
+    su un range vecchio puo' tornare vuota mentre il download parte -> retry
+    con pausa. Ritorna [] su qualsiasi problema."""
     mt5 = _get_mt5()
     if mt5 is None:
         return []
     try:
+        import time as _time
         from mt5_time import detect_mt5_server_offset, mt5_epoch_to_utc
         off = detect_mt5_server_offset(symbol)
         srv_from = utc_from + timedelta(seconds=off)
         srv_to = utc_to + timedelta(seconds=off)
-        raw = mt5.copy_ticks_range(symbol, srv_from, srv_to, mt5.COPY_TICKS_ALL)
+        raw = None
+        for att in range(attempts):
+            raw = mt5.copy_ticks_range(symbol, srv_from, srv_to, mt5.COPY_TICKS_ALL)
+            if raw is not None and len(raw) >= 20:
+                break
+            _time.sleep(1.5)      # il terminale sta scaricando lo storico
         if raw is None:
             return []
         out = []
@@ -192,7 +200,8 @@ def replay_manage(ticks, direction: str, entry_price: float, sl: float,
 
 
 def replay_entry(ticks, direction: str, range_lo: float, range_hi: float,
-                 sl: float, tps, risk_usd: float, policy: dict, mgmt: dict):
+                 sl: float, tps, risk_usd: float, policy: dict, mgmt: dict,
+                 max_lots_each: Optional[float] = None):
     """Rigioca l'INGRESSO alternativo dal momento del segnale (ticks partono
     da created_at) e poi la gestione baseline. LIMIT al bordo vicino del range
     (comportamento reale del bot); MARKET al primo tick. mixed: MARKET se il
@@ -236,6 +245,10 @@ def replay_entry(ticks, direction: str, range_lo: float, range_hi: float,
                     "events": ["entry_beyond_tp1"]}
     n_tp = len([tp for tp in tps if tp])
     lots = _lots_each(risk_usd, entry_price, sl, n_tp)
+    if max_lots_each:
+        # cap prudenziale: un'entry alternativa vicinissima allo SL non deve
+        # gonfiare la size oltre ogni realismo (margine/volume massimo broker)
+        lots = min(lots, max_lots_each)
     res = replay_manage(ticks, direction, entry_price, sl, tps, lots, mgmt,
                         entry_from_idx=entry_idx)
     return {"pnl": res["pnl"], "filled": True, "entry": round(entry_price, 2),
@@ -284,7 +297,8 @@ def run_battery(sig, ticks_entry, ticks_signal) -> Optional[dict]:
         hi = float(sig.entry_price_high) if sig.entry_price_high else lo
         for name, pol in ENTRY_POLICIES.items():
             r = replay_entry(ticks_signal, sig.direction, lo, hi, sl, tps,
-                             risk, pol, BASELINE_MGMT)
+                             risk, pol, BASELINE_MGMT,
+                             max_lots_each=round(lots * 3, 2))
             entry_res[name] = {"pnl": r["pnl"], "filled": r["filled"]}
 
         return {
@@ -301,7 +315,12 @@ def run_battery(sig, ticks_entry, ticks_signal) -> Optional[dict]:
 
 
 def compute_for_signal(sig) -> Optional[dict]:
-    """Fetch tick + batteria per un trade reale chiuso. None se non replayabile."""
+    """Fetch tick + batteria per un trade reale chiuso. None se non replayabile.
+    SCOPE v1: solo XAUUSD — pip, contract size e sizing sono calibrati oro;
+    replayare forex/BTC con questi parametri produce numeri privi di senso
+    (visto sul campo: GBPUSD con contract oro -> lotti x1000)."""
+    if (sig.symbol or "XAUUSD") != "XAUUSD":
+        return None
     if not (sig.entered_at and sig.closed_at and sig.created_at):
         return None
     hold_h = (sig.closed_at - sig.entered_at).total_seconds() / 3600.0
@@ -325,8 +344,9 @@ def save_replay_if_missing(db, sig) -> bool:
     try:
         from database import TradeReplay
         row = db.query(TradeReplay).filter(TradeReplay.signal_id == sig.id).first()
-        if row is not None and row.version == BATTERY_VERSION:
-            return False
+        if row is not None and row.version == BATTERY_VERSION and row.ticks_ok:
+            return False   # gia' calcolato; ticks_ok=False resta ritentabile
+                           # (lo storico tick MT5 arriva on-demand)
         res = compute_for_signal(sig)
         if row is None:
             row = TradeReplay(signal_id=sig.id)
@@ -356,9 +376,16 @@ def ensure_replays(db=None, max_new: int = 300) -> dict:
     if db is None:
         db = SessionLocal(); close = True
     try:
-        have = {r.signal_id: r.version for r in db.query(TradeReplay).all()}
-        todo = [t for t in _real_closed_trades(db)
-                if have.get(t.id) != BATTERY_VERSION]
+        rows = {r.signal_id: r for r in db.query(TradeReplay).all()}
+
+        def _needs(t):
+            r = rows.get(t.id)
+            if r is None or r.version != BATTERY_VERSION:
+                return True
+            # retry dei soli XAUUSD senza tick: lo storico arriva on-demand
+            return (not r.ticks_ok) and (t.symbol or "XAUUSD") == "XAUUSD"
+
+        todo = [t for t in _real_closed_trades(db) if _needs(t)]
         done = 0
         for sig in todo[:max_new]:
             if save_replay_if_missing(db, sig):
@@ -385,9 +412,12 @@ def _covered_rows(db, since: Optional[str] = None):
     trades = sim_engine._filter_since(_real_closed_trades(db), since)
     replays = {r.signal_id: r for r in db.query(TradeReplay)
                .filter(TradeReplay.version == BATTERY_VERSION).all()}
-    rows, no_replay, no_ticks, low_fidelity = [], 0, 0, 0
+    rows, no_replay, no_ticks, low_fidelity, off_scope = [], 0, 0, 0, 0
     errs = []
     for t in trades:
+        if (t.symbol or "XAUUSD") != "XAUUSD":
+            off_scope += 1        # scope v1: replay calibrato solo oro
+            continue
         r = replays.get(t.id)
         if r is None:
             no_replay += 1
@@ -404,6 +434,7 @@ def _covered_rows(db, since: Optional[str] = None):
     errs.sort()
     coverage = {
         "trade_reali": len(trades),
+        "fuori_scope_simbolo": off_scope,
         "replay_validi": len(rows),
         "senza_replay": no_replay,
         "tick_mancanti_o_skip": no_ticks,
