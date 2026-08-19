@@ -146,7 +146,8 @@ class TestSweepEDemotion:
                     {"title": "Evita le 15 (fragile!)", "detail": "d", "priority": "alta",
                      "sim_type": "exclude_hours", "sim_params": json.dumps({"hours": [15]})},
                     {"title": "Consiglio operativo", "detail": "non quantificato",
-                     "priority": "media", "sim_type": "none", "sim_params": "{}"},
+                     "priority": "media", "sim_type": "none", "sim_params": "{}",
+                     "azioni": ["ridurre lo step parser->ordine spostando il precheck"]},
                 ],
             }
             monkeypatch.setattr(ai_advisor, "_call_llm", lambda d: (sections, 10, 10))

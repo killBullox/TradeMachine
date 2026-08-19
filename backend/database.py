@@ -342,6 +342,7 @@ class AdvisorRec(Base):
     rec_key = Column(String(200), unique=True, index=True, nullable=False)
     title = Column(String(300))
     detail = Column(Text, nullable=True)
+    azioni_json = Column(Text, nullable=True)          # soluzioni concrete (JSON array)
     priority = Column(String(10), default="media")
     sim_type = Column(String(40), default="none")
     sim_params = Column(Text, default="{}")            # JSON canonico
@@ -409,6 +410,12 @@ def init_db():
         if "filter_reason" not in existing:
             conn.execute(sa.text("ALTER TABLE signals ADD COLUMN filter_reason TEXT"))
         conn.commit()
+        # Migrazione advisor_recs (tabella creata da create_all: la colonna
+        # azioni_json e' arrivata dopo il primo deploy)
+        recs_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(advisor_recs)")).fetchall()]
+        if recs_existing and "azioni_json" not in recs_existing:
+            conn.execute(sa.text("ALTER TABLE advisor_recs ADD COLUMN azioni_json TEXT"))
+            conn.commit()
         # Migrazione risk_settings
         rs_existing = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(risk_settings)")).fetchall()]
         if "auto_trade" not in rs_existing:

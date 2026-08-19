@@ -112,6 +112,8 @@ def _reconcile_inner(sections: dict, db, report_date: str) -> None:
         if entry is None:
             entry = AdvisorRec(
                 rec_key=k, title=rec.get("title"), detail=rec.get("detail"),
+                azioni_json=json.dumps(rec.get("azioni"), ensure_ascii=False)
+                if rec.get("azioni") else None,
                 priority=rec.get("priority") or "media",
                 sim_type=rec.get("sim_type") or "none",
                 sim_params=canon_params(rec.get("sim_params")),
@@ -124,6 +126,8 @@ def _reconcile_inner(sections: dict, db, report_date: str) -> None:
         else:
             entry.title = rec.get("title") or entry.title
             entry.detail = rec.get("detail") or entry.detail
+            if rec.get("azioni"):
+                entry.azioni_json = json.dumps(rec["azioni"], ensure_ascii=False)
             entry.priority = rec.get("priority") or entry.priority
             if rec.get("impact"):
                 entry.impact_json = json.dumps(rec["impact"], ensure_ascii=False)
@@ -189,9 +193,19 @@ def _reconcile_inner(sections: dict, db, report_date: str) -> None:
                 })
                 _log(f"invalidata: {entry.rec_key} ({reason[:80]})")
         else:
-            # none-type: nessuna rivalidazione possibile -> resta aperta e
-            # viene riproposta cosi' com'e' (last_confirmed NON aggiornato:
-            # in UI si vede che il report odierno non l'ha riconfermata)
+            # none-type: nessuna rivalidazione possibile. Policy "solo
+            # azionabili": senza soluzioni concrete salvate NON viene
+            # riproposta (voci-chiacchiera pre-policy: invalidate d'ufficio;
+            # se l'LLM la ripropone CON azioni, l'upsert la riapre).
+            if not entry.azioni_json:
+                entry.status = "invalidated"
+                entry.invalid_reason = ("non azionabile: nessuna soluzione "
+                                        "concreta (policy 'solo raccomandazioni azionabili')")
+                entry.updated_at = datetime.utcnow()
+                continue
+            # azionabile: resta aperta e viene riproposta cosi' com'e'
+            # (last_confirmed NON aggiornato: in UI si vede che il report
+            # odierno non l'ha riconfermata)
             recs.append(_standing_rec(entry))
 
 
@@ -205,6 +219,11 @@ def _standing_rec(entry, impact: Optional[dict] = None) -> dict:
         "standing": True,           # riproposta dal registro, non dall'LLM di oggi
         "registry": _meta(entry),
     }
+    if entry.azioni_json:
+        try:
+            rec["azioni"] = json.loads(entry.azioni_json)
+        except Exception:
+            pass
     if impact:
         rec["impact"] = impact
     elif entry.impact_json:

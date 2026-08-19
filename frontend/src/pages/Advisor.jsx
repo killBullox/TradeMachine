@@ -347,7 +347,20 @@ export default function Advisor() {
       <Section icon={Shield} title="Profilo di rischio" items={s?.risk_profile} color="text-amber-300" />
       <Section icon={Search} title="Pattern rilevati" items={s?.patterns} color="text-sky-300" />
 
-      {s?.recommendations?.length > 0 && (
+      {s && (!s.recommendations || s.recommendations.filter(r => !r.user_action).length === 0) && (
+        <div className="card p-5 border border-slate-700/50">
+          <h2 className="text-sm font-semibold text-slate-300 mb-1 uppercase tracking-wider flex items-center gap-2">
+            <Lightbulb size={15} /> Raccomandazioni
+          </h2>
+          <p className="text-sm text-slate-400">
+            Nessuna raccomandazione azionabile: le regole e le policy testate dal motore
+            non battono il sistema attuale. Quando una regola supererà i gate statistici
+            comparirà qui coi bottoni Monitora/Approva.
+          </p>
+        </div>
+      )}
+
+      {s?.recommendations?.filter(r => !r.user_action).length > 0 && (
         <div className="card p-5 border border-emerald-600/30">
           <h2 className="text-sm font-semibold text-emerald-300 mb-3 uppercase tracking-wider flex items-center gap-2">
             <Lightbulb size={15} /> Raccomandazioni
@@ -383,6 +396,18 @@ export default function Advisor() {
                   </p>
                 )}
                 <p className="text-sm text-slate-300">{r.detail}</p>
+                {r.azioni?.length > 0 && (
+                  <div className="mt-1.5 bg-slate-900/50 rounded-md p-2">
+                    <p className="text-[10px] uppercase tracking-wider text-emerald-400 font-semibold mb-1">Soluzioni</p>
+                    <ul className="space-y-0.5">
+                      {r.azioni.map((a, j) => (
+                        <li key={j} className="text-xs text-slate-300 flex gap-1.5">
+                          <span className="text-emerald-500 flex-shrink-0">→</span><span>{a}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <ImpactBox impact={r.impact} />
                 <div className="mt-2 flex gap-2 flex-wrap">
                   <button onClick={() => recAction(r, 'rejected')}
@@ -456,6 +481,25 @@ export default function Advisor() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {s?.osservazioni?.length > 0 && (
+        <div className="card p-5 border border-slate-700/50">
+          <h2 className="text-sm font-semibold text-slate-400 mb-3 uppercase tracking-wider flex items-center gap-2">
+            <Search size={15} /> Osservazioni (senza azione)
+          </h2>
+          <p className="text-xs text-slate-500 mb-3">
+            Considerazioni del report SENZA una soluzione concreta: non sono raccomandazioni.
+          </p>
+          <ul className="space-y-2">
+            {s.osservazioni.map((o, i) => (
+              <li key={i} className="text-sm text-slate-400 flex gap-2">
+                <span className="text-slate-600 flex-shrink-0">▸</span>
+                <span><span className="font-medium text-slate-300">{o.title}</span>{o.detail ? ` — ${o.detail}` : ''}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

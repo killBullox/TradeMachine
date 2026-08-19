@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-ADVISOR_MODEL = "claude-opus-5"
+ADVISOR_MODEL = "claude-fable-5"
 DAILY_HOUR_ROMA = 23      # auto-run dalle 23:10 Roma (dopo chiusura NY)
 DAILY_MINUTE_ROMA = 10
 CHECK_EVERY_S = 600       # throttle modulo: check DB al massimo ogni 10 min
@@ -462,6 +462,22 @@ counter_trend (contro il bias M15), no_context. Con esiti per setup, kill zone
 - I setup sono approssimazioni algoritmiche consistenti di concetti in parte
   discrezionali: parlane come "rilevati dal sistema", non come verita' assolute.
 
+RACCOMANDAZIONI = SOLO AZIONABILI (regola ferrea, richiesta esplicita del
+trader): una raccomandazione esiste SOLO se porta con se' le soluzioni.
+- Ogni raccomandazione DEVE avere "azioni": la lista di SOLUZIONI CONCRETE e
+  implementabili. O la regola promossa (sim_type/params: l'azione e' la regola
+  stessa), o interventi operativi SPECIFICI: cosa fare esattamente, dove, con
+  quali numeri attesi (es. per la latenza: 'policy MARKET testata sul replay:
+  bocciata, delta -X$' oppure 'misurare il ping VPS->server broker e valutare
+  colocation', 'ridurre lo step parser->ordine da X a Y').
+- VIETATO raccomandare 'monitorare', 'presidiare', 'tracciare', 'valutare',
+  'prestare attenzione': non sono azioni. Quelle considerazioni vanno in
+  execution_gaps / risk_profile / patterns, NON in recommendations.
+- Un problema senza soluzione concreta NON genera una raccomandazione: lo
+  descrivi nelle sezioni di analisi e basta. Meglio zero raccomandazioni che
+  raccomandazioni-chiacchiera. Il codice sposta d'ufficio in 'osservazioni'
+  qualsiasi raccomandazione senza azioni concrete.
+
 REGISTRO CONSIGLI (persistenza giorno per giorno): il dossier contiene
 "registro_consigli_aperti" — i consigli ancora aperti dai report precedenti,
 ognuno con la sua chiave stabile "key", la data di prima apparizione e quante
@@ -490,6 +506,8 @@ REPORT_SCHEMA = {
                     "key": {"type": "string"},
                     "title": {"type": "string"},
                     "detail": {"type": "string"},
+                    "azioni": {"type": "array", "items": {"type": "string"},
+                               "minItems": 1},
                     "priority": {"type": "string", "enum": ["alta", "media", "bassa"]},
                     "sim_type": {"type": "string",
                                  "enum": ["none", "exclude_hours", "exclude_sessions",
@@ -500,7 +518,8 @@ REPORT_SCHEMA = {
                                           "entry_policy"]},
                     "sim_params": {"type": "string"},
                 },
-                "required": ["key", "title", "detail", "priority", "sim_type", "sim_params"],
+                "required": ["key", "title", "detail", "azioni", "priority",
+                             "sim_type", "sim_params"],
                 "additionalProperties": False,
             },
         },
@@ -534,14 +553,19 @@ def _call_llm(dossier: dict):
         raise RuntimeError("ANTHROPIC_API_KEY assente")
     user_msg = ("Analizza questo dossier e produci il report secondo lo schema.\n\n"
                 "DOSSIER:\n" + json.dumps(dossier, ensure_ascii=False, default=str))
-    # output_config via extra_body: funziona su qualsiasi versione dell'SDK
-    # (kwarg tipizzato solo nelle piu' recenti; sul wire e' identico).
-    response = client.with_options(timeout=180.0).messages.create(
+    # output_config + thinking via extra_body: funziona su qualsiasi versione
+    # dell'SDK (kwarg tipizzati solo nelle piu' recenti; sul wire e' identico).
+    # Adaptive thinking: il modello ragiona quanto serve prima della sintesi
+    # (budget_tokens NON supportato dai modelli Claude 5: solo adaptive).
+    response = client.with_options(timeout=300.0).messages.create(
         model=ADVISOR_MODEL,
-        max_tokens=16000,
+        max_tokens=32000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
-        extra_body={"output_config": {"format": {"type": "json_schema", "schema": REPORT_SCHEMA}}},
+        extra_body={
+            "output_config": {"format": {"type": "json_schema", "schema": REPORT_SCHEMA}},
+            "thinking": {"type": "adaptive"},
+        },
     )
     if response.stop_reason == "refusal":
         raise RuntimeError("richiesta rifiutata dal modello (refusal)")
@@ -592,6 +616,7 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
             _log(f"replay sweep errore: {str(_e)[:120]}")
             dossier["gestione_replay_sweep"] = {"promosse": [], "bocciate_interessanti": []}
         sections, tin, tout = _call_llm(dossier)
+        _enforce_actionable(sections)
         _attach_impacts(sections, db)
         _ensure_promoted_actionable(sections, dossier.get("validated_rules_sweep") or {}, db)
         _ensure_promoted_actionable(sections, dossier.get("gestione_replay_sweep") or {}, db)
@@ -628,6 +653,39 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
     finally:
         if close:
             db.close()
+
+
+_NON_AZIONI = ("monitorar", "presidiar", "tracciar", "osservar", "valutar",
+               "prestare attenzione", "tenere d'occhio", "attenzionar")
+
+
+def _enforce_actionable(sections: dict) -> None:
+    """ENFORCEMENT 'solo azionabili' (richiesta esplicita del trader): una
+    raccomandazione senza regola simulabile E senza azioni concrete non e' una
+    raccomandazione — viene spostata d'ufficio in sections['osservazioni'].
+    Un'azione fatta solo di verbi-osservazione (monitorare/presidiare/...)
+    non conta come azione. Mai solleva."""
+    try:
+        recs = (sections or {}).get("recommendations", [])
+        kept, observations = [], []
+        for rec in recs:
+            actionable_rule = rec.get("sim_type") and rec.get("sim_type") != "none"
+            azioni = [a for a in (rec.get("azioni") or [])
+                      if isinstance(a, str) and a.strip()
+                      and not any(v in a.lower()[:40] for v in _NON_AZIONI)]
+            if actionable_rule or azioni:
+                rec["azioni"] = azioni
+                kept.append(rec)
+            else:
+                observations.append(rec)
+        sections["recommendations"] = kept
+        if observations:
+            sections.setdefault("osservazioni", []).extend(
+                {"title": r.get("title"), "detail": r.get("detail")}
+                for r in observations)
+            _log(f"{len(observations)} consigli senza azioni -> osservazioni")
+    except Exception as e:
+        _log(f"_enforce_actionable err: {str(e)[:120]}")
 
 
 def _attach_impacts(sections: dict, db) -> None:

@@ -180,3 +180,47 @@ class TestMaybeRunDaily:
         monkeypatch.setattr(ai, "_last_check_utc", datetime.utcnow())
         res = ai.maybe_run_daily()
         assert res == {"ran": False, "reason": "throttled"}
+
+
+class TestEnforceActionable:
+    """Policy 'solo raccomandazioni azionabili' (richiesta trader): senza
+    regola simulabile E senza soluzioni concrete -> osservazioni, non recs."""
+
+    def test_chiacchiera_demolita_in_osservazioni(self, in_memory_db, fake_mt5):
+        import ai_advisor
+        sections = {"recommendations": [
+            {"title": "Presidiare il drawdown", "detail": "d", "priority": "media",
+             "sim_type": "none", "sim_params": "{}", "azioni": []},
+            {"title": "Monitorare il payoff", "detail": "d", "priority": "media",
+             "sim_type": "none", "sim_params": "{}",
+             "azioni": ["monitorare il rapporto avg_win/avg_loss"]},  # verbo-osservazione
+        ]}
+        ai_advisor._enforce_actionable(sections)
+        assert sections["recommendations"] == []
+        assert len(sections["osservazioni"]) == 2
+        assert sections["osservazioni"][0]["title"] == "Presidiare il drawdown"
+
+    def test_azioni_concrete_tenute(self, in_memory_db, fake_mt5):
+        import ai_advisor
+        sections = {"recommendations": [
+            {"title": "Ridurre latenza", "detail": "d", "priority": "alta",
+             "sim_type": "none", "sim_params": "{}",
+             "azioni": ["misurare ping VPS->broker (attuale ignoto) e valutare colocation",
+                        "monitorare non conta come azione"]},
+        ]}
+        ai_advisor._enforce_actionable(sections)
+        assert len(sections["recommendations"]) == 1
+        # il verbo-osservazione viene filtrato dalle azioni, la rec resta
+        assert sections["recommendations"][0]["azioni"] == [
+            "misurare ping VPS->broker (attuale ignoto) e valutare colocation"]
+        assert "osservazioni" not in sections
+
+    def test_regola_simulabile_sempre_tenuta(self, in_memory_db, fake_mt5):
+        import ai_advisor
+        sections = {"recommendations": [
+            {"title": "Escludi setup X", "detail": "d", "priority": "alta",
+             "sim_type": "exclude_setup", "sim_params": '{"setup": "x"}',
+             "azioni": []},
+        ]}
+        ai_advisor._enforce_actionable(sections)
+        assert len(sections["recommendations"]) == 1

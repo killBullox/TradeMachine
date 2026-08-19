@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 def _rec(title="Ridurre la latenza", key="ridurre-latenza", sim_type="none",
          sim_params="{}", **kw):
     r = {"key": key, "title": title, "detail": "d", "priority": "media",
-         "sim_type": sim_type, "sim_params": sim_params}
+         "sim_type": sim_type, "sim_params": sim_params,
+         "azioni": ["misurare il ping VPS->broker e valutare colocation"]}
     r.update(kw)
     return r
 
@@ -95,6 +96,31 @@ class TestReconcile:
             assert st["standing"] is True
             assert st["title"] == "Ridurre la latenza"
             assert st["registry"]["last_confirmed"] == "2026-08-19"  # non oggi
+            assert st["azioni"]                                     # soluzioni conservate
+        finally:
+            db.close()
+
+    def test_none_type_senza_azioni_invalidata_non_standing(self, in_memory_db, fake_mt5):
+        """Policy 'solo azionabili': voce-chiacchiera pre-policy (senza azioni)
+        NON viene riproposta -> invalidata d'ufficio; se l'LLM la ripropone
+        CON azioni si riapre."""
+        import advisor_registry as reg
+        from database import AdvisorRec
+        db = in_memory_db()
+        try:
+            r = _rec(); r.pop("azioni")
+            reg.reconcile({"recommendations": [r]}, db, "2026-08-19")
+            sections = {"recommendations": []}
+            reg.reconcile(sections, db, "2026-08-20")
+            db.commit()
+            assert sections["recommendations"] == []
+            e = db.query(AdvisorRec).one()
+            assert e.status == "invalidated" and "non azionabile" in e.invalid_reason
+            # riproposta CON azioni -> si riapre
+            reg.reconcile({"recommendations": [_rec()]}, db, "2026-08-21")
+            db.commit()
+            e = db.query(AdvisorRec).one()
+            assert e.status == "open" and e.azioni_json
         finally:
             db.close()
 
