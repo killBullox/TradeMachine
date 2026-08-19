@@ -391,16 +391,27 @@ def ensure_contexts(db=None, max_new: int = 400) -> dict:
         db = SessionLocal(); close = True
     done = 0; failed = 0
     try:
-        have = {tc.signal_id for tc in db.query(TradeContext).all()}
-        todo = [t for t in _real_closed_trades(db) if t.id not in have][:max_new]
+        rows = {tc.signal_id: tc for tc in db.query(TradeContext).all()}
+        # RETRY dei no_data: lo storico candele MT5 arriva on-demand (subito
+        # dopo un restart del terminale i fetch possono tornare vuoti); un
+        # contesto senza candele resta ritentabile ai giri successivi.
+        todo = [t for t in _real_closed_trades(db)
+                if t.id not in rows or not rows[t.id].candles_ok][:max_new]
         for t in todo:
             try:
                 ctx = build_context_for_signal(t)
             except Exception as e:
                 ctx = {"setup": "no_data", "candles_ok": False, "err": str(e)[:100]}
-            db.add(TradeContext(signal_id=t.id, setup=ctx.get("setup", "no_data"),
-                                candles_ok=bool(ctx.get("candles_ok")),
-                                features_json=json.dumps(ctx, ensure_ascii=False, default=str)))
+            row = rows.get(t.id)
+            if row is not None and not ctx.get("candles_ok"):
+                done += 1; failed += 1
+                continue          # nessun dato nuovo: lascia la riga com'e'
+            if row is None:
+                row = TradeContext(signal_id=t.id)
+                db.add(row)
+            row.setup = ctx.get("setup", "no_data")
+            row.candles_ok = bool(ctx.get("candles_ok"))
+            row.features_json = json.dumps(ctx, ensure_ascii=False, default=str)
             done += 1
             if not ctx.get("candles_ok"):
                 failed += 1

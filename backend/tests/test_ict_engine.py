@@ -176,9 +176,11 @@ class TestIntegrazione:
             assert res["computed"] == 1
             tc = db.query(TradeContext).first()
             assert tc.setup == "no_data" and tc.candles_ok is False
-            # idempotente: secondo giro non ricalcola
+            # i no_data restano RITENTABILI (storico MT5 on-demand) ma senza
+            # duplicare righe: un solo TradeContext anche dopo il retry
             res2 = ict.ensure_contexts(db)
-            assert res2["computed"] == 0
+            assert res2["computed"] == 1 and res2["no_data"] == 1
+            assert db.query(TradeContext).count() == 1
         finally:
             db.close()
 
