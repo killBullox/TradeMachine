@@ -2288,12 +2288,12 @@ async def mt5_close_signal(signal_id: int, db: Session = Depends(get_db)):
             # RETRY (fix #656): il deal di chiusura appena eseguito puo' non essere
             # ancora nello storico (propagazione). Rileggiamo finche' ogni ticket
             # fillato ha il suo deal OUT (complete=True), fino a ~10 tentativi.
-            total_pnl = 0.0; best_tp = 0; found_entry = None
+            total_pnl = 0.0; best_tp = 0; found_entry = None; avg_exit = None
             for _attempt in range(10):
                 def _read_deals():
                     return {t: (mt5.history_deals_get(position=t) or ()) for t in tickets}
                 deals_by = await asyncio.get_event_loop().run_in_executor(None, _read_deals)
-                total_pnl, best_tp, complete, found_entry = mt5_trader.summarize_closed_deals(
+                total_pnl, best_tp, complete, found_entry, avg_exit = mt5_trader.summarize_closed_deals(
                     deals_by, sig.tp1, sig.tp2, sig.tp3, is_buy,
                     mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_OUT)
                 if complete:
@@ -2301,6 +2301,8 @@ async def mt5_close_signal(signal_id: int, db: Session = Depends(get_db)):
                 await asyncio.sleep(0.6)
             if found_entry and not sig.actual_entry_price:
                 sig.actual_entry_price = found_entry
+            if avg_exit is not None:
+                sig.exit_price = avg_exit    # fix #676: close value visibile
             if total_pnl != 0:
                 sig.pnl_usd = round(total_pnl, 2)
             # Se non abbiamo trovato deal ma c'è già un P&L, tienilo

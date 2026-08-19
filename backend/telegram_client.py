@@ -644,6 +644,7 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                     mt5 = _mt5t._get_mt5()
                     if mt5:
                         total_real = 0.0
+                        exit_pv = 0.0; exit_vol = 0.0
                         for tk in tickets:
                             deals = mt5.history_deals_get(position=tk)
                             if not deals:
@@ -651,9 +652,15 @@ async def _handle_close(db, parsed: ParsedClose, reply_to_msg_id: int = None):
                             for d in deals:
                                 if d.entry == mt5.DEAL_ENTRY_OUT:
                                     total_real += float(d.profit) + float(getattr(d, 'commission', 0) or 0) + float(getattr(d, 'swap', 0) or 0)
+                                    exit_pv += float(d.price) * float(d.volume)
+                                    exit_vol += float(d.volume)
                         if total_real != 0.0:
                             sig.pnl_usd = round(total_real, 2)
                             log(f"[Close] #{sig.id} pnl reale da deal MT5 = {sig.pnl_usd}$")
+                        # exit_price = media pesata dei deal di uscita (fix #676:
+                        # il close TG lasciava exit_price vuoto sui reali)
+                        if exit_vol > 0:
+                            sig.exit_price = round(exit_pv / exit_vol, 5)
                 except Exception as _e:
                     log(f"[Close] #{sig.id} errore calcolo pnl reale: {_e}")
                 _append_trade_log(sig, "tg_close",

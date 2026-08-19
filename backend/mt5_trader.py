@@ -1982,12 +1982,15 @@ def summarize_closed_deals(deals_by_ticket, tp1, tp2, tp3, is_buy, deal_in, deal
     il pnl in difetto (mancava +497.74 del ticket chiuso a mano).
 
     deals_by_ticket: {ticket: iterable_di_deal}. Ogni deal ha .entry/.price/.profit.
-    Ritorna (total_pnl, best_tp, complete, actual_entry).
-    complete=False se qualche ticket ha il deal IN ma NON ancora il deal OUT."""
+    Ritorna (total_pnl, best_tp, complete, actual_entry, avg_exit).
+    avg_exit = prezzo di uscita medio pesato sui volumi dei deal OUT (None se
+    nessun OUT). complete=False se qualche ticket ha il deal IN ma NON ancora
+    il deal OUT."""
     total = 0.0
     best_tp = 0
     actual_entry = None
     complete = True
+    exit_pv = 0.0; exit_vol = 0.0
     tp_levels = [(3, tp3), (2, tp2), (1, tp1)]
     for _tk, deals in deals_by_ticket.items():
         deals = list(deals or [])
@@ -2004,11 +2007,14 @@ def summarize_closed_deals(deals_by_ticket, tp1, tp2, tp3, is_buy, deal_in, deal
             if d.entry == deal_out:
                 total += d.profit
                 cp = d.price
+                vol = float(getattr(d, "volume", 0) or 0)
+                exit_pv += cp * vol; exit_vol += vol
                 for tp_num, tp_val in tp_levels:
                     if tp_val and ((is_buy and cp >= tp_val) or (not is_buy and cp <= tp_val)):
                         best_tp = max(best_tp, tp_num)
                         break
-    return round(total, 2), best_tp, complete, actual_entry
+    avg_exit = round(exit_pv / exit_vol, 5) if exit_vol > 0 else None
+    return round(total, 2), best_tp, complete, actual_entry, avg_exit
 
 
 def detect_tp_hits(closed_tickets, closed_reasons, tickets_order, tp1, tp2, tp3, is_buy):

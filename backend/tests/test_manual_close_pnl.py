@@ -12,8 +12,8 @@ def _f(*a):
     return mt5_trader.summarize_closed_deals(*a)
 
 
-def _d(entry, price, profit):
-    return NS(entry=entry, price=price, profit=profit)
+def _d(entry, price, profit, volume=0.55):
+    return NS(entry=entry, price=price, profit=profit, volume=volume)
 
 
 class TestSummarizeClosedDeals:
@@ -24,8 +24,9 @@ class TestSummarizeClosedDeals:
             174442696: [_d(IN, 4337.77, 0.0), _d(OUT, 4349.14, 466.17)],
             174442699: [_d(IN, 4337.77, 0.0), _d(OUT, 4349.91, 497.74)],
         }
-        total, best_tp, complete, entry = _f(deals, 4345.0, 4349.0, 4354.0, True, IN, OUT)
+        total, best_tp, complete, entry, avg_exit = _f(deals, 4345.0, 4349.0, 4354.0, True, IN, OUT)
         assert total == 1250.50
+        assert avg_exit is not None  # media pesata dei deal OUT (fix #676)
         assert complete is True
         assert best_tp == 2  # 4349.14/4349.91 >= tp2 4349
         assert entry == 4337.77
@@ -38,7 +39,7 @@ class TestSummarizeClosedDeals:
             174442696: [_d(IN, 4337.77, 0.0), _d(OUT, 4349.14, 466.17)],
             174442699: [_d(IN, 4337.77, 0.0)],  # OUT mancante
         }
-        total, best_tp, complete, entry = _f(deals, 4345.0, 4349.0, 4354.0, True, IN, OUT)
+        total, best_tp, complete, entry, avg_exit = _f(deals, 4345.0, 4349.0, 4354.0, True, IN, OUT)
         assert complete is False
         assert total == 752.76  # in difetto finche' non arriva l'OUT
 
@@ -48,7 +49,7 @@ class TestSummarizeClosedDeals:
             555: [_d(IN, 4000.0, 0.0), _d(OUT, 4010.0, 100.0)],
             556: [],  # mai fillato
         }
-        total, best_tp, complete, entry = _f(deals, 4010.0, 4020.0, 4030.0, True, IN, OUT)
+        total, best_tp, complete, entry, avg_exit = _f(deals, 4010.0, 4020.0, 4030.0, True, IN, OUT)
         assert complete is True
         assert total == 100.0
 
@@ -56,10 +57,11 @@ class TestSummarizeClosedDeals:
         deals = {
             1: [_d(IN, 4000.0, 0.0), _d(OUT, 3989.5, 200.0)],  # SELL, 3989.5 <= tp2 3990
         }
-        total, best_tp, complete, entry = _f(deals, 3995.0, 3990.0, 3985.0, False, IN, OUT)
+        total, best_tp, complete, entry, avg_exit = _f(deals, 3995.0, 3990.0, 3985.0, False, IN, OUT)
         assert total == 200.0
         assert best_tp == 2
 
     def test_vuoto(self, fake_mt5):
-        total, best_tp, complete, entry = _f({}, 1.0, 2.0, 3.0, True, IN, OUT)
+        total, best_tp, complete, entry, avg_exit = _f({}, 1.0, 2.0, 3.0, True, IN, OUT)
         assert total == 0.0 and best_tp == 0 and complete is True and entry is None
+        assert avg_exit is None
