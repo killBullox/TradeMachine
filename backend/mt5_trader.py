@@ -3639,6 +3639,13 @@ def sync_positions() -> list:
                     _ict.save_context_if_missing(db, sig)
                 except Exception as _e:
                     log(f"#{sig.id} ict context alla chiusura err: {str(_e)[:80]}")
+                # Replay tick alla chiusura: la cache resta aggiornata in
+                # near-real-time (monitor policy e sweep del report).
+                try:
+                    import replay_engine as _rp
+                    _rp.save_replay_if_missing(db, sig)
+                except Exception as _e:
+                    log(f"#{sig.id} replay alla chiusura err: {str(_e)[:80]}")
                 # Build_mt5_trade_log solo se trade_log proprio vuoto (legacy)
                 if not sig.trade_log:
                     sig.trade_log = _build_mt5_trade_log(sig, closed_tickets, is_buy, new_status)

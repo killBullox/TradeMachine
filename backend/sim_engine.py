@@ -31,7 +31,14 @@ CAVEATS = [
 
 SUPPORTED_RULES = ("exclude_hours", "exclude_sessions", "exclude_weekdays",
                    "exclude_direction", "min_rr_tp1", "cap_loss_at_risk",
-                   "scale_risk", "exclude_near_news", "exclude_setup")
+                   "scale_risk", "exclude_near_news", "exclude_setup",
+                   "mgmt_policy", "entry_policy")
+
+# Regole valutate dal REPLAY TICK (replay_engine), non dal what-if trade-level:
+# simulate/validate le dispatchano. mgmt_policy = gestione alternativa
+# (BE/trail/chiusure anticipate) sui trade reali; entry_policy = ingresso
+# alternativo (market/mista) dal momento del segnale.
+REPLAY_RULES = ("mgmt_policy", "entry_policy")
 
 # Regole STRUTTURALI (policy di sicurezza deterministiche, es. enforcement del
 # max-risk): esenti dai gate di campione/robustezza perche' non sono scommesse
@@ -254,6 +261,9 @@ def simulate(rule_type: str, params: dict, db=None, since: Optional[str] = None)
     esatto baseline vs simulato. Mai solleva: errori -> {"ok": False, ...}."""
     from database import SessionLocal, NewsEvent
     from ai_advisor import _real_closed_trades
+    if rule_type in REPLAY_RULES:
+        import replay_engine
+        return replay_engine.validate_policy(rule_type.split("_")[0], params, db, since=since)
     if rule_type not in SUPPORTED_RULES:
         return {"ok": False, "error": f"regola non supportata: {rule_type}",
                 "supported": list(SUPPORTED_RULES)}
@@ -316,6 +326,9 @@ def validate(rule_type: str, params: dict, db=None, since: Optional[str] = None)
     Ritorna il risultato di simulate() + blocco "validation". Mai solleva."""
     from database import SessionLocal
     from ai_advisor import _real_closed_trades
+    if rule_type in REPLAY_RULES:
+        import replay_engine
+        return replay_engine.validate_policy(rule_type.split("_")[0], params, db, since=since)
     if rule_type not in SUPPORTED_RULES:
         return {"ok": False, "error": f"regola non supportata: {rule_type}"}
     close = False

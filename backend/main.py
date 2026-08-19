@@ -889,9 +889,19 @@ def advisor_rules_list(db: Session = Depends(get_db)):
 def advisor_rules_create(body: RuleActionIn, db: Session = Depends(get_db)):
     """Monitora (test) o Approva (real) un consiglio -> crea la regola."""
     import advisor_rules
-    return advisor_rules.create_rule(
+    res = advisor_rules.create_rule(
         body.sim_type, body.sim_params, body.title, body.mode,
         expected=body.expected, source_detail=body.source_detail, db=db)
+    # Registro consigli: il consiglio corrispondente passa a "in_gestione"
+    try:
+        import advisor_registry
+        rid = (res.get("rule") or {}).get("id") if isinstance(res, dict) else None
+        if rid:
+            advisor_registry.on_rule_created(db, body.sim_type, body.sim_params, rid)
+            db.commit()
+    except Exception:
+        pass
+    return res
 
 
 @app.post("/api/advisor/rules/{rule_id}/promote")
@@ -905,7 +915,16 @@ def advisor_rules_promote(rule_id: int, db: Session = Depends(get_db)):
 def advisor_rules_rollback(rule_id: int, db: Session = Depends(get_db)):
     """Rollback: la regola si disattiva (da test o da reale). Storico conservato."""
     import advisor_rules
-    return advisor_rules.rollback_rule(rule_id, db)
+    res = advisor_rules.rollback_rule(rule_id, db)
+    # Registro consigli: il consiglio torna "open" e verra' rivalutato
+    try:
+        import advisor_registry
+        if isinstance(res, dict) and res.get("ok"):
+            advisor_registry.on_rule_rolled_back(db, rule_id)
+            db.commit()
+    except Exception:
+        pass
+    return res
 
 
 class RecActionIn(BaseModel):
@@ -932,6 +951,15 @@ def advisor_rec_action(body: RecActionIn, db: Session = Depends(get_db)):
         if rec.get("title") == body.title:
             rec["user_action"] = body.action
             hit = True
+            # Registro consigli: il rifiuto (non permanente) viene contato
+            if body.action == "rejected":
+                try:
+                    import advisor_registry
+                    from zoneinfo import ZoneInfo
+                    today_roma = datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
+                    advisor_registry.on_rec_rejected(db, rec, today_roma)
+                except Exception:
+                    pass
     if not hit:
         raise HTTPException(status_code=404, detail="Consiglio non trovato nel report")
     rep.sections_json = json.dumps(sections, ensure_ascii=False)
@@ -948,6 +976,13 @@ def advisor_history(db: Session = Depends(get_db)):
         "tokens_in": r.tokens_in, "tokens_out": r.tokens_out,
         "duration_s": r.duration_s,
     } for r in rows]}
+
+
+@app.get("/api/advisor/registry")
+def advisor_registry_list(db: Session = Depends(get_db)):
+    """Registro persistente dei consigli: open / in_gestione / invalidated."""
+    import advisor_registry
+    return advisor_registry.list_registry(db)
 
 
 @app.get("/api/performance/equity-curve")
@@ -2580,5 +2615,7 @@ if _os.path.isdir(_frontend_dist):
             raise HTTPException(404)
         file_path = _os.path.join(_frontend_dist, full_path)
         if full_path and _os.path.isfile(file_path):
-            return FileResponse(file_path)
+            # index.html richiesto esplicitamente: stessi header no-cache del fallback
+            hdrs = _no_cache_headers if _os.path.basename(file_path) == "index.html" else None
+            return FileResponse(file_path, headers=hdrs)
         return FileResponse(_os.path.join(_frontend_dist, "index.html"), headers=_no_cache_headers)

@@ -188,6 +188,11 @@ function MonitorCard({ rule, onPromote, onRollback }) {
               {m.pnl_reale != null && (
                 <p>P&L reale {m.pnl_reale}$ → con regola <span className="text-slate-200">{m.pnl_con_regola}$</span></p>
               )}
+              {m.tipo === 'reale_toggle' && m.pnl_reale_osservato != null && (
+                <p>P&L reale osservato {m.pnl_reale_osservato}$ → senza la modifica sarebbe stato{' '}
+                  <span className="text-slate-200">{m.pnl_controfattuale_gestione_precedente}$</span>
+                  {' '}(replay tick, {m.trade_con_replay}/{m.trade_nel_periodo} trade coperti)</p>
+              )}
               {dObs != null && (
                 <p>Delta osservato: <span className={dObs > 0 ? 'text-emerald-300 font-semibold' : dObs < 0 ? 'text-rose-300 font-semibold' : 'text-slate-300'}>
                   {dObs >= 0 ? '+' : ''}{dObs}$</span>
@@ -358,7 +363,25 @@ export default function Advisor() {
                   {r.sim_type && r.sim_type !== 'none' && (
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-600/25 text-violet-300">simulata</span>
                   )}
+                  {r.standing && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-600/25 text-sky-300"
+                      title="Consiglio ancora aperto, riproposto dal registro persistente">
+                      📌 dal registro
+                    </span>
+                  )}
                 </div>
+                {r.registry && (
+                  <p className="text-[11px] text-slate-500 mb-1">
+                    Aperto dal {r.registry.first_seen}
+                    {r.registry.times_seen > 1 && <> · riconfermato {r.registry.times_seen}×</>}
+                    {r.registry.rejected_count > 0 && (
+                      <span className="text-amber-500"> · rifiutato {r.registry.rejected_count}×</span>
+                    )}
+                    {r.standing && r.sim_type === 'none' && (
+                      <span> · ultima riconferma LLM: {r.registry.last_confirmed}</span>
+                    )}
+                  </p>
+                )}
                 <p className="text-sm text-slate-300">{r.detail}</p>
                 <ImpactBox impact={r.impact} />
                 <div className="mt-2 flex gap-2 flex-wrap">
@@ -430,6 +453,27 @@ export default function Advisor() {
                 <p className="text-sm text-slate-300 font-semibold line-through decoration-amber-600/60">{r.title}</p>
                 <p className="text-xs text-amber-400 mt-0.5">✗ {r.demotion_reason}</p>
                 <ImpactBox impact={r.impact} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {s?.registro_invalidati?.length > 0 && (
+        <div className="card p-5 border border-slate-700/60">
+          <h2 className="text-sm font-semibold text-slate-400 mb-3 uppercase tracking-wider flex items-center gap-2">
+            <AlertTriangle size={15} /> Consigli invalidati dal registro
+          </h2>
+          <p className="text-xs text-slate-500 mb-3">
+            Consigli dei report precedenti che i dati odierni non supportano piu':
+            rimossi dal motore con motivo tracciato. Se i numeri tornassero a supportarli, si riaprono da soli.
+          </p>
+          <div className="space-y-2">
+            {s.registro_invalidati.map((r, i) => (
+              <div key={i} className="bg-slate-800/40 rounded-lg p-3 opacity-70">
+                <p className="text-sm text-slate-400 font-semibold line-through">{r.title}</p>
+                <p className="text-[11px] text-slate-500">aperto dal {r.first_seen} · visto {r.times_seen}×</p>
+                <p className="text-xs text-slate-400 mt-0.5">✗ {r.motivo}</p>
               </div>
             ))}
           </div>

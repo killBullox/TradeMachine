@@ -29,6 +29,50 @@ MONITOR_ONLY_REAL = ("cap_loss_at_risk",)   # nessun enforcement reale sicuro
 _FILTER_PREFIX = "Regola AIA #"   # marker nel filter_reason dei trade bloccati
 
 
+def _real_enforceable(sim_type: str, sim_params) -> tuple:
+    """(ok, motivo). Le policy replay hanno enforcement reale SOLO se mappate
+    su un toggle del sistema (be_at_tp1/trail); le altre restano Monitor Test."""
+    if sim_type == "entry_policy":
+        return (False, "policy d'ingresso: enforcement reale non disponibile "
+                       "in v1 — usa Monitor Test")
+    if sim_type == "mgmt_policy":
+        import replay_engine
+        policy = (sim_params if isinstance(sim_params, dict)
+                  else json.loads(sim_params or "{}")).get("policy")
+        if policy not in replay_engine.MGMT_REAL_TOGGLES:
+            return (False, f"policy '{policy}': enforcement reale non disponibile "
+                           f"in v1 — usa Monitor Test")
+    return (True, "")
+
+
+def _apply_mgmt_toggle(db, rule, activate: bool) -> Optional[str]:
+    """mgmt_policy mappata su un toggle reale (no_be -> be_at_tp1_enabled=False,
+    trail_progressive -> trail_stop_enabled=True): applica al passaggio in
+    Monitor Reale, ripristina al rollback. Mai solleva."""
+    try:
+        if rule.sim_type != "mgmt_policy":
+            return None
+        import replay_engine
+        policy = json.loads(rule.sim_params or "{}").get("policy")
+        tg = replay_engine.MGMT_REAL_TOGGLES.get(policy)
+        if not tg:
+            return None
+        from database import RiskSettings
+        rs = db.query(RiskSettings).first()
+        if rs is None:
+            return None
+        val = tg["value"] if activate else tg["restore"]
+        setattr(rs, tg["field"], val)
+        rs.updated_at = datetime.utcnow()
+        db.commit()
+        _log(f"regola #{rule.id}: toggle {tg['field']} -> {val} "
+             f"({'attivazione' if activate else 'ripristino'})")
+        return tg["field"]
+    except Exception as e:
+        _log(f"_apply_mgmt_toggle err: {str(e)[:120]}")
+        return None
+
+
 def _log(msg: str):
     try:
         from mt5_trader import log as _l
@@ -65,6 +109,10 @@ def create_rule(sim_type: str, sim_params: dict, title: str, mode: str,
         return {"ok": False, "error": f"mode invalido: {mode}"}
     if sim_type not in sim_engine.SUPPORTED_RULES:
         return {"ok": False, "error": f"regola non supportata: {sim_type}"}
+    if mode == "real":
+        ok_real, why = _real_enforceable(sim_type, sim_params)
+        if not ok_real:
+            return {"ok": False, "error": why}
     close = False
     if db is None:
         db = SessionLocal(); close = True
@@ -87,6 +135,8 @@ def create_rule(sim_type: str, sim_params: dict, title: str, mode: str,
             real_started_at=now if mode == "real" else None,
         )
         db.add(rule); db.commit(); db.refresh(rule)
+        if mode == "real":
+            _apply_mgmt_toggle(db, rule, activate=True)
         _log(f"regola #{rule.id} creata: {sim_type} {canon} mode={mode}")
         return {"ok": True, "rule": rule_to_dict(rule, db)}
     finally:
@@ -106,11 +156,15 @@ def promote_rule(rule_id: int, db=None) -> dict:
             return {"ok": False, "error": "regola non trovata o non attiva"}
         if rule.mode != "test":
             return {"ok": False, "error": "solo una regola in Monitor Test puo' essere approvata"}
+        ok_real, why = _real_enforceable(rule.sim_type, rule.sim_params)
+        if not ok_real:
+            return {"ok": False, "error": why}
         now = datetime.utcnow()
         rule.mode = "real"
         rule.real_started_at = now
         rule.activated_at = now      # il monitor reale conta da adesso
         db.commit(); db.refresh(rule)
+        _apply_mgmt_toggle(db, rule, activate=True)
         _log(f"regola #{rule.id} promossa a REALE")
         return {"ok": True, "rule": rule_to_dict(rule, db)}
     finally:
@@ -127,9 +181,12 @@ def rollback_rule(rule_id: int, db=None) -> dict:
         rule = db.query(AdvisorRule).filter(AdvisorRule.id == rule_id).first()
         if not rule or rule.status != "active":
             return {"ok": False, "error": "regola non trovata o non attiva"}
+        was_real = rule.mode == "real"
         rule.status = "rolled_back"
         rule.rolled_back_at = datetime.utcnow()
         db.commit()
+        if was_real:
+            _apply_mgmt_toggle(db, rule, activate=False)
         _log(f"regola #{rule.id} rollback ({rule.mode})")
         return {"ok": True}
     finally:
@@ -275,6 +332,16 @@ def _monitor_real(rule, db) -> dict:
             "pnl_stimato_senza_scala": round(unscaled, 2),
             "delta_osservato": round(actual - unscaled, 2),
         }
+    if rule.sim_type == "mgmt_policy":
+        # toggle reale attivo: i trade nuovi seguono GIA' la nuova gestione ->
+        # confronto reale osservato vs controfattuale (gestione precedente)
+        import replay_engine
+        policy = params.get("policy")
+        tg = replay_engine.MGMT_REAL_TOGGLES.get(policy)
+        if tg:
+            out = replay_engine.monitor_real_toggle(db, _since_str(rule))
+            out["nota"] = f"effetto reale attivo via impostazione {tg['field']}"
+            return out
     # monitor-only (es. cap_loss_at_risk): stessa meccanica del test, dichiarata
     out = _monitor_test(rule, db)
     out["tipo"] = "monitor_only"

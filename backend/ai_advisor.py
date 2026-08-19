@@ -330,6 +330,14 @@ def build_dossier(db=None) -> dict:
         except Exception:
             d["regole_aia_in_gestione"] = {"in_monitor_test": [], "attive_reali": []}
 
+        # Registro consigli aperti (persistenza giorno per giorno): l'LLM deve
+        # riusare le key esistenti quando ripropone lo stesso consiglio.
+        try:
+            import advisor_registry as _reg
+            d["registro_consigli_aperti"] = _reg.open_for_dossier(db)
+        except Exception:
+            d["registro_consigli_aperti"] = []
+
         # Entrate mancate (EMA)
         try:
             cases = db.query(EmaCase).all()
@@ -395,11 +403,23 @@ robustezza senza il miglior singolo trade, confidenza bootstrap).
   valore: distinguere segnale da illusione statistica.
 - Le regole con delta negativo dimostrano che un'idea NON funziona: usale per
   smontare false intuizioni (in patterns o trader_edge), mai in recommendations.
-- I consigli NON simulabili (gestione SL/BE/trailing: richiede replay tick,
-  latenza, processi operativi) restano leciti con sim_type="none" e
-  sim_params="{}", dichiarando nel detail che l'impatto non e' quantificato.
 - Se nessuna regola promossa esiste, dillo apertamente: meglio zero consigli
   quantificati che consigli non verificati.
+
+REPLAY TICK (gestione e ingresso — da v2 SONO quantificati): il dossier
+contiene "gestione_replay_sweep": ogni trade reale e' stato RIGIOCATO sui tick
+veri di MT5 e la batteria confronta la gestione corrente (BE a TP1, trail off)
+con policy alternative di GESTIONE (no_be, trail_progressive, close_all_tp1,
+close_all_tp2) e di INGRESSO (market_immediate, market_if_near_2/5 = MARKET se
+il prezzo e' entro 2/5$ dal range, altrimenti LIMIT come oggi).
+- Anche qui vale la regola ferrea: raccomanda SOLO le policy in "promosse",
+  con sim_type "mgmt_policy" o "entry_policy" e sim_params ESATTI, es.
+  {"policy": "close_all_tp2"}. Le bocciate citale come testate-e-scartate.
+- Cita sempre la coverage (trade replayati, esclusi per fidelity): il replay
+  e' onesto sui propri limiti.
+- I consigli di gestione NON coperti dalla batteria (es. processi operativi,
+  latenza infrastrutturale) restano leciti con sim_type="none",
+  dichiarando nel detail che l'impatto non e' quantificato.
 
 PROTEZIONI GIA' ATTIVE (regola fondamentale — mai consigliare l'esistente):
 Il dossier contiene "protezioni_attive" (difese gia' implementate nel sistema,
@@ -440,7 +460,19 @@ counter_trend (contro il bias M15), no_context. Con esiti per setup, kill zone
   statistici di tutto il resto). Copia sim_type/sim_params esatti.
 - Considera coverage: se pochi trade hanno contesto, dillo.
 - I setup sono approssimazioni algoritmiche consistenti di concetti in parte
-  discrezionali: parlane come "rilevati dal sistema", non come verita' assolute."""
+  discrezionali: parlane come "rilevati dal sistema", non come verita' assolute.
+
+REGISTRO CONSIGLI (persistenza giorno per giorno): il dossier contiene
+"registro_consigli_aperti" — i consigli ancora aperti dai report precedenti,
+ognuno con la sua chiave stabile "key", la data di prima apparizione e quante
+volte e' stato riconfermato.
+- Ogni raccomandazione DEVE avere il campo "key": se il consiglio e'
+  sostanzialmente lo stesso di una voce del registro, RIUSA esattamente la sua
+  key (anche se riformuli il testo). Se e' un consiglio nuovo, crea una key
+  nuova, breve, in kebab-case (es. "ridurre-latenza-fill").
+- MAI riusare una key del registro per un consiglio diverso.
+- Un consiglio del registro che i dati odierni non supportano piu' NON va
+  riproposto: il motore lo invalidera' da solo, col motivo tracciato."""
 
 REPORT_SCHEMA = {
     "type": "object",
@@ -455,6 +487,7 @@ REPORT_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "key": {"type": "string"},
                     "title": {"type": "string"},
                     "detail": {"type": "string"},
                     "priority": {"type": "string", "enum": ["alta", "media", "bassa"]},
@@ -463,10 +496,11 @@ REPORT_SCHEMA = {
                                           "exclude_weekdays", "exclude_direction",
                                           "min_rr_tp1", "cap_loss_at_risk",
                                           "scale_risk", "exclude_near_news",
-                                          "exclude_setup"]},
+                                          "exclude_setup", "mgmt_policy",
+                                          "entry_policy"]},
                     "sim_params": {"type": "string"},
                 },
-                "required": ["title", "detail", "priority", "sim_type", "sim_params"],
+                "required": ["key", "title", "detail", "priority", "sim_type", "sim_params"],
                 "additionalProperties": False,
             },
         },
@@ -536,6 +570,13 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
             ict_engine.ensure_contexts(db)
         except Exception as _e:
             _log(f"ensure_contexts err: {str(_e)[:120]}")
+        # Replay tick: cache incrementale (i trade nuovi si aggiungono alla
+        # chiusura; qui il backfill di sicurezza) + sweep policy.
+        try:
+            import replay_engine
+            replay_engine.ensure_replays(db)
+        except Exception as _e:
+            _log(f"ensure_replays err: {str(_e)[:120]}")
         dossier = build_dossier(db)
         # Sweep sistematico PRE-LLM: regole gia' testate/validate. L'LLM puo'
         # raccomandare SOLO le promosse (le bocciate le cita come scartate).
@@ -544,9 +585,24 @@ def generate_report(db=None, trigger: str = "manual") -> dict:
         except Exception as _e:
             _log(f"sweep errore: {str(_e)[:120]}")
             dossier["validated_rules_sweep"] = {"promosse": [], "bocciate_interessanti": []}
+        try:
+            import replay_engine
+            dossier["gestione_replay_sweep"] = replay_engine.replay_sweep(db)
+        except Exception as _e:
+            _log(f"replay sweep errore: {str(_e)[:120]}")
+            dossier["gestione_replay_sweep"] = {"promosse": [], "bocciate_interessanti": []}
         sections, tin, tout = _call_llm(dossier)
         _attach_impacts(sections, db)
         _ensure_promoted_actionable(sections, dossier.get("validated_rules_sweep") or {}, db)
+        _ensure_promoted_actionable(sections, dossier.get("gestione_replay_sweep") or {}, db)
+        # Registro persistente: upsert dei consigli odierni, riproposta delle
+        # voci aperte omesse dall'LLM (standing), invalidazione motivata di
+        # quelle che i dati non supportano piu'.
+        try:
+            import advisor_registry
+            advisor_registry.reconcile(sections, db, report_date)
+        except Exception as _e:
+            _log(f"registry reconcile err: {str(_e)[:150]}")
         rep = AiReport(report_date=report_date, model=ADVISOR_MODEL,
                        sections_json=json.dumps(sections, ensure_ascii=False),
                        stats_json=json.dumps(dossier, ensure_ascii=False, default=str),

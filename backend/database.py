@@ -314,6 +314,51 @@ class AdvisorRule(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class TradeReplay(Base):
+    """Replay tick-per-tick di un trade reale chiuso (replay_engine): P&L che
+    ogni policy alternativa di GESTIONE (BE/trail/chiusure anticipate) o di
+    INGRESSO (market/mista) avrebbe prodotto sui tick veri del trade, piu' il
+    fidelity check (replay della gestione corrente vs P&L reale registrato).
+    Cache incrementale: calcolato una volta per trade (per versione batteria)."""
+    __tablename__ = "trade_replays"
+    id = Column(Integer, primary_key=True, index=True)
+    signal_id = Column(Integer, unique=True, index=True, nullable=False)
+    version = Column(String(10))                 # versione batteria policy
+    ticks_ok = Column(Boolean, default=False)    # tick disponibili e replay riuscito
+    fidelity_ok = Column(Boolean, default=False) # replay baseline ~ P&L reale
+    results_json = Column(Text, nullable=True)   # {baseline_replay, fidelity, mgmt{}, entry{}}
+    computed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AdvisorRec(Base):
+    """Registro PERSISTENTE dei consigli AIA: ogni consiglio e' un'entita' con
+    chiave stabile e ciclo di vita, aggiornata a ogni report (mai ricreata).
+    Chiave: sim-based -> "sim_type|params_canonici"; non quantificati -> key
+    scelta dall'LLM (riusata giorno per giorno) o slug del titolo.
+    status: open (in attesa di decisione) | in_gestione (regola AIA creata) |
+            invalidated (i dati non lo supportano piu': motivo salvato)."""
+    __tablename__ = "advisor_recs"
+    id = Column(Integer, primary_key=True, index=True)
+    rec_key = Column(String(200), unique=True, index=True, nullable=False)
+    title = Column(String(300))
+    detail = Column(Text, nullable=True)
+    priority = Column(String(10), default="media")
+    sim_type = Column(String(40), default="none")
+    sim_params = Column(Text, default="{}")            # JSON canonico
+    impact_json = Column(Text, nullable=True)          # ultima validazione motore
+    status = Column(String(20), default="open", index=True)
+    invalid_reason = Column(Text, nullable=True)
+    rule_id = Column(Integer, nullable=True)           # link AdvisorRule se in gestione
+    first_seen = Column(String(10))                    # data Roma YYYY-MM-DD
+    last_confirmed = Column(String(10))                # ultima riconferma (LLM o motore)
+    times_seen = Column(Integer, default=1)
+    rejected_count = Column(Integer, default=0)
+    last_rejected = Column(String(10), nullable=True)
+    source = Column(String(10), default="llm")         # llm | engine
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class TradeContext(Base):
     """Contesto ICT di un trade reale, calcolato deterministicamente dalle
     candele M5/M15 attorno all'entry (ict_engine): setup primario + features
