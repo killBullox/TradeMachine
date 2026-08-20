@@ -1387,6 +1387,14 @@ async def reload_history(limit: int = Query(2000)):
 
 # ─── Endpoints: Telegram Auth ────────────────────────────────────────────────
 
+@app.post("/api/telegram/screenshots/scan")
+async def telegram_screenshots_scan(limit: int = 4000, max_download: int = 400):
+    """Scarica gli screenshot dei grafici postati nel canale (sola lettura,
+    usa il client Telegram gia' connesso). Per l'analisi ICT degli ingressi."""
+    import telegram_client as tgm
+    return await tgm.scan_screenshots(limit=limit, max_download=max_download)
+
+
 @app.get("/api/telegram/status")
 async def telegram_status():
     return {"status": tg_module.get_tg_status()}

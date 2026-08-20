@@ -33,7 +33,30 @@ FVG_LOOKBACK = 60
 OB_LOOKBACK = 60
 M5_WINDOW_H = 24            # ore di M5 scaricate prima dell'entry
 M15_WINDOW_H = 72           # ore di M15 per bias e dealing range
+H1_WINDOW_H = 24 * 20       # ore di H1: bias e dealing range di FONDO (20 gg)
+H4_WINDOW_H = 24 * 60       # ore di H4: narrativa macro (60 gg)
 ZONE_TOL = 0.0005           # tolleranza relativa (0.05%) per zone/retest
+
+# Dati MINIMI perche' la classificazione sia ATTENDIBILE. Lo storico MT5
+# arriva ON-DEMAND: un fetch parziale NON deve produrre un'etichetta
+# silenziosamente sbagliata (caso #682: con M5 monche usciva 'fvg_entry' con
+# un BOS vecchio di 5 ore; con la finestra piena nessun FVG e BOS diverso).
+# Sotto soglia -> no_data, che e' onesto. Contiamo le barre PRIMA dell'entry
+# (non una % della finestra: weekend e chiusure renderebbero la % inaffidabile).
+MIN_BARS_BEFORE = {"M5": 80, "M15": 40, "H1": 24, "H4": 10}
+_TF_MINUTES = {"M5": 5, "M15": 15, "H1": 60, "H4": 240}
+
+
+def coverage_ok(candles, entry_time_utc, tf: str) -> bool:
+    """True se i dati bastano per classificare: abbastanza barre PRIMA
+    dell'entry e serie che ARRIVA fino all'entry (niente buchi finali)."""
+    if not candles:
+        return False
+    before = [c for c in candles if c["t"] <= entry_time_utc]
+    if len(before) < MIN_BARS_BEFORE.get(tf, 20):
+        return False
+    gap_min = (entry_time_utc - before[-1]["t"]).total_seconds() / 60.0
+    return gap_min <= _TF_MINUTES.get(tf, 5) * 3
 
 SETUP_LABELS = ("sweep_reversal", "ob_retest", "fvg_entry", "bos_retest",
                 "bos_no_retest", "counter_trend", "no_context", "no_data")
@@ -214,19 +237,22 @@ def kill_zone(roma_dt) -> Optional[str]:
 
 
 def classify_entry(candles_m5, candles_m15, entry_time_utc, entry_price: float,
-                   direction: str) -> dict:
+                   direction: str, candles_h1=None, candles_h4=None) -> dict:
     """Contesto completo + setup primario. candles gia' in UTC, entry compresa
-    nell'ultimo tratto delle M5."""
-    if not candles_m5 or len(candles_m5) < 20:
-        return {"setup": "no_data", "candles_ok": False}
+    nell'ultimo tratto delle M5. candles_h1/h4 opzionali: bias e dealing range
+    di FONDO (il framework ICT ragiona dall'alto verso il basso; senza HTF si
+    giudica un ingresso con meta' delle informazioni)."""
+    if not coverage_ok(candles_m5, entry_time_utc, "M5"):
+        # dati insufficienti: MAI classificare su finestre parziali (produce
+        # etichette silenziosamente sbagliate, cfr #682)
+        return {"setup": "no_data", "candles_ok": False,
+                "motivo": "copertura M5 insufficiente"}
     # indice dell'ultima candela PRIMA dell'entry
     entry_idx = len(candles_m5)
     for i, c in enumerate(candles_m5):
         if c["t"] > entry_time_utc:
             entry_idx = i
             break
-    if entry_idx < 10:
-        return {"setup": "no_data", "candles_ok": False}
 
     swings5 = find_swings(candles_m5[:entry_idx])
     swings15 = find_swings(candles_m15) if candles_m15 else []
@@ -238,6 +264,29 @@ def classify_entry(candles_m5, candles_m15, entry_time_utc, entry_price: float,
     at_ob = entry_at_ob(ob, entry_price)
     sweep = detect_sweep(candles_m5, entry_idx, direction)
     pd_pos = premium_discount(candles_m15, entry_price)
+
+    # ── Timeframe ALTI (bias di fondo + dealing range macro) ────────────────
+    # Solo se la copertura e' sufficiente: meglio None che un bias inventato.
+    htf = {}
+    for key, cds in (("h1", candles_h1), ("h4", candles_h4)):
+        tf = key.upper()
+        if cds and coverage_ok(cds, entry_time_utc, tf):
+            before = [c for c in cds if c["t"] <= entry_time_utc]
+            b = structure_bias(find_swings(before))
+            pdp = premium_discount(before, entry_price)
+            htf[f"bias_{key}"] = b
+            htf[f"pd_{key}"] = pdp
+            htf[f"pd_bucket_{key}"] = (
+                None if pdp is None else
+                ("discount" if pdp < 0.45 else ("premium" if pdp > 0.55 else "equilibrium")))
+            htf[f"with_trend_{key}"] = (
+                (b == "bullish" and direction == "buy") or
+                (b == "bearish" and direction == "sell"))
+        else:
+            htf[f"bias_{key}"] = None
+            htf[f"pd_{key}"] = None
+            htf[f"pd_bucket_{key}"] = None
+            htf[f"with_trend_{key}"] = None
 
     from zoneinfo import ZoneInfo
     roma = entry_time_utc.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Europe/Rome"))
@@ -281,6 +330,7 @@ def classify_entry(candles_m5, candles_m15, entry_time_utc, entry_price: float,
         "premium_discount": pd_pos,
         "pd_bucket": pd_bucket,
         "kill_zone": kz,
+        **htf,
     }
 
 
@@ -306,7 +356,8 @@ def fetch_candles(symbol: str, timeframe_key: str, utc_from, utc_to):
         from datetime import timezone as _tz
         from mt5_time import detect_mt5_server_offset, mt5_epoch_to_utc
         off = detect_mt5_server_offset(symbol)
-        tf = {"M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15}[timeframe_key]
+        tf = {"M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+              "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4}[timeframe_key]
         # AWARE UTC obbligatorio: il wrapper MT5 converte i naive col fuso
         # LOCALE della macchina -> sul VPS (tz Roma) la finestra arrivava
         # spostata di 2h e il contesto era calcolato PRIMA dell'entry.
@@ -358,8 +409,13 @@ def build_context_for_signal(sig) -> dict:
                        entry_time + timedelta(minutes=10))
     m15 = fetch_candles(symbol, "M15", entry_time - timedelta(hours=M15_WINDOW_H),
                         entry_time)
+    h1 = fetch_candles(symbol, "H1", entry_time - timedelta(hours=H1_WINDOW_H),
+                       entry_time)
+    h4 = fetch_candles(symbol, "H4", entry_time - timedelta(hours=H4_WINDOW_H),
+                       entry_time)
     return classify_entry(m5, m15, entry_time, entry_price,
-                          (sig.direction or "buy").lower())
+                          (sig.direction or "buy").lower(),
+                          candles_h1=h1, candles_h4=h4)
 
 
 def save_context_if_missing(db, sig) -> Optional[str]:
@@ -439,6 +495,7 @@ def strategy_stats(db) -> dict:
     ctxs = {tc.signal_id: tc for tc in db.query(TradeContext).all()}
     trades = _real_closed_trades(db)
     per_setup, per_kz, per_pd, per_trend = {}, {}, {}, {}
+    per_h4_align, per_h1_pd, per_setup_x_h4 = {}, {}, {}
     covered = 0
     for t in trades:
         tc = ctxs.get(t.id)
@@ -463,7 +520,17 @@ def strategy_stats(db) -> dict:
         acc(per_pd, f.get("pd_bucket"))
         acc(per_trend, "with_trend" if f.get("with_trend")
             else ("counter_trend" if f.get("counter_trend") else "neutral"))
-    for dct in (per_setup, per_kz, per_pd, per_trend):
+        # Timeframe alti: allineamento col bias H4 e zona nel range H1.
+        # E' la lettura che il framework ICT fa PER PRIMA (top-down).
+        wt4 = f.get("with_trend_h4")
+        lbl4 = "n/d" if wt4 is None else ("with_h4" if wt4 else "contro_h4")
+        acc(per_h4_align, lbl4)
+        acc(per_h1_pd, f.get("pd_bucket_h1"))
+        # incrocio setup x allineamento H4: qui si vede se un setup "perdente"
+        # lo e' solo quando va contro il quadro maggiore
+        acc(per_setup_x_h4, f"{tc.setup} | {lbl4}")
+    for dct in (per_setup, per_kz, per_pd, per_trend,
+                per_h4_align, per_h1_pd, per_setup_x_h4):
         for b in dct.values():
             b["pnl"] = round(b["pnl"], 2)
             b["win_rate"] = round(100.0 * b["wins"] / b["trades"], 1) if b["trades"] else 0.0
@@ -473,7 +540,12 @@ def strategy_stats(db) -> dict:
         "per_kill_zone": per_kz,
         "per_premium_discount": per_pd,
         "per_trend": per_trend,
+        "per_allineamento_h4": per_h4_align,
+        "per_premium_discount_h1": per_h1_pd,
+        "per_setup_x_allineamento_h4": per_setup_x_h4,
         "nota": ("Setup rilevati algoritmicamente (approssimazione consistente di "
                  "concetti ICT in parte discrezionali). I pattern per setup possono "
-                 "diventare regole exclude_setup, validate dai gate statistici."),
+                 "diventare regole exclude_setup, validate dai gate statistici. "
+                 "I blocchi *_h4/_h1 sono la lettura top-down (bias e dealing range "
+                 "di fondo): 'contro_h4' = ingresso contro il quadro maggiore."),
     }

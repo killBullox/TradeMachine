@@ -80,9 +80,10 @@ class TestFeaturePure:
 
     def test_classify_bos_no_retest(self, fake_mt5):
         import ict_engine as ict
-        # padding piatto (>=20 candele) + struttura che sale, BOS appena
-        # avvenuto, entry SUBITO senza retest
-        data = [(10, 10.2, 9.4, 10.1)] * 10 + \
+        # padding piatto (oltre MIN_BARS_BEFORE: il gate di copertura scarta
+        # le finestre corte) + struttura che sale, BOS appena avvenuto, entry
+        # SUBITO senza retest
+        data = [(10, 10.2, 9.4, 10.1)] * 75 + \
                [(10, 11, 9.5, 10.5), (10.5, 11.5, 10, 11), (11, 12, 10.8, 11.8),
                 (11.8, 11.9, 11, 11.2), (11.2, 11.4, 10.9, 11.1), (11.1, 11.6, 11, 11.5),
                 (11.5, 12.6, 11.4, 12.5), (12.5, 13.1, 12.4, 13.0),

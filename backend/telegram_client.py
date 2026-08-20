@@ -2487,3 +2487,75 @@ async def start_listener():
         except Exception as e:
             log(f"[Telegram] Errore keepalive: {str(e)[:80]}")
             await asyncio.sleep(10)
+
+
+# ─── Screenshot dei grafici (analisi ICT) ────────────────────────────────────
+
+async def scan_screenshots(limit: int = 4000, download: bool = True,
+                           out_dir: str = None, max_download: int = 400) -> dict:
+    """Scansiona la history del gruppo cercando le IMMAGINI (screenshot dei
+    grafici postati dal trader) e le scarica su disco con un manifest.
+
+    Usa il client GIA' connesso del backend: mai aprire una seconda sessione
+    Telethon sullo stesso file (rischio AuthKeyDuplicated -> il bot perde la
+    ricezione dei segnali).
+
+    Ogni voce del manifest riporta msg_id, data UTC, caption, reply_to
+    (aggancio esatto al messaggio del segnale, se il grafico e' una risposta)
+    e il file salvato. Nessun effetto sui trade: sola lettura.
+    """
+    import os as _os
+    tg = await get_client()
+    target = None
+    async for dialog in tg.iter_dialogs():
+        if GROUP_NAME.lower() in dialog.name.lower():
+            target = dialog.entity
+            break
+    if not target:
+        return {"ok": False, "error": f"gruppo '{GROUP_NAME}' non trovato"}
+
+    if out_dir is None:
+        out_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                "..", "tg_screens")
+    out_dir = _os.path.abspath(out_dir)
+    _os.makedirs(out_dir, exist_ok=True)
+
+    items, n_photos, n_saved = [], 0, 0
+    async for message in tg.iter_messages(target, limit=limit):
+        photo = getattr(message, "photo", None)
+        if not photo:
+            continue
+        n_photos += 1
+        d = message.date
+        if d and d.tzinfo:
+            d = d.replace(tzinfo=None)
+        entry = {
+            "msg_id": message.id,
+            "date_utc": d.strftime("%Y-%m-%d %H:%M:%S") if d else None,
+            "caption": (message.text or "")[:400],
+            "reply_to": getattr(getattr(message, "reply_to", None),
+                                "reply_to_msg_id", None),
+            "file": None,
+        }
+        if download and n_saved < max_download:
+            try:
+                fname = _os.path.join(out_dir, f"tg_{message.id}.jpg")
+                if not _os.path.exists(fname):
+                    await message.download_media(file=fname)
+                entry["file"] = _os.path.basename(fname)
+                n_saved += 1
+            except Exception as e:
+                entry["error"] = str(e)[:120]
+        items.append(entry)
+
+    items.sort(key=lambda x: x["msg_id"])
+    manifest = {"ok": True, "gruppo": GROUP_NAME, "out_dir": out_dir,
+                "messaggi_scansionati": limit, "foto_trovate": n_photos,
+                "foto_scaricate": n_saved, "items": items}
+    try:
+        with open(_os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+    log(f"[Telegram] scan_screenshots: {n_photos} foto trovate, {n_saved} scaricate in {out_dir}")
+    return manifest

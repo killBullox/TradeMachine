@@ -32,6 +32,7 @@ CAVEATS = [
 SUPPORTED_RULES = ("exclude_hours", "exclude_sessions", "exclude_weekdays",
                    "exclude_direction", "min_rr_tp1", "cap_loss_at_risk",
                    "scale_risk", "exclude_near_news", "exclude_setup",
+                   "exclude_counter_h4", "exclude_setup_h4",
                    "abort_beyond_range", "mgmt_policy", "entry_policy")
 
 # Regole valutate dal REPLAY TICK (replay_engine), non dal what-if trade-level:
@@ -181,6 +182,18 @@ def _decide(rule_type, params, t, ctx):
         lo2, hi2 = min(lo, hi or lo), max(lo, hi or lo)
         d = (ae - hi2) if (t.direction or "").lower() == "buy" else (lo2 - ae)
         return ("exclude", None) if d > max_usd else ("keep", pnl)
+    if rule_type == "exclude_counter_h4":
+        # Evita i trade entrati CONTRO il bias del timeframe alto (H4): la
+        # lettura top-down del framework ICT. Contesto assente o H4 non
+        # disponibile -> tenuto (conservativo).
+        return ("exclude", None) if ctx.get("counter_h4", {}).get(t.id) else ("keep", pnl)
+    if rule_type == "exclude_setup_h4":
+        # Come exclude_setup ma SOLO quando il setup e' anche contro H4:
+        # separa "il setup non funziona" da "non funziona contro il quadro".
+        setup = str(params["setup"])
+        return ("exclude", None) if (
+            ctx.get("setups", {}).get(t.id) == setup
+            and ctx.get("counter_h4", {}).get(t.id)) else ("keep", pnl)
     if rule_type == "exclude_setup":
         # Evita i trade con un dato setup ICT (contesto pre-calcolato da
         # ict_engine). Trade senza contesto -> tenuti (conservativo).
@@ -222,11 +235,22 @@ def _build_ctx(rule_type, db):
                                  if e.event_time]
         except Exception:
             pass
-    if rule_type == "exclude_setup":
+    if rule_type in ("exclude_setup", "exclude_counter_h4", "exclude_setup_h4"):
         try:
             from database import TradeContext
-            ctx["setups"] = {tc.signal_id: tc.setup for tc in
-                             db.query(TradeContext).filter(TradeContext.candles_ok == True).all()}  # noqa: E712
+            import json as _j
+            rows = db.query(TradeContext).filter(TradeContext.candles_ok == True).all()  # noqa: E712
+            ctx["setups"] = {tc.signal_id: tc.setup for tc in rows}
+            counter = {}
+            for tc in rows:
+                try:
+                    f = _j.loads(tc.features_json or "{}")
+                except Exception:
+                    continue
+                wt = f.get("with_trend_h4")
+                if wt is not None:
+                    counter[tc.signal_id] = (wt is False)
+            ctx["counter_h4"] = counter
         except Exception:
             pass
     return ctx
@@ -445,6 +469,9 @@ def sweep(db=None, max_entries: int = 25) -> dict:
             for lbl in sorted(labels):
                 if lbl and lbl != "no_data":
                     candidates.append(("exclude_setup", {"setup": lbl}))
+                    # stesso setup ma solo contro il quadro H4 (top-down ICT)
+                    candidates.append(("exclude_setup_h4", {"setup": lbl}))
+            candidates.append(("exclude_counter_h4", {}))
         except Exception:
             pass
 
