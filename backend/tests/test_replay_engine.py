@@ -421,3 +421,90 @@ class TestNoTp1Policies:
             alt = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS,
                                    rp.MGMT_POLICIES[name])
             assert alt["pnl"] == base["pnl"] == -900.0, name
+
+
+class TestDoppioGateFedelta:
+    """Una policy che 'funziona' solo sui trade dove il replay diverge dal
+    reale e' rumore: deve essere bocciata anche se supera i gate classici."""
+
+    def _seed(self, db, n_good=12, contrib_good=60.0, n_noisy=12, contrib_noisy=400.0):
+        from database import Signal, TradeReplay
+        import replay_engine as rp
+        from datetime import datetime, timedelta
+        import json as _j
+        for i in range(n_good + n_noisy):
+            now = datetime(2026, 8, 1, 8, 0) + timedelta(hours=i)
+            db.add(Signal(telegram_msg_id=i + 1, symbol="XAUUSD", direction="buy",
+                          entry_price=4000.0, entry_price_high=4001.0,
+                          actual_entry_price=4000.5, stoploss=3994.0, tp1=4005.0,
+                          status="tp1", pnl_usd=100.0, risk_usd=900.0,
+                          is_filtered=False, is_archived=False, mt5_tickets="[1]",
+                          raw_message="t", created_at=now,
+                          entered_at=now + timedelta(seconds=5),
+                          closed_at=now + timedelta(minutes=30)))
+        db.commit()
+        sigs = db.query(Signal).order_by(Signal.id).all()
+        for k, s in enumerate(sigs):
+            noisy = k >= n_good
+            # err entro tolleranza (225$) ma FUORI dal sottoinsieme stretto (50$)
+            err = 200.0 if noisy else 5.0
+            c = contrib_noisy if noisy else contrib_good
+            res = {"version": rp.BATTERY_VERSION, "baseline_replay": 100.0,
+                   "actual_pnl": 100.0,
+                   "fidelity": {"err": err, "tol": 225.0, "ok": True},
+                   "mgmt": {"no_be": 100.0 + c, "trail_progressive": 100.0,
+                            "close_all_tp1": 100.0, "close_all_tp2": 100.0},
+                   "entry": {}}
+            db.add(TradeReplay(signal_id=s.id, version=rp.BATTERY_VERSION,
+                               ticks_ok=True, fidelity_ok=True,
+                               results_json=_j.dumps(res)))
+        db.commit()
+
+    def test_policy_confermata_sul_pulito_passa(self, in_memory_db, fake_mt5):
+        import replay_engine as rp
+        db = in_memory_db()
+        try:
+            self._seed(db, n_good=12, contrib_good=60.0, n_noisy=0)
+            res = rp.validate_policy("mgmt", {"policy": "no_be"}, db)
+            v = res["validation"]
+            assert v["passed"] is True
+            assert v["alta_fedelta"]["conferma"] is True
+            assert v["alta_fedelta"]["trade"] == 12
+        finally:
+            db.close()
+
+    def test_policy_solo_sui_rumorosi_bocciata(self, in_memory_db, fake_mt5):
+        """Delta grande sul totale ma NEGATIVO sui trade ad alta fedelta'."""
+        import replay_engine as rp
+        db = in_memory_db()
+        try:
+            self._seed(db, n_good=12, contrib_good=-20.0, n_noisy=12,
+                       contrib_noisy=400.0)
+            res = rp.validate_policy("mgmt", {"policy": "no_be"}, db)
+            v = res["validation"]
+            assert res["delta_pnl"] > 0          # sul totale sembra ottima
+            assert v["passed"] is False          # ma e' rumore di replay
+            assert v["alta_fedelta"]["conferma"] is False
+            assert any("alta fedelta" in r for r in v["fail_reasons"])
+        finally:
+            db.close()
+
+    def test_policy_che_dipende_da_un_solo_trade_pulito_bocciata(self, in_memory_db, fake_mt5):
+        import replay_engine as rp
+        from database import TradeReplay
+        import json as _j
+        db = in_memory_db()
+        try:
+            self._seed(db, n_good=12, contrib_good=-10.0, n_noisy=12, contrib_noisy=400.0)
+            # un solo trade pulito con contributo enorme
+            row = db.query(TradeReplay).first()
+            res = _j.loads(row.results_json)
+            res["mgmt"]["no_be"] = 100.0 + 500.0
+            row.results_json = _j.dumps(res); db.commit()
+            out = rp.validate_policy("mgmt", {"policy": "no_be"}, db)
+            v = out["validation"]
+            assert v["alta_fedelta"]["delta"] > 0
+            assert v["alta_fedelta"]["delta_senza_top1"] < 0   # regge su 1 solo
+            assert v["passed"] is False
+        finally:
+            db.close()

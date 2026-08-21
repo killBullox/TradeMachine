@@ -40,6 +40,7 @@ EPS = 0.01                   # contributo minimo per contare un trade "toccato"
 MAX_HOLD_HOURS = 48          # oltre: replay skippato (dichiarato in coverage)
 FIDELITY_TOL_USD = 150.0     # tolleranza fissa fidelity...
 FIDELITY_TOL_RISK = 0.25     # ...oppure 25% del rischio, il maggiore dei due
+STRICT_FIDELITY_USD = 50.0   # sottoinsieme "ad alta fedelta'" per il doppio gate
 
 # Policy di GESTIONE (stessa entry reale, gestione alternativa).
 # baseline = gestione corrente del sistema: BE a TP1 ON, trail OFF.
@@ -558,7 +559,34 @@ def validate_policy(kind: str, params: dict, db=None,
                 conf_ok = False
                 reasons.append(f"confidenza bootstrap {round(confidence * 100)}% "
                                f"sotto il minimo {round(sim_engine.CONFIDENCE_MIN * 100)}%")
-        passed = (delta > 0) and sample_ok and robust_ok and conf_ok
+        # ── DOPPIO GATE anti-rumore-di-replay ───────────────────────────────
+        # Il delta si calcola come differenza fra due replay sugli STESSI tick,
+        # quindi il bias sistematico si cancella. Ma quando il replay diverge
+        # molto dal reale, il PERCORSO ricostruito e' fittizio e le differenze
+        # calcolate su quella finzione non valgono nulla. Quindi la policy deve
+        # reggere anche sul sottoinsieme AD ALTA FEDELTA' (errore <= 50$):
+        # li' il replay e' quasi identico alla realta'. Se sul sottoinsieme
+        # pulito il segno si rovescia o il delta dipende da un solo trade,
+        # e' rumore -> bocciata (misurato: trail_progressive e le varianti
+        # no_tp1 passavano sul totale e crollavano sul pulito).
+        strict_contribs = []
+        for t, res in rows:
+            if abs((res.get("fidelity") or {}).get("err", 9e9)) > STRICT_FIDELITY_USD:
+                continue
+            c = _policy_contrib(res, kind, policy)
+            if c is not None:
+                strict_contribs.append(c)
+        strict_delta = round(sum(strict_contribs), 2)
+        strict_top1 = max(strict_contribs) if strict_contribs else 0.0
+        strict_no_top1 = round(strict_delta - strict_top1, 2)
+        strict_ok = bool(strict_contribs) and strict_delta > 0 and strict_no_top1 > 0
+        if delta > 0 and not strict_ok:
+            reasons.append(
+                f"non confermata sui {len(strict_contribs)} trade ad alta fedelta' "
+                f"(delta {strict_delta}$, senza il migliore {strict_no_top1}$): "
+                f"sotto la risoluzione del replay")
+
+        passed = (delta > 0) and sample_ok and robust_ok and conf_ok and strict_ok
         return {
             "ok": True,
             "rule": {"type": f"{kind}_policy", "params": {"policy": policy}},
@@ -584,6 +612,12 @@ def validate_policy(kind: str, params: dict, db=None,
                 "delta_without_top1": delta_no_top1,
                 "bootstrap_confidence": confidence,
                 "fail_reasons": reasons,
+                "alta_fedelta": {
+                    "trade": len(strict_contribs),
+                    "delta": strict_delta,
+                    "delta_senza_top1": strict_no_top1,
+                    "conferma": strict_ok,
+                },
             },
         }
     except Exception as e:
