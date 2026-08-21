@@ -357,3 +357,67 @@ class TestRealEnforcementToggle:
             assert db.query(RiskSettings).first().trail_stop_enabled is False
         finally:
             db.close()
+
+
+class TestNoTp1Policies:
+    """Policy 'niente TP1': il terzo destinato a 1.25R va piu' lontano.
+    Rischio totale invariato (stessi 3 ticket, stessi lotti)."""
+
+    def test_riallocazione_su_tp2_quando_il_prezzo_arriva(self):
+        import replay_engine as rp
+        # sale fino a TP2 e poi torna: baseline prende TP1+TP2 e BE sul resto,
+        # la variante prende DUE volte TP2
+        ticks = _ticks_buy([4000, 4005.2, 4010.3, 4000.1])
+        base = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS, rp.BASELINE_MGMT)
+        alt = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS,
+                               rp.MGMT_POLICIES["no_tp1_to_tp2"])
+        # baseline: tp1 250 + tp2 500 + BE 5 = 755
+        assert base["pnl"] == 755.0
+        # variante: tp2 x2 = 1000 + BE 5 = 1005
+        assert alt["pnl"] == 1005.0
+
+    def test_costa_quando_il_prezzo_non_arriva_a_tp2(self):
+        """Il rovescio della medaglia: se tocca TP1 e torna indietro, la
+        variante rinuncia all'incasso di TP1."""
+        import replay_engine as rp
+        ticks = _ticks_buy([4000, 4005.2, 4002, 4000.1])
+        base = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS, rp.BASELINE_MGMT)
+        alt = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS,
+                               rp.MGMT_POLICIES["no_tp1_to_tp2"])
+        assert base["pnl"] > alt["pnl"]      # qui il TP1 protegge
+        assert base["pnl"] == 260.0          # 250 + BE su 2 ticket
+        assert alt["pnl"] == 15.0            # solo BE su 3 ticket
+
+    def test_be_scatta_al_tocco_del_livello_anche_senza_ticket_tp1(self):
+        import replay_engine as rp
+        ticks = _ticks_buy([4000, 4005.2, 3993.9])
+        alt = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS,
+                               rp.MGMT_POLICIES["no_tp1_to_tp2"])
+        assert any(e.startswith("be+1pip@") for e in alt["events"])
+        assert alt["pnl"] == 15.0            # 3 ticket a BE+1pip, NON lo SL pieno
+
+    def test_no_tp1_no_be_prende_lo_sl_pieno(self):
+        import replay_engine as rp
+        ticks = _ticks_buy([4000, 4005.2, 3993.9])
+        alt = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS,
+                               rp.MGMT_POLICIES["no_tp1_no_be"])
+        assert alt["pnl"] == -900.0
+        assert not any(e.startswith("be+1pip@") for e in alt["events"])
+
+    def test_no_tp1_to_tp3(self):
+        import replay_engine as rp
+        ticks = _ticks_buy([4000, 4005.2, 4010.3, 4015.5])
+        alt = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS,
+                               rp.MGMT_POLICIES["no_tp1_to_tp3"])
+        # tp3 x2 (750x2) + tp2 (500) = 2000
+        assert alt["pnl"] == 2000.0
+
+    def test_rischio_totale_invariato(self):
+        """Garanzia: le varianti NON aumentano il rischio (stesso SL pieno)."""
+        import replay_engine as rp
+        ticks = _ticks_buy([4000, 3990.0])
+        base = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS, rp.BASELINE_MGMT)
+        for name in ("no_tp1_to_tp2", "no_tp1_to_tp3", "no_tp1_no_be"):
+            alt = rp.replay_manage(ticks, "buy", ENTRY, SL, TPS, LOTS,
+                                   rp.MGMT_POLICIES[name])
+            assert alt["pnl"] == base["pnl"] == -900.0, name

@@ -49,6 +49,16 @@ MGMT_POLICIES = {
     "trail_progressive": {"be_at_tp1": True,  "trail_progressive": True,  "close_all_at": None},
     "close_all_tp1":     {"be_at_tp1": True,  "trail_progressive": False, "close_all_at": "tp1"},
     "close_all_tp2":     {"be_at_tp1": True,  "trail_progressive": False, "close_all_at": "tp2"},
+    # "Niente TP1": il target del trader e' UNO (la pool di liquidita'
+    # opposta, dalle parti di TP2/TP3); l'uscita a 1.25R e' una struttura
+    # nostra. Il terzo del TP1 viene riallocato piu' lontano, il rischio
+    # totale resta identico. BE al tocco del livello TP1 (vedi replay_manage).
+    "no_tp1_to_tp2":     {"be_at_tp1": True,  "trail_progressive": False,
+                          "close_all_at": None, "tp_map": [1, 1, 2]},
+    "no_tp1_to_tp3":     {"be_at_tp1": True,  "trail_progressive": False,
+                          "close_all_at": None, "tp_map": [2, 1, 2]},
+    "no_tp1_no_be":      {"be_at_tp1": False, "trail_progressive": False,
+                          "close_all_at": None, "tp_map": [1, 1, 2]},
 }
 # Policy mappabili su toggle reali del sistema (Approva = flip impostazione):
 MGMT_REAL_TOGGLES = {
@@ -147,7 +157,13 @@ def replay_manage(ticks, direction: str, entry_price: float, sl: float,
     is_buy = (direction or "").lower() == "buy"
     sign = 1.0 if is_buy else -1.0
     cur_sl = float(sl)
-    open_tk = [{"tp": float(tp), "idx": i} for i, tp in enumerate(tps) if tp]
+    # tp_map: a quale TP punta ciascuno dei 3 ticket. Default [0,1,2] =
+    # comportamento attuale del sistema. [1,1,2] = il terzo del TP1 spostato
+    # su TP2 (nessuna uscita a 1.25R). Il rischio totale NON cambia: stesso
+    # numero di ticket, stessi lotti.
+    tp_map = mgmt.get("tp_map") or list(range(len(tps)))
+    open_tk = [{"tp": float(tps[j]), "idx": j} for j in tp_map
+               if j < len(tps) and tps[j]]
     n0 = len(open_tk)
     if n0 == 0 or lots_each <= 0:
         return {"pnl": 0.0, "events": ["no_tickets"], "exits": []}
@@ -163,9 +179,32 @@ def replay_manage(ticks, direction: str, entry_price: float, sl: float,
         return tick["bid"] if is_buy else tick["ask"]
 
     tp1_val = float(tps[0]) if tps and tps[0] else None
+    tp2_val = float(tps[1]) if len(tps) > 1 and tps[1] else None
+    # BE e trail scattano al TOCCO DEL LIVELLO, non alla chiusura di un ticket:
+    # equivalente al sistema reale quando un ticket sta sul livello, ma resta
+    # definito anche quando il ticket non c'e' (policy senza TP1). Se una
+    # policy senza TP1 venisse approvata, il sistema reale andra' allineato
+    # a questo trigger (oggi l'auto-BE dipende dalla chiusura del ticket TP1).
+    be_done = trail_done = False
     i = entry_from_idx
     while i < len(ticks) and open_tk:
         p = px(ticks[i])
+        # 0. trigger di gestione sui LIVELLI (prima delle uscite)
+        if (not be_done and mgmt.get("be_at_tp1") and tp1_val is not None and
+                ((is_buy and p >= tp1_val) or (not is_buy and p <= tp1_val))):
+            be_sl = entry_price + sign * PIP
+            if (is_buy and be_sl > cur_sl) or (not is_buy and be_sl < cur_sl):
+                cur_sl = be_sl
+                events.append(f"be+1pip@{round(cur_sl, 2)}")
+            be_done = True
+        if (not trail_done and mgmt.get("trail_progressive") and tp2_val is not None
+                and tp1_val is not None and
+                ((is_buy and p >= tp2_val) or (not is_buy and p <= tp2_val))):
+            tr_sl = tp1_val + sign * PIP
+            if (is_buy and tr_sl > cur_sl) or (not is_buy and tr_sl < cur_sl):
+                cur_sl = tr_sl
+                events.append(f"trail_tp1+1pip@{round(cur_sl, 2)}")
+            trail_done = True
         # 1. SL (scenario peggiore prima)
         if (is_buy and p <= cur_sl) or (not is_buy and p >= cur_sl):
             exits.append((cur_sl, len(open_tk)))
@@ -186,13 +225,6 @@ def replay_manage(ticks, direction: str, entry_price: float, sl: float,
             exits.append((tk["tp"], 1))
             events.append(f"tp{tk['idx'] + 1}@{round(tk['tp'], 2)}")
             open_tk.remove(tk)
-            # gestione post-TP
-            if tk["idx"] == 0 and mgmt.get("be_at_tp1"):
-                cur_sl = entry_price + sign * PIP
-                events.append(f"be+1pip@{round(cur_sl, 2)}")
-            if tk["idx"] == 1 and mgmt.get("trail_progressive") and tp1_val:
-                cur_sl = tp1_val + sign * PIP
-                events.append(f"trail_tp1+1pip@{round(cur_sl, 2)}")
         i += 1
     # orizzonte raggiunto: residuo chiuso all'ultimo tick (chiusura esogena reale)
     if open_tk and ticks:
