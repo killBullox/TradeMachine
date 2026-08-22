@@ -56,6 +56,48 @@ def _utc_to_roma(dt):
 
 # ─── Strato 1: dossier deterministico ────────────────────────────────────────
 
+# ─── Metodo del trader osservato dalle screenshot del canale ────────────────
+# Analisi manuale (2026-08-20/21) di 194 grafici postati su Telegram, agganciati
+# ai trade eseguiti. E' materiale QUALITATIVO: serve all'LLM per INTERPRETARE i
+# numeri, MAI per generare raccomandazioni (quelle vengono solo dalle regole
+# promosse dai gate). Aggiornare quando si rifa' la scansione.
+METODO_TRADER_OSSERVATO = {
+    "fonte": "194 grafici Telegram analizzati uno per uno (mar-ago 2026)",
+    "natura": "QUALITATIVO — descrive cosa il trader disegna, non valida nulla",
+    "timeframe_operativi": {
+        "15m": 69, "5m": 39, "30m": 37, "1h": 18, "3m": 17,
+        "2h_4h_1D": 10,
+        "nota": ("opera su 15m con esecuzione fino a 3-5m; i timeframe alti "
+                 "compaiono solo in post di contesto direzionale, mai per "
+                 "l'operativita'"),
+    },
+    "sequenza_ricorrente": ("liquidita' marcata (BSL/SSL, massimi-minimi uguali, "
+                            "protected low) -> evento strutturale (MSS, BoS o CISD) "
+                            "-> zona d'ingresso (FVG, a volte order block) -> box di "
+                            "invalidazione oltre la zona -> target sulla pool di "
+                            "liquidita' opposta"),
+    "disegna_sempre": ["FVG (quasi il 100% dei grafici)", "MSS", "BoS",
+                       "linee di liquidita' BSL/SSL", "box di invalidazione"],
+    "disegna_spesso": ["order block", "CISD", "turtle soup", "protected low",
+                       "massimi/minimi uguali (EQH/EQL)"],
+    "non_disegna_mai": ["Fibonacci/OTE (1 volta su 194, benche' 'OTE' compaia 66 "
+                        "volte nelle didascalie)", "medie mobili e indicatori",
+                        "marcature premium/discount", "kill zone"],
+    "target": ("UNO solo, coincidente con la pool di liquidita' opposta. I nostri "
+               "TP1/TP2/TP3 sono una struttura NOSTRA sovrapposta alla sua tesi. "
+               "NB: le policy 'niente TP1' sono state testate sui tick reali e "
+               "BOCCIATE — l'uscita a TP1 protegge, non danneggia."),
+    "avvertenze": [
+        "molti grafici sono post-trade (stesso disegno ripubblicato a movimento "
+        "avvenuto come 'Move Update'/'All Target Done'): non sono setup",
+        "pubblicazione sistematica in doppia copia a 1-3 minuti di distanza",
+        "solo 107 delle 239 screenshot agganciate ai trade sono davvero XAUUSD: "
+        "l'aggancio per vicinanza temporale e' rumoroso",
+        "premium/discount e kill zone sono feature NOSTRE, lui non le traccia",
+    ],
+}
+
+
 def _real_closed_trades(db):
     """Trade REALI chiusi: no archiviati, no paper, con ticket MT5, entrati
     davvero, con esito terminale e P&L noto."""
@@ -132,6 +174,9 @@ def build_dossier(db=None) -> dict:
                 "Conteggi eventi trade_log = lower bound (log sovrascritto alla chiusura).",
                 "Orari in ora Europe/Rome.",
             ],
+            # Contesto statico: cosa il trader disegna davvero sui suoi grafici
+            # (dalle screenshot del canale). Qualitativo, mai fonte di consigli.
+            "metodo_trader_osservato": METODO_TRADER_OSSERVATO,
         }
         if n == 0:
             d["overall"] = {}
@@ -520,6 +565,20 @@ trader): una raccomandazione esiste SOLO se porta con se' le soluzioni.
   descrivi nelle sezioni di analisi e basta. Meglio zero raccomandazioni che
   raccomandazioni-chiacchiera. Il codice sposta d'ufficio in 'osservazioni'
   qualsiasi raccomandazione senza azioni concrete.
+
+METODO OSSERVATO DEL TRADER (dossier: "metodo_trader_osservato"): analisi
+manuale di 194 grafici postati dal trader sul canale. Dice cosa disegna, su
+quali timeframe opera, e che il suo target e' UNO (la pool di liquidita'
+opposta). REGOLE D'USO:
+- Serve a INTERPRETARE i numeri e a spiegare i risultati per setup (usalo in
+  strategia_trader, trader_edge, patterns). E' materiale descrittivo.
+- VIETATO ricavarne raccomandazioni: non e' validato statisticamente. Una
+  raccomandazione nasce SOLO da una regola promossa dai gate. Se un'idea che
+  nasce da qui non e' fra le promosse, citala al massimo come osservazione
+  nelle sezioni di analisi.
+- Rispetta le avvertenze: molti grafici sono post-trade, l'aggancio ai trade
+  e' rumoroso, premium/discount e kill zone sono feature NOSTRE (lui non le
+  traccia): non attribuirgli ragionamenti che non risultano dai grafici.
 
 REGISTRO CONSIGLI (persistenza giorno per giorno): il dossier contiene
 "registro_consigli_aperti" — i consigli ancora aperti dai report precedenti,

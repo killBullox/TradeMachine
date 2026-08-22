@@ -224,3 +224,27 @@ class TestEnforceActionable:
         ]}
         ai_advisor._enforce_actionable(sections)
         assert len(sections["recommendations"]) == 1
+
+
+class TestMetodoTraderNelDossier:
+    """Gli 'occhi' dell'AIA: il metodo osservato dalle screenshot entra nel
+    dossier come materiale QUALITATIVO, senza generare raccomandazioni."""
+
+    def test_dossier_contiene_metodo_osservato(self, in_memory_db, fake_mt5):
+        import ai_advisor
+        db = in_memory_db()
+        try:
+            d = ai_advisor.build_dossier(db)
+            m = d.get("metodo_trader_osservato")
+            assert m and m["natura"].startswith("QUALITATIVO")
+            assert "15m" in m["timeframe_operativi"]
+            assert m["disegna_sempre"] and m["non_disegna_mai"]
+            assert "avvertenze" in m and len(m["avvertenze"]) >= 3
+        finally:
+            db.close()
+
+    def test_prompt_vieta_raccomandazioni_dal_metodo(self, in_memory_db, fake_mt5):
+        import ai_advisor
+        p = ai_advisor.SYSTEM_PROMPT
+        assert "metodo_trader_osservato" in p
+        assert "VIETATO ricavarne raccomandazioni" in p
