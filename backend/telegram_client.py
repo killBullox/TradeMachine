@@ -195,6 +195,203 @@ def keep_old_on_rapid_duplicate(opened_at, now, has_open_pos, window_min=CHURN_W
     return 0 <= age_min <= window_min
 
 
+# Correzione di un segnale (caso #687, 24/08): il trader riposta lo STESSO
+# segnale entro pochi minuti cambiando SL o target — e poi cancella il messaggio
+# sbagliato. Prima di questa logica il repost finiva nell'anti-churn come
+# "duplicato identico" (la tolleranza dello 0.3% su 4647$ vale 14$: un SL
+# spostato di 2.50$ risultava "uguale") e la correzione veniva persa.
+CORRECTION_WINDOW_MIN = 15     # oltre: e' un segnale nuovo, non una correzione
+CORRECTION_EPS = 0.0002        # 0.02%: sotto e' arrotondamento, sopra e' voluto
+
+
+def classify_repost(parsed, cand, tol=0.003, eps=CORRECTION_EPS,
+                    window_min=CORRECTION_WINDOW_MIN, now=None):
+    """Classifica un repost rispetto a un segnale recente gia' a sistema:
+      'different'  -> idea diversa (entry o TP1 fuori tolleranza): segnale nuovo
+      'correction' -> stessa idea ma SL/TP CAMBIATI e repost entro la finestra
+      'duplicate'  -> stessa idea e stessi livelli: repost inutile
+    Puro e testabile: nessun accesso a DB o MT5."""
+    from datetime import datetime as _dt
+
+    def _rel_close(a, b, t):
+        if a is None or b is None:
+            return a is None and b is None
+        if a == 0:
+            return abs(b) < t
+        return abs(a - b) / abs(a) <= t
+
+    same_entry = (_rel_close(parsed.entry_price, cand.entry_price, tol) or
+                  _rel_close(parsed.entry_price, cand.entry_price_high, tol))
+    same_tp1 = _rel_close(parsed.tp1, cand.tp1, tol)
+    if not (same_entry and same_tp1):
+        return "different"
+    now = now or _dt.utcnow()
+    born = cand.created_at
+    if born is not None:
+        age_min = (now - born).total_seconds() / 60.0
+        if age_min < 0 or age_min > window_min:
+            # fuori finestra: se i livelli coincidono resta un duplicato,
+            # altrimenti e' un segnale nuovo (non correggiamo il passato)
+            return "duplicate" if _rel_close(parsed.stoploss, cand.stoploss, eps) else "different"
+    changed = (not _rel_close(parsed.stoploss, cand.stoploss, eps) or
+               not _rel_close(parsed.tp1, cand.tp1, eps) or
+               not _rel_close(parsed.tp2, cand.tp2, eps) or
+               not _rel_close(parsed.tp3, cand.tp3, eps))
+    return "correction" if changed else "duplicate"
+
+
+def volume_for_corrected_sl(entry, old_sl, new_sl, cur_volume):
+    """Volume che mantiene INVARIATO il rischio quando lo stop si allarga.
+    Se la correzione stringe lo stop il volume resta invariato (il rischio
+    scende da solo). Invariante utente: il rischio non deve MAI superare il
+    massimo definito all'ingresso."""
+    try:
+        old_d = abs(float(entry) - float(old_sl))
+        new_d = abs(float(entry) - float(new_sl))
+    except (TypeError, ValueError):
+        return None
+    if old_d <= 0 or new_d <= 0:
+        return None
+    if new_d <= old_d:
+        return round(float(cur_volume), 2)
+    return round(float(cur_volume) * old_d / new_d, 2)
+
+
+def _find_replacement_message(db, sig, deleted_msg_id, window_min=CORRECTION_WINDOW_MIN):
+    """Cerca un messaggio SUCCESSIVO a quello cancellato che riproponga lo
+    stesso segnale (stesso simbolo e direzione, entry compatibile). Se esiste,
+    la cancellazione e' una ripulitura del messaggio sbagliato, non un ordine
+    di chiudere il trade. Ritorna il msg_id sostitutivo o None. Mai solleva."""
+    from database import RawMessage
+    from datetime import timedelta
+    try:
+        if sig.created_at is None:
+            return None
+        rows = (db.query(RawMessage)
+                .filter(RawMessage.telegram_msg_id > deleted_msg_id,
+                        RawMessage.created_at >= sig.created_at - timedelta(minutes=1),
+                        RawMessage.created_at <= sig.created_at + timedelta(minutes=window_min))
+                .order_by(RawMessage.telegram_msg_id).all())
+        for r in rows:
+            if (r.msg_type or "") != "signal":
+                continue
+            try:
+                _mt, p = parse_message(r.text or "")
+            except Exception:
+                continue
+            if _mt != "signal" or not isinstance(p, ParsedSignal):
+                continue
+            if (p.symbol or "").upper() != (sig.symbol or "").upper():
+                continue
+            if (p.direction or "").lower() != (sig.direction or "").lower():
+                continue
+            ref = sig.entry_price or sig.entry_price_high
+            if ref and p.entry_price:
+                if abs(float(p.entry_price) - float(ref)) / abs(float(ref)) > 0.003:
+                    continue
+            return r.telegram_msg_id
+    except Exception as e:
+        log(f"[Deleted] _find_replacement_message err: {str(e)[:100]}")
+    return None
+
+
+def _apply_signal_correction(db, cand, parsed, msg_id) -> bool:
+    """Applica al trade esistente la correzione arrivata col repost.
+    Ritorna True se gestita (il chiamante NON deve aprire un trade nuovo).
+
+    Regole:
+      - stop che STRINGE: applicato subito (il rischio scende).
+      - stop che ALLARGA: la size viene RIDOTTA in proporzione, cosi' il
+        rischio resta quello definito all'ingresso (invariante non negoziabile).
+        Se la riduzione non e' fattibile (lotto minimo, chiusura parziale
+        fallita) la correzione NON viene applicata e resta lo stop vecchio.
+      - i target aggiornati vengono scritti a DB (la gestione TP li usa).
+    Mai solleva."""
+    import json as _jc
+    import mt5_trader as _mt5c
+    try:
+        new_sl = parsed.stoploss
+        old_sl = cand.stoploss
+        entry = cand.actual_entry_price or cand.entry_price or cand.entry_price_high
+        detail_tp = []
+        for attr in ("tp1", "tp2", "tp3"):
+            nv = getattr(parsed, attr, None)
+            ov = getattr(cand, attr, None)
+            if nv is not None and ov is not None and abs(float(nv) - float(ov)) > 1e-9:
+                detail_tp.append(f"{attr.upper()} {ov}->{nv}")
+
+        is_paper = bool(getattr(cand, "is_filtered", False))
+        tickets = []
+        if cand.mt5_tickets:
+            try: tickets = _jc.loads(cand.mt5_tickets)
+            except Exception: tickets = []
+        elif cand.mt5_ticket:
+            tickets = [cand.mt5_ticket]
+        mt5i = _mt5c._get_mt5() if _mt5c.is_enabled() else None
+
+        widens = False
+        if new_sl is not None and old_sl is not None and entry is not None:
+            is_buy = (cand.direction or "buy").lower() == "buy"
+            widens = (is_buy and float(new_sl) < float(old_sl)) or \
+                     (not is_buy and float(new_sl) > float(old_sl))
+
+        # ── stop che allarga: prima riduci la size, poi sposta lo stop ──────
+        if widens and not is_paper:
+            if not (mt5i and tickets):
+                return False
+            reduced, failed = 0, 0
+            for t in tickets:
+                pos = mt5i.positions_get(ticket=t)
+                if not pos:
+                    continue
+                tgt_vol = volume_for_corrected_sl(entry, old_sl, new_sl, pos[0].volume)
+                if tgt_vol is None or not _mt5c.reduce_position(t, cand.symbol, tgt_vol):
+                    failed += 1
+                else:
+                    reduced += 1
+            if failed or not reduced:
+                _append_trade_log(cand, "correction_rejected",
+                    f"Correzione SL {old_sl}->{new_sl} (msg {msg_id}) NON applicata: "
+                    f"allarga lo stop e la riduzione di size non e' riuscita "
+                    f"({reduced} ok, {failed} falliti). Mantengo {old_sl}.",
+                    {"proposed_sl": new_sl, "old_sl": old_sl, "msg": msg_id})
+                db.add(cand); db.commit()
+                log(f"[Correction] #{cand.id} SL {old_sl}->{new_sl} RIFIUTATA (resize fallito)")
+                return False
+
+        # ── applica il nuovo stop (e i target) ─────────────────────────────
+        applied = 0
+        if new_sl is not None and not is_paper and mt5i and tickets:
+            for t in tickets:
+                if _mt5c.modify_sl(t, float(new_sl), cand.symbol):
+                    applied += 1
+        if new_sl is not None:
+            cand.stoploss = float(new_sl)
+        for attr in ("tp1", "tp2", "tp3"):
+            nv = getattr(parsed, attr, None)
+            if nv is not None:
+                setattr(cand, attr, float(nv))
+        cand.updated_at = datetime.utcnow()
+        cand.notes = (cand.notes or "") + f" [Correzione dal trader msg={msg_id}: SL {old_sl}->{new_sl}]"
+        _append_trade_log(cand, "signal_corrected",
+            f"Il trader ha ripostato il segnale correggendolo (msg {msg_id}): "
+            f"SL {old_sl} -> {new_sl}"
+            + (f"; {', '.join(detail_tp)}" if detail_tp else "")
+            + (" (size ridotta per non sforare il rischio)" if widens else "")
+            + (f"; SL aggiornato su {applied}/{len(tickets)} ticket" if tickets else " (paper)"),
+            {"old_sl": old_sl, "new_sl": new_sl, "msg": msg_id,
+             "widened": widens, "tickets_updated": applied})
+        db.add(cand); db.commit()
+        log(f"[Correction] #{cand.id} {cand.symbol}: SL {old_sl} -> {new_sl} "
+            f"({'allarga+resize' if widens else 'stringe'}), ticket aggiornati {applied}")
+        return True
+    except Exception as e:
+        log(f"[Correction] errore su #{getattr(cand, 'id', '?')}: {str(e)[:120]}")
+        try: db.rollback()
+        except Exception: pass
+        return False
+
+
 # Backup news dal trader (post-mortem FOMC #622/#623): durata blocco ingressi.
 TRADER_NEWS_BLOCK_MIN = 30
 
@@ -855,6 +1052,17 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                         if a is None or b is None: return False
                         if a == 0: return abs(b) < TOL
                         return abs(a - b) / abs(a) <= TOL
+                    # CORREZIONE vs DUPLICATO (caso #687): stessa idea ma
+                    # livelli cambiati entro pochi minuti = il trader sta
+                    # correggendo, non ripubblicando. Va APPLICATA al trade
+                    # esistente, non scartata come repost.
+                    _kind = classify_repost(parsed, cand)
+                    if _kind == "different":
+                        continue
+                    if _kind == "correction":
+                        if _apply_signal_correction(db, cand, parsed, msg_id):
+                            return          # correzione applicata: nessun trade nuovo
+                        continue            # non applicabile: valuta come duplicato
                     same_sl = _close(parsed.stoploss, cand.stoploss)
                     same_tp1 = _close(parsed.tp1, cand.tp1)
                     same_entry = _close(parsed.entry_price, cand.entry_price) or _close(parsed.entry_price, cand.entry_price_high)
@@ -2440,6 +2648,25 @@ async def start_listener():
                     Signal.status.in_(("pending", "open", "tp1", "tp2")),
                 ).first()
                 if not sig:
+                    continue
+                # SOSTITUZIONE, non annullamento (caso #687, 24/08): se dopo
+                # questo messaggio ne e' arrivato un altro con lo STESSO
+                # segnale, il trader sta ripulendo il messaggio sbagliato dopo
+                # averlo ripostato corretto. Chiudere il trade e' l'errore che
+                # e' costato ~1.2k$: qui NON si chiude nulla.
+                repl = _find_replacement_message(db, sig, tg_id)
+                if repl is not None:
+                    sig.updated_at = _dt.utcnow()
+                    sig.notes = (sig.notes or "") + (
+                        f" [Msg {tg_id} cancellato ma sostituito dal msg {repl}: "
+                        f"trade mantenuto]")
+                    _append_trade_log(sig, "tg_msg_replaced",
+                        f"Il trader ha cancellato il msg {tg_id} DOPO averne postato uno "
+                        f"equivalente ({repl}): sostituzione, non annullamento. "
+                        f"Il trade resta aperto.",
+                        {"deleted_msg": tg_id, "replacement_msg": repl})
+                    db.add(sig)
+                    log(f"[Deleted] #{sig.id} msg={tg_id} sostituito da {repl} -> trade MANTENUTO")
                     continue
                 tickets = []
                 if sig.mt5_tickets:

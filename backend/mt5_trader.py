@@ -2597,6 +2597,49 @@ def close_position(ticket: int, symbol: str) -> bool:
     return False
 
 
+def reduce_position(ticket: int, symbol: str, target_volume: float) -> bool:
+    """Chiusura PARZIALE: riduce la posizione al volume target chiudendone la
+    differenza. Serve quando il trader CORREGGE lo stop allargandolo: per non
+    sforare il rischio massimo la size va ridotta in proporzione, invece di
+    rifiutare la correzione (caso #687, 24/08: correzione ignorata -> trade
+    chiuso in perdita quando sarebbe stato vincente).
+    Ritorna True se al termine la posizione ha il volume voluto."""
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return False
+    positions = mt5.positions_get(ticket=ticket)
+    if not positions:
+        log(f"reduce_position ticket={ticket}: posizione non trovata")
+        return False
+    pos = positions[0]
+    cur_vol = float(pos.volume)
+    target_volume = float(target_volume)
+    if target_volume >= cur_vol:
+        return True                      # niente da ridurre
+    to_close = round(cur_vol - target_volume, 2)
+    info = mt5.symbol_info(pos.symbol)
+    min_vol = float(getattr(info, "volume_min", 0.01) or 0.01)
+    step = float(getattr(info, "volume_step", 0.01) or 0.01)
+    if to_close < min_vol or target_volume < min_vol:
+        log(f"reduce_position ticket={ticket}: riduzione {to_close} non fattibile "
+            f"(min={min_vol}, residuo {target_volume})")
+        return False
+    to_close = round(round(to_close / step) * step, 2)
+    close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+    tick = mt5.symbol_info_tick(pos.symbol)
+    price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
+    result = mt5.order_send({
+        "action": mt5.TRADE_ACTION_DEAL, "position": ticket, "symbol": pos.symbol,
+        "volume": to_close, "type": close_type, "price": price, "deviation": 20,
+        "magic": 20250326, "comment": "IC-reduce",
+        "type_filling": _pick_filling_mode(mt5, pos.symbol),
+    })
+    ok = result and result.retcode == mt5.TRADE_RETCODE_DONE
+    log(f"reduce_position ticket={ticket} {cur_vol}->{target_volume} "
+        f"(chiusi {to_close}) -> {'OK' if ok else 'FAIL ' + str(getattr(result, 'retcode', '?'))}")
+    return bool(ok)
+
+
 def analyze_ema_case(signal_id: int, cancel_reason: str) -> Optional[int]:
     """Entry Market Assessment: dato un signal di cui il pending STOP non è
     mai stato filled e che è stato droppato, simula cosa sarebbe successo
