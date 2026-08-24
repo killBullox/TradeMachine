@@ -2685,7 +2685,10 @@ async def start_listener():
                         elif mt5_inst.positions_get(ticket=t):
                             if _mt5t.close_position(t, sig.symbol):
                                 closed_pos += 1
-                sig.status = "cancelled"
+                # Se il trade era ENTRATO, non e' "annullato" ma CHIUSO: lo
+                # status terminale lo fa rientrare nelle statistiche (il
+                # riconciliatore in sync_positions fa da rete di sicurezza).
+                sig.status = "closed" if (closed_pos > 0 or sig.actual_entry_price) else "cancelled"
                 sig.closed_at = _dt.utcnow()
                 sig.updated_at = _dt.utcnow()
                 sig.notes = (sig.notes or "") + (

@@ -3214,6 +3214,92 @@ def _build_mt5_trade_log(sig, closed_tickets, is_buy, new_status) -> str:
     return jsonlib.dumps(events)
 
 
+def reconcile_entered_but_cancelled() -> int:
+    """Un trade che e' ENTRATO davvero e poi e' stato chiuso non e' "annullato":
+    e' un trade chiuso, e deve entrare nelle statistiche.
+
+    Diversi percorsi di annullamento (msg TG cancellato, signal sostituito da un
+    repost, close del trader) marcavano status='cancelled' anche quando le
+    posizioni erano gia' aperte: quei trade sparivano da ogni analisi perche' il
+    predicato dei "trade reali" accetta solo stati terminali. Misurato il
+    2026-08-24: 6 trade per -668.34$ invisibili, TUTTI in perdita -> statistiche
+    ottimistiche per difetto.
+
+    Qui li riconciliamo: status -> 'closed', piu' backfill di exit_price e
+    pnl_usd dai deal MT5 quando lo storico e' ancora disponibile. I pending mai
+    fillati restano 'cancelled' (giusto: non sono mai stati trade).
+    Idempotente, mai solleva. Chiamata dal ciclo di sync_positions."""
+    from database import SessionLocal, Signal
+    import json as jsonlib
+    from sqlalchemy import or_, and_
+    mt5 = _get_mt5()
+    db = SessionLocal()
+    fixed = 0
+    try:
+        candidates = db.query(Signal).filter(
+            Signal.is_archived == False,          # noqa: E712
+            Signal.status == "cancelled",
+            or_(Signal.actual_entry_price.isnot(None),
+                and_(Signal.pnl_usd.isnot(None), Signal.pnl_usd != 0.0)),
+        ).all()
+        for sig in candidates:
+            try:
+                tickets = []
+                if sig.mt5_tickets:
+                    try: tickets = jsonlib.loads(sig.mt5_tickets)
+                    except Exception: tickets = []
+                elif sig.mt5_ticket:
+                    tickets = [sig.mt5_ticket]
+                total = 0.0; exit_pv = 0.0; exit_vol = 0.0
+                entered = sig.actual_entry_price is not None
+                found_out = False
+                if mt5 and tickets:
+                    for t in tickets:
+                        deals = mt5.history_deals_get(position=t) or ()
+                        for d in deals:
+                            if d.entry == mt5.DEAL_ENTRY_IN:
+                                entered = True
+                            elif d.entry == mt5.DEAL_ENTRY_OUT:
+                                found_out = True
+                                total += (float(d.profit)
+                                          + float(getattr(d, "commission", 0) or 0)
+                                          + float(getattr(d, "swap", 0) or 0))
+                                vol = float(getattr(d, "volume", 0) or 0)
+                                if vol > 0:
+                                    exit_pv += float(d.price) * vol
+                                    exit_vol += vol
+                if not entered and not (sig.pnl_usd not in (None, 0.0)):
+                    continue                      # mai fillato: 'cancelled' e' corretto
+                if found_out and sig.pnl_usd in (None, 0.0):
+                    sig.pnl_usd = round(total, 2)
+                if exit_vol > 0 and sig.exit_price is None:
+                    sig.exit_price = round(exit_pv / exit_vol, 5)
+                old = sig.status
+                sig.status = "closed"
+                sig.updated_at = datetime.utcnow()
+                _append_trade_log_mt5(sig, "status_reconciled",
+                    f"Trade entrato davvero ma marcato '{old}': status -> 'closed' "
+                    f"per farlo rientrare nelle statistiche (pnl={sig.pnl_usd}, "
+                    f"exit={sig.exit_price}).",
+                    {"old_status": old, "pnl": sig.pnl_usd, "exit_price": sig.exit_price})
+                db.add(sig)
+                fixed += 1
+                log(f"[Reconcile] #{sig.id} {sig.symbol} '{old}' -> 'closed' "
+                    f"pnl={sig.pnl_usd} exit={sig.exit_price}")
+            except Exception as e:
+                log(f"[Reconcile] #{sig.id} errore: {str(e)[:100]}")
+        if fixed:
+            db.commit()
+        return fixed
+    except Exception as e:
+        log(f"[Reconcile] errore: {str(e)[:120]}")
+        try: db.rollback()
+        except Exception: pass
+        return 0
+    finally:
+        db.close()
+
+
 def backfill_missing_pnl() -> int:
     """Backfill pnl_usd per signal chiusi (closed_at settato) ma con pnl_usd=None.
     Tipicamente price_service.py marca status=sl_hit + closed_at via monitor
@@ -3282,6 +3368,13 @@ def sync_positions() -> list:
     # dal prezzo broker mentre il LIMIT/STOP non si e' mai fillato.
     # Indipendente da TG, parser, markdown — usa solo prezzi reali Avatrade.
     drop_pending_missed_tp()
+
+    # Trade entrati ma marcati 'cancelled' (msg TG cancellato, signal
+    # sostituito...): riportati a 'closed' cosi' rientrano nelle statistiche.
+    try:
+        reconcile_entered_but_cancelled()
+    except Exception as _e:
+        log(f"[Reconcile] chiamata fallita: {str(_e)[:80]}")
 
     # Backfill pnl_usd per signal chiusi via price_service senza P&L
     try:
