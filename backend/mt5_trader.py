@@ -1718,6 +1718,48 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
                     _db.close()
                 return []
 
+    # ─── RE-CLAMP del sizing sul prezzo DEFINITIVO (fix del fix #670) ───────
+    # clamp_size_entry_to_fill viene applicato molto piu' sopra, ma in quel
+    # punto `entry` NON e' ancora il prezzo di esecuzione: viene deciso dopo,
+    # nel blocco MARKET/LIMIT. Su un MARKET entrato sopra il range il confronto
+    # avveniva quindi contro un prezzo provvisorio e la size restava calcolata
+    # sul bordo del range. Misurato il 25/08: #692 -1102$, #693 -1161$,
+    # #694 -1179$ con max risk 1000$ — il rischio teorico allo SL era gia'
+    # oltre il massimo al momento dell'ingresso.
+    # Qui il controllo viene rifatto su entry e sl DEFINITIVI: se il prezzo di
+    # esecuzione e' piu' lontano dallo SL di quello su cui abbiamo dimensionato,
+    # i lotti scendono in proporzione. Mai up-sizing (un fill migliore lascia
+    # la size prudente).
+    try:
+        if sl and lots_each and lots_each > 0:
+            _final_se, _final_changed = clamp_size_entry_to_fill(size_entry, entry, sl, is_buy)
+            if _final_changed:
+                _d_old = abs(float(size_entry) - float(sl))
+                _d_new = abs(float(_final_se) - float(sl))
+                if _d_new > _d_old > 0:
+                    _le_new = _round_volume(lots_each * _d_old / _d_new, vol_step,
+                                            min_vol, max_vol)
+                    if _le_new < lots_each:
+                        _risk_old = _d_old / spec["pip"] * spec["pv"] * lots_each * n
+                        _risk_new = _d_new / spec["pip"] * spec["pv"] * _le_new * n
+                        log(f"#{sig.id} RE-CLAMP sizing sul fill {entry}: "
+                            f"lots {lots_each} -> {_le_new} "
+                            f"(dist {_d_old:.2f} -> {_d_new:.2f}, "
+                            f"rischio {_risk_old:.0f}$ -> {_risk_new:.0f}$)")
+                        _append_trade_log_mt5(sig, "size_entry_fill_fix",
+                            f"Sizing riallineato al prezzo di esecuzione {entry} "
+                            f"(dimensionato su {size_entry}): lotti {lots_each} -> {_le_new}, "
+                            f"rischio stimato {_risk_new:.0f}$ (max {risk_usd:.0f}$).",
+                            {"fill": entry, "size_entry": size_entry,
+                             "lots_before": lots_each, "lots_after": _le_new,
+                             "risk_before": round(_risk_old, 2),
+                             "risk_after": round(_risk_new, 2)})
+                        lots_each = _le_new
+                        size_entry = _final_se
+                        lots_total = _round_volume(lots_each * n, vol_step, min_vol, max_vol)
+    except Exception as _e:
+        log(f"#{sig.id} re-clamp sizing errore (non blocco): {str(_e)[:100]}")
+
     is_market = order_type in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL)
     action = mt5.TRADE_ACTION_DEAL if is_market else mt5.TRADE_ACTION_PENDING
 
@@ -1764,6 +1806,51 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
         mt5.ORDER_TYPE_BUY_STOP: "BUY STOP", mt5.ORDER_TYPE_SELL_STOP: "SELL STOP",
     }
     order_type_str = order_type_names.get(order_type, str(order_type))
+    # ─── GUARDIA FINALE SUL RISCHIO (invariante non negoziabile) ────────────
+    # Ultimo controllo prima di mandare gli ordini, indipendente da TUTTA la
+    # logica di sizing a monte: con i prezzi che verranno effettivamente usati,
+    # quanto si perde se scatta lo SL? Se supera il massimo, i lotti scendono
+    # finche' rientra. Serve perche' un errore nel sizing e' gia' costato due
+    # volte (#670, poi #692/#693/#694): questa e' l'ultima rete e non dipende
+    # da nessun ramo precedente.
+    try:
+        if sl and lots_each and lots_each > 0 and risk_usd:
+            _d = abs(float(entry) - float(sl))
+            _risk = _d / spec["pip"] * spec["pv"] * lots_each * n
+            if _risk > risk_usd * 1.02:          # 2% di margine per arrotondamenti
+                _safe = _round_volume(lots_each * risk_usd / _risk, vol_step,
+                                      min_vol, max_vol)
+                if _safe >= min_vol and _safe < lots_each:
+                    _risk_after = _d / spec["pip"] * spec["pv"] * _safe * n
+                    log(f"#{sig.id} GUARDIA RISCHIO: {_risk:.0f}$ > max {risk_usd:.0f}$ "
+                        f"-> lots {lots_each} -> {_safe} (rischio {_risk_after:.0f}$)")
+                    _append_trade_log_mt5(sig, "risk_guard_resize",
+                        f"Guardia finale: col fill {entry} e SL {sl} il rischio sarebbe "
+                        f"{_risk:.0f}$ contro un massimo di {risk_usd:.0f}$. "
+                        f"Lotti ridotti {lots_each} -> {_safe} (rischio {_risk_after:.0f}$).",
+                        {"risk_before": round(_risk, 2), "risk_max": risk_usd,
+                         "lots_before": lots_each, "lots_after": _safe,
+                         "risk_after": round(_risk_after, 2)})
+                    lots_each = _safe
+                    lots_total = _round_volume(lots_each * n, vol_step, min_vol, max_vol)
+                elif _safe < min_vol:
+                    msg = (f"Rischio {_risk:.0f}$ oltre il massimo {risk_usd:.0f}$ e "
+                           f"non riducibile sotto il lotto minimo ({min_vol}): trade NON aperto.")
+                    log(f"#{sig.id} GUARDIA RISCHIO: {msg}")
+                    _append_trade_log_mt5(sig, "risk_guard_abort", msg,
+                        {"risk": round(_risk, 2), "risk_max": risk_usd, "min_vol": min_vol})
+                    from database import SessionLocal as _SLrg
+                    sig.status = "cancelled"
+                    sig.notes = (sig.notes or "") + f" [Abort guardia rischio: {_risk:.0f}$ > {risk_usd:.0f}$]"
+                    _dbrg = _SLrg()
+                    try:
+                        _dbrg.merge(sig); _dbrg.commit()
+                    finally:
+                        _dbrg.close()
+                    return []
+    except Exception as _e:
+        log(f"#{sig.id} guardia rischio errore (non blocco): {str(_e)[:100]}")
+
     _append_trade_log_mt5(sig, "mt5_preparing", f"Tipo ordine: {order_type_str} | symbol={mt5_sym} | entry={entry} | sl={sl} | lots_each={lots_each} | ask={current_ask} | bid={current_bid}")
 
     tickets = []
