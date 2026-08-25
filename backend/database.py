@@ -227,8 +227,13 @@ class Mt5Account(Base):
     prop_mode = Column(Boolean, default=False)
     daily_dd_limit_usd = Column(Float, nullable=True)  # blocca trade nuovi se P&L giorno < -X
     daily_dd_warning_usd = Column(Float, nullable=True)  # warning (UI/log) prima del block
-    peak_equity_usd = Column(Float, nullable=True)  # max equity osservato (trailing DD)
-    max_total_dd_usd = Column(Float, nullable=True)  # equita' inseguita: bust se equity < peak - X
+    peak_equity_usd = Column(Float, nullable=True)  # max equity osservato (solo modello trailing)
+    max_total_dd_usd = Column(Float, nullable=True)  # perdita totale massima ammessa
+    # Modello di max loss del prop: FTMO Challenge 2-Step usa lo STATICO
+    # (soglia fissa = capitale iniziale - max_total_dd, verificato 25/08 su
+    # ftmo.com/trading-objectives). Il 1-Step usa il trailing end-of-day.
+    dd_model = Column(String(10), default="static")   # 'static' | 'trailing'
+    initial_capital_usd = Column(Float, nullable=True)  # capitale iniziale (base dello statico)
     consistency_threshold_pct = Column(Float, default=30.0)  # max single-day vs total P&L
     max_concurrent_trades = Column(Integer, nullable=True)  # cap posizioni aperte simultaneamente
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -482,6 +487,10 @@ def init_db():
                     conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN daily_dd_warning_usd FLOAT"))
                 if "peak_equity_usd" not in mt5_existing:
                     conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN peak_equity_usd FLOAT"))
+                if "dd_model" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN dd_model VARCHAR(10) DEFAULT 'static'"))
+                if "initial_capital_usd" not in mt5_existing:
+                    conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN initial_capital_usd FLOAT"))
                 if "max_total_dd_usd" not in mt5_existing:
                     conn.execute(sa.text("ALTER TABLE mt5_accounts ADD COLUMN max_total_dd_usd FLOAT"))
                 if "consistency_threshold_pct" not in mt5_existing:

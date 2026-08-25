@@ -1019,6 +1019,23 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 if _conc_reason:
                     log(f"[PropGuard] signal msg={msg_id} BLOCCATO (max concurrent): {_conc_reason}")
                     return
+                # Perdita TOTALE (soglia statica FTMO 2-Step), anch'essa
+                # prospettica: si guarda dove finirebbe l'equity con lo stop pieno.
+                from prop_mode import should_block_total_dd as _tot_check
+                _eq = None
+                try:
+                    import mt5_trader as _mt5g
+                    _m = _mt5g._get_mt5()
+                    if _m:
+                        _ai = _m.account_info()
+                        _eq = float(_ai.equity) if _ai else None
+                except Exception:
+                    _eq = None
+                if _eq is not None:
+                    _tot_reason = _tot_check(_eq)
+                    if _tot_reason:
+                        log(f"[PropGuard] signal msg={msg_id} BLOCCATO (perdita totale): {_tot_reason}")
+                        return
             except Exception as _e:
                 log(f"[PropGuard] errore check: {str(_e)[:80]}")
 

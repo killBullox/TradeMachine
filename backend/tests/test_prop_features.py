@@ -28,6 +28,10 @@ def _make_account(SessionLocal, **kwargs):
             max_total_dd_usd=kwargs.get("max_total_dd_usd"),
             consistency_threshold_pct=kwargs.get("consistency_threshold_pct", 30.0),
             max_concurrent_trades=kwargs.get("max_concurrent_trades"),
+            # Il modello di max loss ora e' esplicito: 'static' (FTMO 2-Step,
+            # default in produzione) oppure 'trailing' (FTMO 1-Step).
+            dd_model=kwargs.get("dd_model", "static"),
+            initial_capital_usd=kwargs.get("initial_capital_usd"),
         )
         db.add(acc); db.commit()
     finally:
@@ -72,7 +76,7 @@ class TestTrailingDD:
 
     def test_prop_in_buffer(self, prop_db_fixture):
         _make_account(prop_db_fixture, prop_mode=True,
-                       peak_equity_usd=25500, max_total_dd_usd=2000)
+                       peak_equity_usd=25500, max_total_dd_usd=2000, dd_model="trailing")
         from prop_mode import trailing_dd_status
         s = trailing_dd_status(25400)  # 100$ sotto peak
         assert s["breach"] is False
@@ -82,7 +86,7 @@ class TestTrailingDD:
 
     def test_prop_warning(self, prop_db_fixture):
         _make_account(prop_db_fixture, prop_mode=True,
-                       peak_equity_usd=26000, max_total_dd_usd=2000)
+                       peak_equity_usd=26000, max_total_dd_usd=2000, dd_model="trailing")
         from prop_mode import trailing_dd_status
         # distance 1500 = 75% del max → warning ma no breach
         s = trailing_dd_status(24500)
@@ -91,14 +95,14 @@ class TestTrailingDD:
 
     def test_prop_breach(self, prop_db_fixture):
         _make_account(prop_db_fixture, prop_mode=True,
-                       peak_equity_usd=26000, max_total_dd_usd=2000)
+                       peak_equity_usd=26000, max_total_dd_usd=2000, dd_model="trailing")
         from prop_mode import trailing_dd_status
         s = trailing_dd_status(23900)  # distance 2100 >= 2000
         assert s["breach"] is True
 
     def test_current_supera_peak_aggiorna_locale(self, prop_db_fixture):
         _make_account(prop_db_fixture, prop_mode=True,
-                       peak_equity_usd=25000, max_total_dd_usd=2000)
+                       peak_equity_usd=25000, max_total_dd_usd=2000, dd_model="trailing")
         from prop_mode import trailing_dd_status
         s = trailing_dd_status(26500)  # nuovo max
         assert s["peak"] == 26500

@@ -31,6 +31,8 @@ class PropSettings:
     max_total_dd_usd: Optional[float] = None
     consistency_threshold_pct: Optional[float] = None
     max_concurrent_trades: Optional[int] = None
+    dd_model: str = "static"
+    initial_capital_usd: Optional[float] = None
 
 
 def get_prop_settings(db=None) -> Optional[PropSettings]:
@@ -58,6 +60,8 @@ def get_prop_settings(db=None) -> Optional[PropSettings]:
             max_total_dd_usd=acc.max_total_dd_usd,
             consistency_threshold_pct=acc.consistency_threshold_pct,
             max_concurrent_trades=acc.max_concurrent_trades,
+            dd_model=(acc.dd_model or "static"),
+            initial_capital_usd=acc.initial_capital_usd,
         )
     finally:
         if close_db:
@@ -120,8 +124,13 @@ def should_block_new_trades(db=None) -> Optional[str]:
     Gating:
     - prop_mode=False → None (Avatrade: comportamento invariato)
     - daily_dd_limit_usd=None → None
-    - today P&L > -daily_dd_limit_usd → None (sotto soglia)
-    - today P&L <= -daily_dd_limit_usd → stringa con dettaglio
+    - perdita di oggi + rischio massimo del prossimo trade >= soglia → BLOCCO
+
+    REGOLA PROSPETTICA (25/08): non basta bloccare quando la soglia e' GIA'
+    sfondata — a quel punto il danno c'e'. Un trade puo' partire solo se, nel
+    caso peggiore (stop pieno = max risk), la perdita giornaliera resta sotto
+    il limite. Con -3.442$ di giornata, 1.000$ di rischio e soglia 3.500$ il
+    trade non deve partire: arriverebbe a -4.442$.
 
     Le posizioni gia' aperte NON vengono toccate (gestite normalmente da
     trail/SL/TP). Solo i NUOVI place_orders vengono bloccati.
@@ -150,7 +159,41 @@ def should_block_new_trades(db=None) -> Optional[str]:
                 f"{floating:+.2f}$ (floating) = {effective:+.2f}$ <= soglia "
                 f"-{settings.daily_dd_limit_usd:.2f}$ (account '{settings.label}'). "
                 f"Nuovi trade BLOCCATI fino a mezzanotte Roma.")
+    # ── Blocco PROSPETTICO: il caso peggiore del prossimo trade ────────────
+    # Se lo stop pieno del trade che sta per partire porterebbe la giornata
+    # oltre la soglia, il trade non parte. Aspettare che la soglia sia gia'
+    # sfondata significa averla sfondata.
+    risk = max_risk_per_trade(db)
+    if risk and (-effective + risk) >= settings.daily_dd_limit_usd:
+        margine = settings.daily_dd_limit_usd + effective   # quanto resta
+        return (f"Daily DD prospettico: giornata a {effective:+.2f}$, "
+                f"restano {margine:.2f}$ prima della soglia "
+                f"-{settings.daily_dd_limit_usd:.2f}$ ma il prossimo trade "
+                f"rischia fino a {risk:.2f}$ ({-effective + risk:.2f}$ nel caso "
+                f"peggiore). Trade NON aperto (account '{settings.label}').")
     return None
+
+
+def max_risk_per_trade(db=None) -> float:
+    """Rischio massimo del prossimo trade in $ (RiskSettings). 0 se ignoto."""
+    from database import SessionLocal, RiskSettings
+    close_db = False
+    if db is None:
+        db = SessionLocal(); close_db = True
+    try:
+        rs = db.query(RiskSettings).first()
+        if rs is None:
+            return 0.0
+        if rs.use_fixed_usd and rs.risk_per_trade_usd:
+            return float(rs.risk_per_trade_usd)
+        if rs.account_size and rs.risk_per_trade_pct:
+            return float(rs.account_size) * float(rs.risk_per_trade_pct) / 100.0
+        return 0.0
+    except Exception:
+        return 0.0
+    finally:
+        if close_db:
+            db.close()
 
 
 def coerenza_status(db=None) -> Optional[dict]:
@@ -257,26 +300,79 @@ def check_max_concurrent_trades(db=None) -> Optional[str]:
             db.close()
 
 
-def trailing_dd_status(current_equity: float, db=None) -> Optional[dict]:
-    """Trailing DD (equita' inseguita): calcola distanza dal peak e ritorna
-    info per UI/log se in prop_mode. None se prop_mode OFF.
-    """
+def total_dd_status(current_equity: float, db=None) -> Optional[dict]:
+    """Perdita totale massima. Due modelli:
+
+    - 'static' (FTMO Challenge 2-Step, il nostro caso — verificato 25/08 su
+      ftmo.com/trading-objectives): soglia FISSA = capitale iniziale meno il
+      massimo ammesso. Non si muove mai, ne' verso l'alto ne' verso il basso.
+    - 'trailing' (FTMO 1-Step e altri prop): soglia inseguita dal massimo
+      dell'equity.
+
+    Prima del 25/08 il codice usava sempre il trailing con `peak_equity_usd`
+    mai inizializzato: il picco veniva preso pari all'equity corrente, la
+    distanza risultava 0 e il buffer appariva SEMPRE pieno. La guardia non
+    proteggeva. None se prop_mode OFF o limite non impostato."""
     settings = get_prop_settings(db)
     if settings is None or settings.max_total_dd_usd is None:
         return None
-    peak = settings.peak_equity_usd or current_equity
-    if current_equity > peak:
-        peak = current_equity
-    distance = peak - current_equity
+    model = (settings.dd_model or "static").lower()
+    if model == "trailing":
+        base = settings.peak_equity_usd or current_equity
+        if current_equity > base:
+            base = current_equity
+        base_label = "picco equity"
+    else:
+        base = settings.initial_capital_usd
+        if not base:
+            # fallback prudente: capitale dichiarato in RiskSettings
+            try:
+                from database import SessionLocal, RiskSettings
+                _d = db or SessionLocal()
+                rs = _d.query(RiskSettings).first()
+                base = float(rs.account_size) if rs and rs.account_size else current_equity
+            except Exception:
+                base = current_equity
+        base_label = "capitale iniziale"
+    floor = base - settings.max_total_dd_usd
+    distance = base - current_equity
     return {
-        "peak": peak,
-        "current": current_equity,
-        "distance_from_peak": distance,
+        "modello": model,
+        "base": round(base, 2),
+        "base_label": base_label,
+        "floor": round(floor, 2),
+        "peak": round(base, 2),               # compat UI esistente
+        "current": round(current_equity, 2),
+        "distance_from_peak": round(distance, 2),
         "max_total_dd": settings.max_total_dd_usd,
-        "breach": distance >= settings.max_total_dd_usd,
+        "breach": current_equity <= floor,
         "warning": distance >= (settings.max_total_dd_usd * 0.5),
-        "remaining_buffer": max(0, settings.max_total_dd_usd - distance),
+        "remaining_buffer": round(max(0.0, current_equity - floor), 2),
     }
+
+
+# Alias di compatibilita' per i chiamanti esistenti.
+trailing_dd_status = total_dd_status
+
+
+def should_block_total_dd(current_equity: float, db=None) -> Optional[str]:
+    """Blocco PROSPETTICO sulla perdita totale: un trade non parte se, nel caso
+    peggiore (stop pieno), l'equity finirebbe sotto la soglia. Stessa filosofia
+    del daily: aspettare lo sfondamento significa averlo gia' subito."""
+    st = total_dd_status(current_equity, db)
+    if st is None:
+        return None
+    if st["breach"]:
+        return (f"Perdita totale: equity {st['current']:.2f}$ <= soglia "
+                f"{st['floor']:.2f}$ ({st['base_label']} {st['base']:.2f}$ meno "
+                f"{st['max_total_dd']:.2f}$). Nuovi trade BLOCCATI.")
+    risk = max_risk_per_trade(db)
+    if risk and (st["current"] - risk) <= st["floor"]:
+        return (f"Perdita totale prospettica: equity {st['current']:.2f}$, "
+                f"restano {st['remaining_buffer']:.2f}$ prima della soglia "
+                f"{st['floor']:.2f}$, ma il prossimo trade rischia fino a "
+                f"{risk:.2f}$. Trade NON aperto.")
+    return None
 
 
 def update_peak_equity(current_equity: float, db=None) -> Optional[float]:
