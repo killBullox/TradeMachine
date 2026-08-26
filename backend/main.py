@@ -766,17 +766,29 @@ def list_news_events(db: Session = Depends(get_db)):
     utc, roma = ZoneInfo("UTC"), ZoneInfo("Europe/Rome")
     events = db.query(NewsEvent).order_by(NewsEvent.event_time).all()
     now = datetime.utcnow()
-    return {
-        "events": [{
+    # Un evento e' IN CORSO per tutta la finestra di blocco (da -10m a +15m),
+    # non solo fino all'ora esatta. Prima `past` diventava True appena scoccava
+    # l'ora e la UI lo nascondeva: l'evento spariva proprio nei minuti in cui
+    # stava bloccando gli ingressi (segnalato 26/08 sul Core PCE).
+    from news_filter import event_window_state
+    out = []
+    for e in events:
+        w = event_window_state(e.event_time, now)
+        start, end, ongoing = w["start_utc"], w["end_utc"], w["ongoing"]
+        out.append({
             "id": e.id, "name": e.name,
             "event_time_utc": e.event_time.isoformat(),
             "event_time_roma": e.event_time.replace(tzinfo=utc).astimezone(roma).strftime("%Y-%m-%d %H:%M"),
             "currency": e.currency, "impact": e.impact,
             "flatten": bool(e.flatten), "flatten_done": bool(e.flatten_done),
             "source": getattr(e, "source", "manual") or "manual",
-            "past": e.event_time < now,
-        } for e in events],
-    }
+            "ongoing": ongoing,
+            "block_start_roma": start.replace(tzinfo=utc).astimezone(roma).strftime("%H:%M"),
+            "block_end_roma": end.replace(tzinfo=utc).astimezone(roma).strftime("%H:%M"),
+            "minuti_alla_fine_blocco": w["minuti_alla_fine_blocco"],
+            "past": w["past"],          # passato solo a blocco CONCLUSO
+        })
+    return {"events": out}
 
 
 @app.post("/api/news-events")

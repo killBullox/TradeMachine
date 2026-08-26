@@ -57,7 +57,10 @@ export default function NewsFilterPanel() {
     load()
   }
 
+  // Gli eventi IN CORSO non sono "passati": stanno bloccando adesso e vanno
+  // mostrati sempre, in cima.
   const visible = events.filter(e => showPast || !e.past)
+    .sort((a, b) => (b.ongoing ? 1 : 0) - (a.ongoing ? 1 : 0))
 
   return (
     <div className="card p-6 mb-8 border border-orange-600/30">
@@ -124,10 +127,23 @@ export default function NewsFilterPanel() {
         {visible.map(e => {
           const auto = (e.source || 'manual') === 'forexfactory'
           return (
-            <div key={e.id} className={`flex items-center justify-between px-3 py-2 rounded-lg text-sm ${e.past ? 'bg-slate-800/30 text-slate-500' : 'bg-slate-800/70'}`}>
+            <div key={e.id} className={`flex items-center justify-between px-3 py-2 rounded-lg text-sm ${
+              e.ongoing ? 'bg-red-600/15 border border-red-600/40'
+                        : (e.past ? 'bg-slate-800/30 text-slate-500' : 'bg-slate-800/70')}`}>
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="font-mono text-xs text-slate-400">{e.event_time_roma}</span>
-                <span className={e.past ? '' : 'text-white'}>{e.name}</span>
+                {e.ongoing && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-600 text-white font-bold animate-pulse">
+                    IN CORSO
+                  </span>
+                )}
+                <span className={`font-mono text-xs ${e.ongoing ? 'text-red-200' : 'text-slate-400'}`}>{e.event_time_roma}</span>
+                <span className={e.ongoing ? 'text-white font-semibold' : (e.past ? '' : 'text-white')}>{e.name}</span>
+                {e.ongoing && (
+                  <span className="text-[10px] text-red-200">
+                    blocco {e.block_start_roma}–{e.block_end_roma}
+                    {e.minuti_alla_fine_blocco != null && ` · ancora ${e.minuti_alla_fine_blocco}m`}
+                  </span>
+                )}
                 <span className="text-[10px] px-1.5 py-0.5 bg-slate-700/60 text-slate-300 rounded">{e.currency || 'USD'} · {e.impact || 'high'}</span>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${auto ? 'bg-sky-600/25 text-sky-300' : 'bg-purple-600/25 text-purple-300'}`}>
                   {auto ? 'AUTO' : 'MANUALE'}

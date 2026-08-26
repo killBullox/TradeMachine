@@ -26,6 +26,29 @@ ENTRY_BLOCK_AFTER_MIN = 15
 PENDING_CANCEL_BEFORE_MIN = 10
 FLATTEN_BEFORE_MIN = 5
 
+
+def event_window_state(event_time, now=None) -> dict:
+    """Stato di un evento rispetto alla sua finestra di blocco. Puro e testabile.
+
+    Un evento e' IN CORSO per tutta la finestra (da -10m a +15m), non solo fino
+    all'ora esatta: prima l'API lo marcava 'passato' allo scoccare dell'ora e la
+    UI lo nascondeva, facendolo sparire proprio nei minuti in cui bloccava gli
+    ingressi (segnalato il 26/08 sul Core PCE delle 14:30).
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    now = now or _dt.utcnow()
+    start = event_time - _td(minutes=ENTRY_BLOCK_BEFORE_MIN)
+    end = event_time + _td(minutes=ENTRY_BLOCK_AFTER_MIN)
+    ongoing = start <= now <= end
+    return {
+        "start_utc": start,
+        "end_utc": end,
+        "ongoing": ongoing,
+        "past": now > end,
+        "minuti_alla_fine_blocco": max(0, int((end - now).total_seconds() // 60)) if ongoing else None,
+    }
+
+
 # Flatten venerdi': orario Roma
 FRIDAY_FLATTEN_HOUR_ROMA = 22
 FRIDAY_FLATTEN_MINUTE_ROMA = 45

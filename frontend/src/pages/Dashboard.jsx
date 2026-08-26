@@ -27,7 +27,11 @@ function NewsWidget() {
       fetch('/api/news-events').then(r => r.json()).catch(() => ({ events: [] })),
       fetch('/api/news-filter/status').then(r => r.json()).catch(() => null),
     ]).then(([ev, st]) => {
-      setEvents((ev.events || []).filter(e => !e.past).slice(0, 3))
+      // Gli eventi IN CORSO restano in cima: sono quelli che stanno bloccando
+      // gli ingressi proprio adesso (prima sparivano allo scoccare dell'ora).
+      const list = (ev.events || []).filter(e => !e.past)
+      list.sort((a, b) => (b.ongoing ? 1 : 0) - (a.ongoing ? 1 : 0))
+      setEvents(list.slice(0, 3))
       setBlocked(st?.entry_blocked || null)
     })
   }
@@ -48,9 +52,20 @@ function NewsWidget() {
         {events.map(e => {
           const auto = (e.source || 'manual') === 'forexfactory'
           return (
-            <div key={e.id} className="flex items-center gap-3 text-xs">
-              <span className="font-mono text-slate-400 w-28 flex-shrink-0">{e.event_time_roma}</span>
-              <span className="text-slate-200 flex-1 min-w-0 truncate">{e.name}</span>
+            <div key={e.id} className={`flex items-center gap-3 text-xs ${e.ongoing ? 'bg-red-600/15 border border-red-600/40 rounded-lg px-2 py-1.5' : ''}`}>
+              {e.ongoing && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-600 text-white font-bold flex-shrink-0 animate-pulse">
+                  IN CORSO
+                </span>
+              )}
+              <span className={`font-mono w-28 flex-shrink-0 ${e.ongoing ? 'text-red-200' : 'text-slate-400'}`}>{e.event_time_roma}</span>
+              <span className={`flex-1 min-w-0 truncate ${e.ongoing ? 'text-white font-semibold' : 'text-slate-200'}`}>{e.name}</span>
+              {e.ongoing && (
+                <span className="text-[10px] text-red-200 flex-shrink-0 whitespace-nowrap">
+                  blocco {e.block_start_roma}–{e.block_end_roma}
+                  {e.minuti_alla_fine_blocco != null && ` · ancora ${e.minuti_alla_fine_blocco}m`}
+                </span>
+              )}
               <span className="text-[10px] px-1.5 py-0.5 bg-slate-700/60 text-slate-300 rounded flex-shrink-0">{e.currency || 'USD'}</span>
               {e.flatten && <span className="text-[10px] px-1.5 py-0.5 bg-orange-600/25 text-orange-300 rounded font-semibold flex-shrink-0">FLATTEN</span>}
               <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${auto ? 'bg-sky-600/25 text-sky-300' : 'bg-purple-600/25 text-purple-300'}`}>{auto ? 'AUTO' : 'MAN'}</span>
