@@ -48,6 +48,7 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
   const isBuy = sig.direction === 'buy'
   const [closing, setClosing] = useState(false)
   const [locking, setLocking] = useState(false)
+  const [closingNext, setClosingNext] = useState(false)
   const [trailBusy, setTrailBusy] = useState(false)
 
   // Trail stop effettivo: override per-trade se valorizzato, altrimenti
@@ -93,6 +94,26 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
       toast.error('Errore di rete')
     } finally {
       setLocking(false)
+    }
+  }
+
+  // Chiude UN solo ticket: quello col target piu' vicino al prezzo, cioe' il
+  // prossimo che si chiuderebbe da solo. Il resto del trade resta aperto.
+  const handleCloseNextTicket = async () => {
+    if (!confirm(`Chiudere il prossimo ticket di #${sig.id} ${sig.symbol}? Gli altri restano aperti.`)) return
+    setClosingNext(true)
+    try {
+      const r = await fetch(`/api/mt5/close-next-ticket/${sig.id}`, { method: 'POST' }).then(r => r.json())
+      if (r.ok) {
+        toast.success(`#${sig.id}: chiuso ticket TP${r.tp_level} (${r.tp ?? '—'}) · ${r.rimasti} ancora aperti`)
+        onClose?.()
+      } else {
+        toast.error(`Errore: ${r.error || 'chiusura fallita'}`)
+      }
+    } catch {
+      toast.error('Errore di rete')
+    } finally {
+      setClosingNext(false)
     }
   }
 
@@ -315,9 +336,19 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
               >
                 {locking ? 'Lock profit...' : '🔒 Lock profit'}
               </button>
+              {tickets.length > 1 && (
+                <button
+                  onClick={handleCloseNextTicket}
+                  disabled={closing || locking || closingNext}
+                  className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-900/40 text-amber-300 hover:bg-amber-900/70 hover:text-amber-200 transition-colors disabled:opacity-50"
+                  title="Chiude solo il ticket col target piu' vicino al prezzo. Gli altri restano aperti."
+                >
+                  {closingNext ? 'Chiusura...' : '↧ Chiudi prossimo ticket'}
+                </button>
+              )}
               <button
                 onClick={handleClose}
-                disabled={closing || locking}
+                disabled={closing || locking || closingNext}
                 className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-900/40 text-rose-400 hover:bg-rose-900/70 hover:text-rose-300 transition-colors disabled:opacity-50"
               >
                 {closing ? 'Chiusura...' : 'Chiudi trade'}

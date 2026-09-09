@@ -747,6 +747,7 @@ class RiskSettingsIn(BaseModel):
     friday_flatten_enabled: bool = True
     be_at_tp1_enabled: bool = True
     trader_news_backup_enabled: bool = True
+    close_on_target_done_enabled: bool = False
 
 
 # ─── News events (news filter #570) ─────────────────────────────────────────
@@ -1263,6 +1264,7 @@ def get_risk_settings_api(db: Session = Depends(get_db)):
         "friday_flatten_enabled": bool(getattr(rs, "friday_flatten_enabled", True) if getattr(rs, "friday_flatten_enabled", None) is not None else True),
         "be_at_tp1_enabled": bool(getattr(rs, "be_at_tp1_enabled", True) if getattr(rs, "be_at_tp1_enabled", None) is not None else True),
         "trader_news_backup_enabled": bool(getattr(rs, "trader_news_backup_enabled", True) if getattr(rs, "trader_news_backup_enabled", None) is not None else True),
+        "close_on_target_done_enabled": bool(getattr(rs, "close_on_target_done_enabled", False)),
     }
 
 
@@ -1283,6 +1285,7 @@ async def update_risk_settings(body: RiskSettingsIn, db: Session = Depends(get_d
     rs.friday_flatten_enabled = body.friday_flatten_enabled
     rs.be_at_tp1_enabled = body.be_at_tp1_enabled
     rs.trader_news_backup_enabled = body.trader_news_backup_enabled
+    rs.close_on_target_done_enabled = body.close_on_target_done_enabled
     rs.updated_at = datetime.utcnow()
     db.commit()
     async def _run(): await asyncio.get_event_loop().run_in_executor(None, risk_module.recalculate_all)
@@ -2297,6 +2300,32 @@ async def mt5_close(ticket: int, db: Session = Depends(get_db)):
     symbol = sig.symbol if sig else "XAUUSD"
     ok = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.close_position, ticket, symbol)
     return {"ok": ok}
+
+@app.post("/api/mt5/close-next-ticket/{signal_id}")
+async def mt5_close_next_ticket(signal_id: int, db: Session = Depends(get_db)):
+    """Chiude UN SOLO ticket: quello col target piu' vicino al prezzo attuale,
+    cioe' il prossimo che si chiuderebbe da solo. Serve a incassare a mano una
+    parte del trade lasciando correre il resto."""
+    sig = db.query(Signal).filter(Signal.id == signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Segnale non trovato")
+    aperti = await asyncio.get_event_loop().run_in_executor(
+        None, mt5_trader.open_tickets_with_levels, sig)
+    if not aperti:
+        return {"ok": False, "error": "Nessun ticket aperto per questo trade"}
+    ticket, livello, tp = aperti[0]
+    ok = await asyncio.get_event_loop().run_in_executor(
+        None, mt5_trader.close_position, ticket, sig.symbol)
+    if ok:
+        mt5_trader._append_trade_log_mt5(sig, "manual_close_next_ticket",
+            f"Chiusura manuale del prossimo ticket: {ticket} (TP{livello} = {tp}), "
+            f"{len(aperti) - 1} ticket ancora aperti.",
+            {"ticket": ticket, "tp_level": livello, "tp": tp,
+             "rimasti": len(aperti) - 1})
+        db.add(sig); db.commit()
+    return {"ok": bool(ok), "ticket": ticket, "tp_level": livello, "tp": tp,
+            "rimasti": len(aperti) - 1 if ok else len(aperti)}
+
 
 @app.post("/api/mt5/close_signal/{signal_id}")
 async def mt5_close_signal(signal_id: int, db: Session = Depends(get_db)):

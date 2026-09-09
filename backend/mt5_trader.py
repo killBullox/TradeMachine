@@ -3301,6 +3301,74 @@ def _build_mt5_trade_log(sig, closed_tickets, is_buy, new_status) -> str:
     return jsonlib.dumps(events)
 
 
+def open_tickets_with_levels(sig):
+    """Ticket ANCORA APERTI del segnale, con il TP di ciascuno.
+    Ritorna [(ticket, tp_level, tp_price)] ordinati per TP piu' vicino al
+    prezzo corrente (il "prossimo" che si chiuderebbe da solo e' il primo).
+    tp_level e' la posizione nella lista mt5_tickets (1=TP1, 2=TP2, 3=TP3),
+    non l'ordine dei prezzi: i due possono divergere se il trader scrive i
+    target fuori sequenza (#734). Lista vuota se MT5 non e' disponibile."""
+    import json as jsonlib
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return []
+    try:
+        tickets = []
+        if sig.mt5_tickets:
+            try: tickets = jsonlib.loads(sig.mt5_tickets)
+            except Exception: tickets = []
+        elif sig.mt5_ticket:
+            tickets = [sig.mt5_ticket]
+        tps = [sig.tp1, sig.tp2, sig.tp3]
+        is_buy = (sig.direction or "buy").lower() == "buy"
+        cur = None
+        try:
+            tk = mt5.symbol_info_tick(get_mt5_symbol(sig.symbol))
+            if tk:
+                cur = float(tk.bid if is_buy else tk.ask)
+        except Exception:
+            cur = None
+        out = []
+        for i, t in enumerate(tickets):
+            pos = mt5.positions_get(ticket=t)
+            if not pos:
+                continue
+            tp_price = float(pos[0].tp) if pos[0].tp else (
+                float(tps[i]) if i < len(tps) and tps[i] else None)
+            out.append((t, i + 1, tp_price))
+        # ordina per distanza dal prezzo corrente: il primo e' il piu' vicino
+        if cur is not None:
+            out.sort(key=lambda x: abs((x[2] or cur) - cur))
+        return out
+    except Exception as e:
+        log(f"open_tickets_with_levels #{getattr(sig,'id','?')}: {str(e)[:100]}")
+        return []
+
+
+def close_ticket_for_level(sig, tp_level: int) -> dict:
+    """Chiude a mercato il ticket del livello indicato (1/2/3), oppure TUTTI i
+    ticket aperti se tp_level >= 99. Usato dagli annunci "Nth Target Done" del
+    trader e dal pulsante manuale. Ritorna un riepilogo. Mai solleva."""
+    import json as jsonlib
+    try:
+        aperti = open_tickets_with_levels(sig)
+        if not aperti:
+            return {"ok": False, "chiusi": 0, "motivo": "nessun ticket aperto"}
+        bersagli = (aperti if tp_level >= 99
+                    else [x for x in aperti if x[1] == tp_level])
+        if not bersagli:
+            return {"ok": False, "chiusi": 0,
+                    "motivo": f"il ticket del TP{tp_level} non e' piu' aperto"}
+        chiusi = []
+        for t, lvl, tp in bersagli:
+            if close_position(t, sig.symbol):
+                chiusi.append({"ticket": t, "tp_level": lvl, "tp": tp})
+        return {"ok": bool(chiusi), "chiusi": len(chiusi), "dettaglio": chiusi}
+    except Exception as e:
+        log(f"close_ticket_for_level #{getattr(sig,'id','?')}: {str(e)[:100]}")
+        return {"ok": False, "chiusi": 0, "motivo": str(e)[:120]}
+
+
 def finalize_orphan_closed_trades() -> int:
     """Trade con stato TERMINALE ma mai finalizzati: tutti i ticket sono chiusi
     sul broker, ma closed_at/exit_price/pnl_usd non sono stati scritti.

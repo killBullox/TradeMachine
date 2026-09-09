@@ -1605,6 +1605,37 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                                         if mt5_trader.modify_sl(t, be_sl, sig.symbol):
                                             sl_moved_to_be += 1
 
+                        # ── Chiusura sull'annuncio del trader (opt-in) ──────
+                        # Se attiva in Impostazioni: quando il trader dichiara
+                        # "Nth Target Done" chiudiamo a mercato il ticket di
+                        # QUEL livello, invece di aspettare che il prezzo tocchi
+                        # il nostro TP. Serve quando il target scritto nel
+                        # segnale non e' quello che lui considera raggiunto
+                        # (#734: TP2 4429 per typo, 2° target dichiarato a 4418).
+                        # NB: non tocca lo SL — "target done" non e' un trail
+                        # (regola #405), quella resta materia di trail_explicit.
+                        if open_found and mt5_inst:
+                            try:
+                                from database import RiskSettings as _RS_td
+                                _rs_td = db.query(_RS_td).first()
+                                _td_on = bool(getattr(_rs_td, "close_on_target_done_enabled", False))
+                            except Exception:
+                                _td_on = False
+                            if _td_on:
+                                _res = mt5_trader.close_ticket_for_level(sig, tp_level_hit)
+                                if _res.get("chiusi"):
+                                    _lbl = "tutti i ticket" if tp_level_hit >= 99 else f"TP{tp_level_hit}"
+                                    _append_trade_log(sig, "closed_on_target_done",
+                                        f"Il trader ha dichiarato '{parsed.status_text or 'target done'}' "
+                                        f"({_lbl}): chiusi a mercato {_res['chiusi']} ticket "
+                                        f"invece di aspettare il TP del segnale.",
+                                        {"tp_level": tp_level_hit, "dettaglio": _res.get("dettaglio"),
+                                         "trigger": "close_on_target_done"})
+                                    db.add(sig)
+                                    log(f"[TargetDone] #{sig.id} chiusura su annuncio: {_res}")
+                                elif _res.get("motivo"):
+                                    log(f"[TargetDone] #{sig.id} nessuna chiusura: {_res['motivo']}")
+
                         # Marca cancelled SOLO se TUTTI i ticket erano pending non
                         # filled (nessuna posizione aperta). Se anche solo un ticket
                         # e' aperto, il trade e' vivo: non toccarlo.

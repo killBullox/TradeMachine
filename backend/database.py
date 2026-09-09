@@ -144,6 +144,14 @@ class RiskSettings(Base):
     # Se il trader avvisa di news ("stay out", "big news"), blocca gli ingressi
     # fino a questo istante (UTC). Rete di sicurezza secondaria al calendario.
     trader_news_backup_enabled = Column(Boolean, default=True)
+    # ─── Chiusura sugli annunci di target del trader (#734, 09/09) ───
+    # Quando il trader dichiara "Nth Target Done", chiude a mercato il ticket
+    # di QUEL livello se e' ancora aperto. Serve quando il target scritto nel
+    # segnale non coincide con quello che il trader considera raggiunto (nel
+    # #734 il TP2 era 4429 per un typo, ma lui ha dichiarato il 2° target a
+    # 4418). DEFAULT OFF: cambia il comportamento operativo, e a volte aspettare
+    # il TP rende di piu' (nel #734 stesso sarebbe costato ~387$).
+    close_on_target_done_enabled = Column(Boolean, default=False)
     trader_block_until = Column(DateTime, nullable=True)  # UTC; None = nessun blocco trader
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -452,6 +460,9 @@ def init_db():
             conn.commit()
         if "trader_news_backup_enabled" not in rs_existing:
             conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN trader_news_backup_enabled BOOLEAN DEFAULT 1"))
+            conn.commit()
+        if "close_on_target_done_enabled" not in rs_existing:
+            conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN close_on_target_done_enabled BOOLEAN DEFAULT 0"))
             conn.commit()
         if "trader_block_until" not in rs_existing:
             conn.execute(sa.text("ALTER TABLE risk_settings ADD COLUMN trader_block_until DATETIME"))

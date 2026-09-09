@@ -147,6 +147,15 @@ function RiskPanel() {
             </label>
           </div>
           <div className="flex items-center gap-2">
+            <input type="checkbox" checked={settings.close_on_target_done_enabled === true}
+              onChange={e => setSettings(s => ({...s, close_on_target_done_enabled: e.target.checked}))}
+              className="w-4 h-4 rounded" id="close-target-done-toggle" />
+            <label htmlFor="close-target-done-toggle" className="text-xs text-slate-400"
+              title="Quando il trader dichiara 'Nth Target Done', chiude a mercato il ticket di quel livello invece di aspettare il TP del segnale. Utile quando il target scritto non coincide con quello che lui considera raggiunto (#734). Non tocca lo SL. Default OFF: a volte aspettare il TP rende di più.">
+              Chiudi sul target dichiarato dal trader
+            </label>
+          </div>
+          <div className="flex items-center gap-2">
             <input type="checkbox" checked={settings.trader_news_backup_enabled !== false}
               onChange={e => setSettings(s => ({...s, trader_news_backup_enabled: e.target.checked}))}
               className="w-4 h-4 rounded" id="trader-news-toggle" />
