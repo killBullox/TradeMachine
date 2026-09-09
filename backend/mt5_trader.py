@@ -3301,6 +3301,135 @@ def _build_mt5_trade_log(sig, closed_tickets, is_buy, new_status) -> str:
     return jsonlib.dumps(events)
 
 
+def finalize_orphan_closed_trades() -> int:
+    """Trade con stato TERMINALE ma mai finalizzati: tutti i ticket sono chiusi
+    sul broker, ma closed_at/exit_price/pnl_usd non sono stati scritti.
+
+    Caso #734 (09/09): il ticket del TP3 si e' chiuso PRIMA di quello del TP2
+    (target del trader fuori ordine), lo status e' saltato a 'tp3' con un
+    ticket ancora aperto e il segnale e' uscito dalla query di sync_positions
+    (che allora non includeva 'tp3'). Risultato: closed_at vuoto -> il P&L non
+    entrava nel totale di giornata ne' nel kill-switch, e restava una stima
+    intermedia (1446.90$ contro 1526.25$ reali).
+
+    Il filtro della query e' stato corretto, ma questa resta la rete che cattura
+    QUALSIASI percorso lasci un trade a meta', presente o futuro: se ogni ticket
+    ha il suo deal di uscita nello storico MT5, il trade si chiude qui con i
+    numeri veri dei deal. Idempotente, mai solleva."""
+    from database import SessionLocal, Signal
+    import json as jsonlib
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return 0
+    db = SessionLocal()
+    fixed = 0
+    try:
+        cands = db.query(Signal).filter(
+            Signal.is_archived == False,          # noqa: E712
+            Signal.is_filtered == False,          # noqa: E712
+            Signal.closed_at.is_(None),
+            Signal.status.in_(("tp1", "tp2", "tp3", "closed", "sl_hit", "trail_out")),
+        ).all()
+        for sig in cands:
+            try:
+                tickets = []
+                if sig.mt5_tickets:
+                    try: tickets = jsonlib.loads(sig.mt5_tickets)
+                    except Exception: tickets = []
+                elif sig.mt5_ticket:
+                    tickets = [sig.mt5_ticket]
+                if not tickets:
+                    continue
+                # tutti chiusi? un solo ticket ancora aperto -> non e' un orfano
+                if any(mt5.positions_get(ticket=t) or mt5.orders_get(ticket=t) for t in tickets):
+                    continue
+                total = 0.0; exit_pv = 0.0; exit_vol = 0.0
+                last_out = None; completo = True
+                for t in tickets:
+                    deals = mt5.history_deals_get(position=t) or ()
+                    ha_out = False
+                    for d in deals:
+                        if d.entry == mt5.DEAL_ENTRY_OUT:
+                            ha_out = True
+                            total += (float(d.profit)
+                                      + float(getattr(d, "commission", 0) or 0)
+                                      + float(getattr(d, "swap", 0) or 0))
+                            vol = float(getattr(d, "volume", 0) or 0)
+                            if vol > 0:
+                                exit_pv += float(d.price) * vol
+                                exit_vol += vol
+                            ts = int(getattr(d, "time", 0) or 0)
+                            if ts and (last_out is None or ts > last_out):
+                                last_out = ts
+                    if not ha_out:
+                        completo = False
+                if not completo or exit_vol <= 0:
+                    continue                      # storico incompleto: riprova dopo
+                vecchio_pnl = sig.pnl_usd
+                sig.pnl_usd = round(total, 2)
+                sig.exit_price = round(exit_pv / exit_vol, 5)
+                sig.closed_at = _get_mt5_utc(last_out) if last_out else datetime.utcnow()
+                sig.updated_at = datetime.utcnow()
+                _append_trade_log_mt5(sig, "finalized_orphan",
+                    f"Trade chiuso sul broker ma mai finalizzato: closed_at, exit_price "
+                    f"e P&L ricostruiti dai deal MT5 (pnl {vecchio_pnl} -> {sig.pnl_usd}, "
+                    f"uscita media {sig.exit_price}).",
+                    {"pnl_prima": vecchio_pnl, "pnl_dopo": sig.pnl_usd,
+                     "exit_price": sig.exit_price})
+                db.add(sig)
+                fixed += 1
+                log(f"[Finalize] #{sig.id} {sig.symbol} finalizzato: pnl {vecchio_pnl} -> "
+                    f"{sig.pnl_usd}, exit {sig.exit_price}, closed_at {sig.closed_at}")
+            except Exception as e:
+                log(f"[Finalize] #{sig.id} errore: {str(e)[:100]}")
+        if fixed:
+            db.commit()
+        return fixed
+    except Exception as e:
+        log(f"[Finalize] errore: {str(e)[:120]}")
+        try: db.rollback()
+        except Exception: pass
+        return 0
+    finally:
+        db.close()
+
+
+def backfill_mt5_account() -> int:
+    """Trade chiusi senza mt5_account: restano fuori dal P&L di giornata e dal
+    kill-switch, che filtrano per conto attivo (visto il 09/09 sul #732, 52.32$
+    non conteggiati). Assegna il conto attivo ai trade recenti che ne sono
+    privi. Mai solleva."""
+    from database import SessionLocal, Signal
+    from datetime import timedelta
+    db = SessionLocal()
+    try:
+        acc = MT5_ACCOUNT
+        if not acc:
+            return 0
+        cutoff = datetime.utcnow() - timedelta(days=7)
+        rows = db.query(Signal).filter(
+            Signal.mt5_account.is_(None),
+            Signal.closed_at.isnot(None),
+            Signal.closed_at >= cutoff,
+            Signal.is_filtered == False,          # noqa: E712
+            Signal.mt5_tickets.isnot(None),
+        ).all()
+        for s in rows:
+            s.mt5_account = acc
+            db.add(s)
+        if rows:
+            db.commit()
+            log(f"[BackfillAcct] {len(rows)} trade senza mt5_account -> {acc}")
+        return len(rows)
+    except Exception as e:
+        log(f"[BackfillAcct] errore: {str(e)[:120]}")
+        try: db.rollback()
+        except Exception: pass
+        return 0
+    finally:
+        db.close()
+
+
 def reconcile_entered_but_cancelled() -> int:
     """Un trade che e' ENTRATO davvero e poi e' stato chiuso non e' "annullato":
     e' un trade chiuso, e deve entrare nelle statistiche.
@@ -3463,6 +3592,19 @@ def sync_positions() -> list:
     except Exception as _e:
         log(f"[Reconcile] chiamata fallita: {str(_e)[:80]}")
 
+    # Trade chiusi sul broker ma mai finalizzati (closed_at vuoto): senza
+    # questo il loro P&L non entra nel totale di giornata ne' nel kill-switch.
+    try:
+        finalize_orphan_closed_trades()
+    except Exception as _e:
+        log(f"[Finalize] chiamata fallita: {str(_e)[:80]}")
+
+    # Trade chiusi senza conto associato: esclusi dai filtri per conto attivo.
+    try:
+        backfill_mt5_account()
+    except Exception as _e:
+        log(f"[BackfillAcct] chiamata fallita: {str(_e)[:80]}")
+
     # Backfill pnl_usd per signal chiusi via price_service senza P&L
     try:
         backfill_missing_pnl()
@@ -3478,7 +3620,15 @@ def sync_positions() -> list:
         open_sigs = db.query(Signal).filter(
             Signal.mt5_ticket.isnot(None),
             Signal.closed_at.is_(None),
-            Signal.status.in_(["open", "pending", "tp1", "tp2"])
+            # "tp3" incluso (09/09): quando il ticket del TP3 si chiude PRIMA
+            # degli altri — succede se i target arrivano fuori ordine, come nel
+            # #734 dove il trader scrisse TP2 4429 e TP3 4427 — lo status salta
+            # a tp3 mentre un ticket e' ancora aperto. Senza "tp3" qui il
+            # segnale usciva dalla query e non veniva MAI finalizzato:
+            # closed_at ed exit_price restavano vuoti e il P&L non entrava nel
+            # totale di giornata. Il filtro closed_at IS NULL basta a escludere
+            # i trade gia' completati.
+            Signal.status.in_(["open", "pending", "tp1", "tp2", "tp3"])
         ).all()
 
         if not open_sigs:
