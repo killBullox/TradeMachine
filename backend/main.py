@@ -1639,6 +1639,197 @@ async def mt5_remove_account(account_id: int, pin: str = Query(...), db: Session
     return {"ok": True}
 
 
+class ManualTradeIn(BaseModel):
+    """Trade aperto a mano dall'utente: entra a MERCATO adesso, i lotti li
+    calcola il sistema dal rischio configurato e dalla distanza dello stop."""
+    symbol: str = "XAUUSD"
+    direction: str                       # "buy" | "sell"
+    stoploss: float
+    tp1: Optional[float] = None
+    tp2: Optional[float] = None
+    tp3: Optional[float] = None
+
+
+def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
+    """Calcolo del lotto e controlli, SENZA piazzare nulla. Stessa formula del
+    pipeline automatico: lotti = rischio / (distanza stop x valore pip), divisi
+    fra i TP indicati e arrotondati per DIFETTO al passo del broker (mai sopra
+    il rischio massimo). Ritorna anche gli avvisi bloccanti."""
+    import risk as risk_module
+    direction = (body.direction or "").lower()
+    errori, avvisi = [], []
+    if direction not in ("buy", "sell"):
+        errori.append("Direzione non valida: usa buy o sell")
+    tps = [t for t in (body.tp1, body.tp2, body.tp3) if t]
+    if not tps:
+        errori.append("Serve almeno un target")
+    if not body.stoploss:
+        errori.append("Stop loss obbligatorio")
+
+    mt5 = mt5_trader._get_mt5() if mt5_trader.is_enabled() else None
+    prezzo = None
+    min_vol = vol_step = None
+    if mt5 is None:
+        errori.append("MT5 non disponibile: attiva l'auto-trading dalla Dashboard")
+    else:
+        bsym = mt5_trader.get_mt5_symbol(body.symbol)
+        info = mt5.symbol_info(bsym)
+        if info is None:
+            errori.append(f"Simbolo {body.symbol} non trovato sul broker")
+        else:
+            if not info.visible:
+                mt5.symbol_select(bsym, True)
+                info = mt5.symbol_info(bsym) or info
+            tick = mt5.symbol_info_tick(bsym)
+            if not tick or not tick.ask:
+                errori.append(f"Nessuna quotazione per {body.symbol}")
+            else:
+                prezzo = float(tick.ask if direction == "buy" else tick.bid)
+            min_vol = float(getattr(info, "volume_min", 0.01) or 0.01)
+            vol_step = float(getattr(info, "volume_step", 0.01) or 0.01)
+
+    # Coerenza dei livelli rispetto al prezzo di ingresso
+    if prezzo and body.stoploss:
+        if direction == "buy" and body.stoploss >= prezzo:
+            errori.append(f"Per un BUY lo stop ({body.stoploss}) deve stare SOTTO il prezzo ({prezzo})")
+        if direction == "sell" and body.stoploss <= prezzo:
+            errori.append(f"Per un SELL lo stop ({body.stoploss}) deve stare SOPRA il prezzo ({prezzo})")
+        for i, t in enumerate((body.tp1, body.tp2, body.tp3), 1):
+            if not t:
+                continue
+            if direction == "buy" and t <= prezzo:
+                errori.append(f"Per un BUY il TP{i} ({t}) deve stare SOPRA il prezzo ({prezzo})")
+            if direction == "sell" and t >= prezzo:
+                errori.append(f"Per un SELL il TP{i} ({t}) deve stare SOTTO il prezzo ({prezzo})")
+        ordinati = sorted(tps) if direction == "buy" else sorted(tps, reverse=True)
+        if tps != ordinati:
+            avvisi.append("I target non sono in ordine crescente di distanza: "
+                          "il ticket piu' lontano si chiudera' per primo")
+
+    settings = risk_module.get_risk_settings()
+    rischio_max = risk_module.calc_risk_amount(settings)
+    n = len(tps) or 1
+    lotti_tot = lotti_ciascuno = rischio_stimato = None
+    distanza = None
+    if prezzo and body.stoploss and not errori:
+        distanza = abs(prezzo - float(body.stoploss))
+        grezzi = risk_module.calc_position_size(body.symbol, prezzo, float(body.stoploss), rischio_max)
+        if grezzi:
+            spec = risk_module.get_spec(body.symbol)
+            step = vol_step or 0.01
+            mv = min_vol or 0.01
+            # arrotonda per DIFETTO: mai sopra il rischio massimo
+            ciascuno = max(mv, (int((grezzi / n) / step) * step))
+            ciascuno = round(ciascuno, 2)
+            lotti_ciascuno = ciascuno
+            lotti_tot = round(ciascuno * n, 2)
+            rischio_stimato = round(distanza / spec["pip"] * spec["pv"] * lotti_tot, 2)
+            if rischio_stimato > rischio_max * 1.02:
+                avvisi.append(
+                    f"Col lotto minimo del broker ({mv}) il rischio sarebbe "
+                    f"{rischio_stimato:.0f}$, sopra il massimo di {rischio_max:.0f}$: "
+                    f"allarga lo stop o riduci i target")
+
+    # Guardie prop: stesse che bloccano i segnali automatici
+    try:
+        from prop_mode import should_block_new_trades, should_block_total_dd
+        blocco = should_block_new_trades(db)
+        if blocco:
+            errori.append(blocco)
+        if mt5:
+            ai = mt5.account_info()
+            if ai:
+                bt = should_block_total_dd(float(ai.equity), db)
+                if bt:
+                    errori.append(bt)
+    except Exception:
+        pass
+    # Filtro news
+    try:
+        import news_filter
+        nb = news_filter.entry_blocked(db=db)
+        if nb:
+            errori.append(nb)
+    except Exception:
+        pass
+
+    return {
+        "ok": not errori,
+        "prezzo_corrente": round(prezzo, 5) if prezzo else None,
+        "distanza_stop": round(distanza, 2) if distanza else None,
+        "rischio_massimo": round(rischio_max, 2),
+        "rischio_stimato": rischio_stimato,
+        "lotti_totali": lotti_tot,
+        "lotti_per_ticket": lotti_ciascuno,
+        "n_ticket": n,
+        "lotto_minimo_broker": min_vol,
+        "errori": errori,
+        "avvisi": avvisi,
+    }
+
+
+@app.post("/api/manual-trade/preview")
+async def manual_trade_preview(body: ManualTradeIn, db: Session = Depends(get_db)):
+    """Anteprima: quanto rischio, quanti lotti, quali problemi. Non piazza nulla."""
+    return await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _manual_trade_preview(body, db))
+
+
+@app.post("/api/manual-trade")
+async def manual_trade_open(body: ManualTradeIn, db: Session = Depends(get_db)):
+    """Apre a MERCATO un trade deciso dall'utente. Passa dallo stesso pipeline
+    dei segnali Telegram (place_orders), quindi eredita sizing, guardia sul
+    rischio, cap margine e guardie prop."""
+    if not mt5_trader._auto_trade_enabled:
+        raise HTTPException(status_code=400, detail="Abilita prima l'auto-trading dalla Dashboard")
+    prev = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _manual_trade_preview(body, db))
+    if not prev["ok"]:
+        raise HTTPException(status_code=400, detail="; ".join(prev["errori"]))
+    direction = body.direction.lower()
+    prezzo = prev["prezzo_corrente"]
+    tps = [body.tp1, body.tp2, body.tp3]
+    sig = Signal(
+        symbol=body.symbol.upper(), direction=direction,
+        entry_price=prezzo, entry_price_high=prezzo,
+        stoploss=body.stoploss, tp1=tps[0], tp2=tps[1], tp3=tps[2],
+        status="pending",
+        raw_message=(f"[MANUALE] {body.symbol.upper()} {direction} a mercato "
+                     f"({prezzo}) SL={body.stoploss} "
+                     f"TP={'/'.join(str(t) for t in tps if t)}"),
+        created_at=datetime.utcnow(),
+    )
+    db.add(sig); db.commit(); db.refresh(sig)
+    sig_id = sig.id
+
+    def _run_place():
+        from database import SessionLocal as _SL, Signal as _Sig
+        s = _SL()
+        try:
+            ss = s.query(_Sig).get(sig_id)
+            if not ss:
+                return []
+            try:
+                tks = mt5_trader.place_orders(ss) or []
+                s.commit()
+                return tks
+            except Exception as e:
+                try: s.rollback()
+                except Exception: pass
+                return {"_error": str(e)}
+        finally:
+            s.close()
+
+    result = await asyncio.get_event_loop().run_in_executor(None, _run_place)
+    if isinstance(result, dict) and "_error" in result:
+        raise HTTPException(status_code=500, detail=f"Apertura fallita: {result['_error']}")
+    db.refresh(sig)
+    return {"ok": bool(result), "signal_id": sig.id, "tickets": result,
+            "lotti_per_ticket": prev["lotti_per_ticket"],
+            "rischio_stimato": prev["rischio_stimato"],
+            "position_size": sig.position_size}
+
+
 class TestPlaceOrderIn(BaseModel):
     symbol: str
     direction: str = "buy"  # "buy" o "sell"
