@@ -1648,6 +1648,11 @@ class ManualTradeIn(BaseModel):
     tp1: Optional[float] = None
     tp2: Optional[float] = None
     tp3: Optional[float] = None
+    # Paper: nessun ordine sul broker. Il trade viene registrato come
+    # is_filtered=True e la sua vita (TP/SL) la simula price_service sui prezzi
+    # reali, esattamente come i segnali filtrati. Serve a provare un'idea senza
+    # rischiare soldi; resta escluso dalle statistiche reali.
+    paper: bool = False
 
 
 def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
@@ -1666,11 +1671,22 @@ def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
     if not body.stoploss:
         errori.append("Stop loss obbligatorio")
 
+    paper = bool(getattr(body, "paper", False))
     mt5 = mt5_trader._get_mt5() if mt5_trader.is_enabled() else None
     prezzo = None
     min_vol = vol_step = None
     if mt5 is None:
-        errori.append("MT5 non disponibile: attiva l'auto-trading dalla Dashboard")
+        # In paper non serve il broker: basta una quotazione per simulare.
+        if paper:
+            min_vol, vol_step = 0.01, 0.01
+            try:
+                prezzo = ps.get_current_price(body.symbol.upper())
+            except Exception:
+                prezzo = None
+            if prezzo is None:
+                errori.append(f"Nessuna quotazione disponibile per {body.symbol}")
+        else:
+            errori.append("MT5 non disponibile: attiva l'auto-trading dalla Dashboard")
     else:
         bsym = mt5_trader.get_mt5_symbol(body.symbol)
         info = mt5.symbol_info(bsym)
@@ -1730,31 +1746,37 @@ def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
                     f"{rischio_stimato:.0f}$, sopra il massimo di {rischio_max:.0f}$: "
                     f"allarga lo stop o riduci i target")
 
-    # Guardie prop: stesse che bloccano i segnali automatici
+    # Guardie prop e filtro news: bloccano il trade REALE. In paper non c'e'
+    # denaro a rischio, quindi diventano semplici avvisi — cosi' si puo'
+    # comunque provare l'idea e vedere poi come sarebbe andata.
+    def _guardia(msg):
+        (avvisi if paper else errori).append(
+            (f"[in reale sarebbe bloccato] {msg}") if paper else msg)
+
     try:
         from prop_mode import should_block_new_trades, should_block_total_dd
         blocco = should_block_new_trades(db)
         if blocco:
-            errori.append(blocco)
+            _guardia(blocco)
         if mt5:
             ai = mt5.account_info()
             if ai:
                 bt = should_block_total_dd(float(ai.equity), db)
                 if bt:
-                    errori.append(bt)
+                    _guardia(bt)
     except Exception:
         pass
-    # Filtro news
     try:
         import news_filter
         nb = news_filter.entry_blocked(db=db)
         if nb:
-            errori.append(nb)
+            _guardia(nb)
     except Exception:
         pass
 
     return {
         "ok": not errori,
+        "paper": paper,
         "prezzo_corrente": round(prezzo, 5) if prezzo else None,
         "distanza_stop": round(distanza, 2) if distanza else None,
         "rischio_massimo": round(rischio_max, 2),
@@ -1833,7 +1855,8 @@ async def manual_trade_open(body: ManualTradeIn, db: Session = Depends(get_db)):
     """Apre a MERCATO un trade deciso dall'utente. Passa dallo stesso pipeline
     dei segnali Telegram (place_orders), quindi eredita sizing, guardia sul
     rischio, cap margine e guardie prop."""
-    if not mt5_trader._auto_trade_enabled:
+    paper = bool(body.paper)
+    if not paper and not mt5_trader._auto_trade_enabled:
         raise HTTPException(status_code=400, detail="Abilita prima l'auto-trading dalla Dashboard")
     prev = await asyncio.get_event_loop().run_in_executor(
         None, lambda: _manual_trade_preview(body, db))
@@ -1842,18 +1865,41 @@ async def manual_trade_open(body: ManualTradeIn, db: Session = Depends(get_db)):
     direction = body.direction.lower()
     prezzo = prev["prezzo_corrente"]
     tps = [body.tp1, body.tp2, body.tp3]
+    etichetta = "[MANUALE PAPER]" if paper else "[MANUALE]"
     sig = Signal(
         symbol=body.symbol.upper(), direction=direction,
         entry_price=prezzo, entry_price_high=prezzo,
         stoploss=body.stoploss, tp1=tps[0], tp2=tps[1], tp3=tps[2],
         status="pending",
-        raw_message=(f"[MANUALE] {body.symbol.upper()} {direction} a mercato "
+        raw_message=(f"{etichetta} {body.symbol.upper()} {direction} a mercato "
                      f"({prezzo}) SL={body.stoploss} "
                      f"TP={'/'.join(str(t) for t in tps if t)}"),
         created_at=datetime.utcnow(),
     )
     db.add(sig); db.commit(); db.refresh(sig)
     sig_id = sig.id
+
+    if paper:
+        # Nessun ordine sul broker: il trade nasce gia' "aperto" al prezzo
+        # corrente e la sua vita (TP/SL) la segue price_service sui prezzi
+        # reali, come per qualunque segnale filtrato.
+        sig.is_filtered = True
+        sig.filter_reason = "Trade manuale aperto in PAPER MODE (nessun ordine reale)"
+        sig.status = "open"
+        sig.actual_entry_price = prezzo
+        sig.entered_at = datetime.utcnow()
+        sig.position_size = prev["lotti_totali"]
+        sig.risk_usd = prev["rischio_massimo"]
+        mt5_trader._append_trade_log_mt5(sig, "manual_paper_open",
+            f"Trade manuale in PAPER MODE: {sig.symbol} {direction} simulato a "
+            f"{prezzo} con {prev['lotti_per_ticket']} lotti x {prev['n_ticket']} "
+            f"(rischio teorico {prev['rischio_stimato']}$). Nessun ordine inviato al broker.",
+            {"paper": True, "prezzo": prezzo, "lotti_totali": prev["lotti_totali"]})
+        db.add(sig); db.commit(); db.refresh(sig)
+        return {"ok": True, "paper": True, "signal_id": sig.id, "tickets": [],
+                "lotti_per_ticket": prev["lotti_per_ticket"],
+                "rischio_stimato": prev["rischio_stimato"],
+                "position_size": sig.position_size}
 
     def _run_place():
         from database import SessionLocal as _SL, Signal as _Sig
@@ -1877,7 +1923,7 @@ async def manual_trade_open(body: ManualTradeIn, db: Session = Depends(get_db)):
     if isinstance(result, dict) and "_error" in result:
         raise HTTPException(status_code=500, detail=f"Apertura fallita: {result['_error']}")
     db.refresh(sig)
-    return {"ok": bool(result), "signal_id": sig.id, "tickets": result,
+    return {"ok": bool(result), "paper": False, "signal_id": sig.id, "tickets": result,
             "lotti_per_ticket": prev["lotti_per_ticket"],
             "rischio_stimato": prev["rischio_stimato"],
             "position_size": sig.position_size}

@@ -206,3 +206,73 @@ class TestListaSimboli:
         nome logico (unico alias)."""
         from main import _canonical_alias
         assert _canonical_alias(["XAUUSD"], "GOLD") == "XAUUSD"
+
+
+class TestPaperMode:
+    """In paper non si manda nulla al broker: il trade viene registrato come
+    filtrato e la sua vita la simula price_service sui prezzi reali."""
+
+    def test_guardie_diventano_avvisi(self, prep, in_memory_db, monkeypatch):
+        """Kill-switch e news bloccano il REALE; in paper non c'e' denaro a
+        rischio, quindi avvisano soltanto."""
+        import prop_mode, news_filter
+        monkeypatch.setattr(prop_mode, "should_block_new_trades",
+                            lambda db=None: "Daily DD prospettico")
+        monkeypatch.setattr(news_filter, "entry_blocked",
+                            lambda **k: "News window attiva")
+        db = in_memory_db()
+        try:
+            reale = prep._manual_trade_preview(_Body(), db)
+            assert reale["ok"] is False and len(reale["errori"]) == 2
+
+            b = _Body(); b.paper = True
+            paper = prep._manual_trade_preview(b, db)
+            assert paper["ok"] is True
+            assert paper["paper"] is True
+            assert len(paper["errori"]) == 0
+            assert any("sarebbe bloccato" in a for a in paper["avvisi"])
+        finally:
+            db.close()
+
+    def test_lotti_identici_al_reale(self, prep, in_memory_db):
+        """Il dimensionamento non cambia: serve a simulare fedelmente."""
+        db = in_memory_db()
+        try:
+            b = _Body(); b.paper = True
+            paper = prep._manual_trade_preview(b, db)
+            reale = prep._manual_trade_preview(_Body(), db)
+            assert paper["lotti_per_ticket"] == reale["lotti_per_ticket"]
+            assert paper["rischio_stimato"] == reale["rischio_stimato"]
+        finally:
+            db.close()
+
+    def test_livelli_incoerenti_bloccano_anche_in_paper(self, prep, in_memory_db):
+        """Un BUY con stop sopra il prezzo e' un errore di input, non una
+        questione di rischio: va bloccato comunque."""
+        db = in_memory_db()
+        try:
+            b = _Body(stoploss=4500.0); b.paper = True
+            r = prep._manual_trade_preview(b, db)
+            assert r["ok"] is False
+            assert any("deve stare SOTTO" in e for e in r["errori"])
+        finally:
+            db.close()
+
+    def test_funziona_anche_con_mt5_spento(self, prep, in_memory_db, monkeypatch):
+        """Senza broker il paper usa comunque una quotazione per simulare."""
+        import mt5_trader, main
+        monkeypatch.setattr(mt5_trader, "is_enabled", lambda: False)
+        monkeypatch.setattr(main.ps, "get_current_price", lambda s: 4408.89)
+        db = in_memory_db()
+        try:
+            b = _Body(); b.paper = True
+            r = prep._manual_trade_preview(b, db)
+            assert r["ok"] is True
+            assert r["prezzo_corrente"] == 4408.89
+            assert r["lotti_per_ticket"] is not None
+
+            reale = prep._manual_trade_preview(_Body(), db)
+            assert reale["ok"] is False       # il reale invece si ferma
+            assert any("MT5 non disponibile" in e for e in reale["errori"])
+        finally:
+            db.close()

@@ -11,6 +11,7 @@ import { PlusCircle, AlertTriangle, TrendingUp, TrendingDown, Calculator, Activi
 export default function ManualTrade() {
   const [form, setForm] = useState({
     symbol: 'XAUUSD', direction: 'buy', stoploss: '', tp1: '', tp2: '', tp3: '',
+    paper: false,
   })
   const [symbols, setSymbols] = useState([])
   const [prev, setPrev] = useState(null)
@@ -56,6 +57,7 @@ export default function ManualTrade() {
     tp1: form.tp1 ? parseFloat(form.tp1) : null,
     tp2: form.tp2 ? parseFloat(form.tp2) : null,
     tp3: form.tp3 ? parseFloat(form.tp3) : null,
+    paper: form.paper,
   })
 
   const calcola = async () => {
@@ -81,7 +83,10 @@ export default function ManualTrade() {
     const riga = `${p.symbol} ${p.direction.toUpperCase()} a mercato\n` +
       `Stop ${p.stoploss} · Target ${[p.tp1, p.tp2, p.tp3].filter(Boolean).join(' / ')}\n` +
       `${prev?.lotti_per_ticket} lotti x ${prev?.n_ticket} ticket · rischio ~${prev?.rischio_stimato}$`
-    if (!confirm(`Aprire questo trade?\n\n${riga}`)) return
+    const titolo = form.paper
+      ? 'Aprire questo trade in PAPER MODE? (simulato, nessun ordine reale)'
+      : 'Aprire questo trade con denaro REALE?'
+    if (!confirm(`${titolo}\n\n${riga}`)) return
     setSending(true)
     try {
       const r = await fetch('/api/manual-trade', {
@@ -90,7 +95,9 @@ export default function ManualTrade() {
       })
       const d = await r.json()
       if (r.ok && d.ok) {
-        toast.success(`Trade #${d.signal_id} aperto: ${d.tickets?.length || 0} ticket`)
+        toast.success(d.paper
+          ? `Paper trade #${d.signal_id} avviato (simulato, nessun ordine reale)`
+          : `Trade #${d.signal_id} aperto: ${d.tickets?.length || 0} ticket`)
         setForm(f => ({ ...f, stoploss: '', tp1: '', tp2: '', tp3: '' }))
         setPrev(null)
       } else {
@@ -195,6 +202,16 @@ export default function ManualTrade() {
           ))}
         </div>
 
+        <label className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer border ${
+          form.paper ? 'bg-violet-900/25 border-violet-600/50' : 'bg-slate-800/40 border-slate-700'}`}>
+          <input type="checkbox" className="w-4 h-4 rounded" checked={form.paper}
+            onChange={e => set('paper', e.target.checked)} />
+          <span className="text-sm text-slate-200 font-medium">Paper mode</span>
+          <span className="text-xs text-slate-500">
+            nessun ordine reale: il trade viene simulato sui prezzi veri ed escluso dalle statistiche
+          </span>
+        </label>
+
         <button onClick={calcola} disabled={calcolando}
           className="w-full px-4 py-2.5 rounded-lg text-sm font-semibold bg-sky-600 hover:bg-sky-500 text-white disabled:opacity-50 flex items-center justify-center gap-2">
           <Calculator size={16} />
@@ -238,8 +255,12 @@ export default function ManualTrade() {
           )}
 
           <button onClick={apri} disabled={!prev.ok || sending || !prev.lotti_per_ticket}
-            className="mt-4 w-full px-4 py-2.5 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40 disabled:cursor-not-allowed">
-            {sending ? 'Apertura in corso...' : `Apri ${form.direction.toUpperCase()} a mercato`}
+            className={`mt-4 w-full px-4 py-2.5 rounded-lg text-sm font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed ${
+              form.paper ? 'bg-violet-600 hover:bg-violet-500' : 'bg-emerald-600 hover:bg-emerald-500'}`}>
+            {sending ? 'Apertura in corso...'
+              : form.paper
+                ? `Simula ${form.direction.toUpperCase()} (paper)`
+                : `Apri ${form.direction.toUpperCase()} a mercato`}
           </button>
           <p className="mt-2 text-[10px] text-slate-600 text-center">
             Il prezzo si muove: all'apertura il sistema ricalcola i lotti sul fill reale.
