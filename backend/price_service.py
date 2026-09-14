@@ -158,7 +158,16 @@ def get_ticks_mt5(symbol: str, since_utc: datetime, until_utc: Optional[datetime
     Il server XM usa EET (UTC+2): compensiamo l'offset automaticamente.
     """
     import pandas as pd
-    mt5_sym = MT5_MAP.get(symbol.upper())
+    # Mapping BROKER-AWARE come get_current_price_mt5: MT5_MAP e' la mappa XM
+    # (XAUUSD -> GOLD#) e su FTMO quel simbolo non esiste, quindi i tick
+    # tornavano sempre vuoti in silenzio.
+    try:
+        from mt5_trader import get_mt5_symbol
+        mt5_sym = get_mt5_symbol(symbol.upper(), default=None)
+    except Exception:
+        mt5_sym = None
+    if not mt5_sym:
+        mt5_sym = MT5_MAP.get(symbol.upper())
     if not mt5_sym:
         return None
     if not _mt5_init():
@@ -885,11 +894,26 @@ async def _check_open_signals():
                 prices[sym] = price
 
         now = datetime.utcnow()
+        # Escursione dei prezzi fra il giro precedente e questo: serve solo ai
+        # PAPER, per non perdere i livelli sfiorati fra due campionamenti.
+        # Calcolata una volta per simbolo, e solo se c'e' almeno un paper vivo.
+        ranges = {}
+        if any(getattr(s, "is_filtered", False) for s in signals):
+            for sym in symbols:
+                r = await asyncio.get_event_loop().run_in_executor(
+                    None, range_dal_check_precedente, sym, now)
+                if r:
+                    ranges[sym] = r
+        else:
+            for sym in symbols:      # tieni comunque aggiornato il riferimento
+                _ultimo_campionamento[sym.upper()] = now
+
         for sig in signals:
             price = prices.get(sig.symbol.upper())
             if price is None:
                 continue
-            _update_realtime(db, sig, price, now)
+            _update_realtime(db, sig, price, now,
+                             price_range=ranges.get(sig.symbol.upper()))
 
     finally:
         db.close()
@@ -904,6 +928,38 @@ def _auto_be_enabled(sig) -> bool:
         return bool(get_risk_settings().get("be_at_tp1_enabled", True))
     except Exception:
         return True
+
+
+# Ultimo istante campionato per simbolo: serve a coprire il buco fra un giro
+# del monitor e il successivo.
+_ultimo_campionamento = {}
+
+
+def range_dal_check_precedente(symbol: str, now: datetime):
+    """Minimo e massimo REALMENTE toccati dal simbolo fra il giro precedente
+    del monitor e adesso. Ritorna (minimo, massimo) o None.
+
+    Serve ai PAPER trade: il monitor guarda il prezzo ogni 15 secondi, quindi
+    un target sfiorato per pochi secondi passava inosservato (caso #752, 14/09:
+    il TP2 4305 e' stato toccato a 4305.08 per 3 secondi e la simulazione e'
+    rimasta ferma a TP1). Un trade reale non ne soffre: il take-profit sta sul
+    broker e si riempie su qualunque tick. Guardando l'escursione dell'intervallo
+    la simulazione diventa fedele. Mai solleva: None = si usa il prezzo puntuale."""
+    prec = _ultimo_campionamento.get(symbol.upper())
+    _ultimo_campionamento[symbol.upper()] = now
+    if prec is None:
+        return None
+    finestra = (now - prec).total_seconds()
+    if finestra <= 0 or finestra > 600:      # oltre 10 min: riavvio, non fidarsi
+        return None
+    try:
+        df = get_ticks_mt5(symbol, prec, now)
+        if df is None or df.empty:
+            return None
+        return float(df["bid"].min()), float(df["bid"].max())
+    except Exception as e:
+        log(f"[Monitor] range tick {symbol}: {str(e)[:80]}")
+        return None
 
 
 def _append_event(sig, event: str, price: float, ts: datetime):
@@ -922,8 +978,14 @@ def _append_event(sig, event: str, price: float, ts: datetime):
     sig.trade_log = _json.dumps(log_list)
 
 
-def _update_realtime(db, sig: Signal, price: float, now: datetime):
-    """State machine real-time per un singolo segnale."""
+def _update_realtime(db, sig: Signal, price: float, now: datetime,
+                     price_range=None):
+    """State machine real-time per un singolo segnale.
+
+    price_range: (minimo, massimo) toccati dall'ultimo giro del monitor. Usato
+    SOLO per i paper: il monitor campiona ogni 15s e un livello sfiorato per
+    pochi secondi sfuggiva (#752). Sui reali decide il broker, quindi resta il
+    prezzo puntuale."""
     # Segnali MT5: stato autorevole da sync_positions, non toccare
     if sig.mt5_ticket or sig.mt5_tickets:
         return
@@ -932,6 +994,16 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
     if sig.closed_at is not None:
         return
     is_paper = bool(getattr(sig, "is_filtered", False))
+    # Estremi usati nei confronti: sui paper l'escursione dell'intervallo (cosi'
+    # un tocco di 3 secondi non sfugge), sui reali il prezzo puntuale.
+    _lo, _hi = (price_range if (is_paper and price_range) else (price, price))
+
+    def _tocca_sopra(livello):   # il prezzo e' salito fino a `livello`
+        return _hi >= livello
+
+    def _tocca_sotto(livello):   # il prezzo e' sceso fino a `livello`
+        return _lo <= livello
+
     # Segnali senza ticket con MT5 abilitato: sono stati rigettati/mancati, non trackare.
     # ECCEZIONE: signal filtrati (is_filtered=True) — noi NON li abbiamo piazzati apposta,
     # ma vogliamo simularne il lifecycle come paper trade.
@@ -995,7 +1067,7 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
     # SL check — solo su segnali "open" (non su TP parziali già in profitto)
     # Una volta raggiunto un TP, l'SL non può retrocedere il risultato
     if sig.status == "open" and sig.stoploss:
-        if (is_buy and price <= sig.stoploss) or (not is_buy and price >= sig.stoploss):
+        if (is_buy and _tocca_sotto(sig.stoploss)) or (not is_buy and _tocca_sopra(sig.stoploss)):
             sig.status = "sl_hit"
             sig.exit_price = sig.stoploss  # fill at SL level, not at detected price
             sig.closed_at = now
@@ -1014,7 +1086,7 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
     # sotto, floating -165$ senza fine). Chiudi il residuo allo SL: status
     # resta tpN (parziale incassato), closed_at settato.
     if is_paper and sig.status in ("tp1", "tp2") and sig.stoploss:
-        if (is_buy and price <= sig.stoploss) or (not is_buy and price >= sig.stoploss):
+        if (is_buy and _tocca_sotto(sig.stoploss)) or (not is_buy and _tocca_sopra(sig.stoploss)):
             sig.exit_price = sig.stoploss
             sig.closed_at = now
             sig.updated_at = now
@@ -1030,7 +1102,7 @@ def _update_realtime(db, sig: Signal, price: float, now: datetime):
     for tp_num, tp_price in tps:
         if tp_price is None:
             continue
-        hit = (is_buy and price >= tp_price) or (not is_buy and price <= tp_price)
+        hit = (is_buy and _tocca_sopra(tp_price)) or (not is_buy and _tocca_sotto(tp_price))
         if hit:
             current = {"tp1": 1, "tp2": 2, "tp3": 3, "open": 0}.get(sig.status, 0)
             if tp_num > current:
