@@ -188,3 +188,21 @@ class TestGuardie:
             assert any("MT5 non disponibile" in e for e in r["errori"])
         finally:
             db.close()
+
+
+class TestListaSimboli:
+    def test_alias_canonico(self):
+        """Fra piu' nomi che puntano allo stesso simbolo del broker si sceglie
+        quello piu' vicino al nome broker: US100.cash -> 'US100', non 'USTECH'."""
+        from main import _canonical_alias
+        assert _canonical_alias(
+            ["USTECH", "US100", "NAS100", "NASDAQ"], "US100.cash") == "US100"
+        assert _canonical_alias(["USOIL", "OIL", "WTI"], "USOIL.cash") == "USOIL"
+        assert _canonical_alias(["UKOIL", "BRENT"], "UKOIL.cash") == "UKOIL"
+        assert _canonical_alias(["XAUUSD"], "XAUUSD") == "XAUUSD"
+
+    def test_alias_senza_prefisso_comune(self):
+        """Su AvaTrade XAUUSD -> GOLD: nessun prefisso in comune, si tiene il
+        nome logico (unico alias)."""
+        from main import _canonical_alias
+        assert _canonical_alias(["XAUUSD"], "GOLD") == "XAUUSD"

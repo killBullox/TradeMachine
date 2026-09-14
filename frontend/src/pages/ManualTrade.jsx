@@ -1,45 +1,80 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import toast from 'react-hot-toast'
-import { PlusCircle, AlertTriangle, TrendingUp, TrendingDown } from 'lucide-react'
+import { PlusCircle, AlertTriangle, TrendingUp, TrendingDown, Calculator, Activity } from 'lucide-react'
 
 /**
- * Apertura manuale di un trade: si scelgono direzione, stop e target, il
- * sistema calcola i lotti dal rischio configurato e apre a mercato passando
- * dallo stesso pipeline dei segnali Telegram (quindi eredita la guardia sul
- * rischio, il cap margine e le guardie prop).
+ * Apertura manuale di un trade: si scelgono simbolo, direzione, stop e target,
+ * si preme "Calcola lotti" e il sistema mostra quanti lotti userebbe e quanto
+ * si rischia. L'apertura e' a mercato e passa dallo stesso pipeline dei segnali
+ * Telegram, quindi eredita guardia sul rischio, cap margine e guardie prop.
  */
 export default function ManualTrade() {
   const [form, setForm] = useState({
     symbol: 'XAUUSD', direction: 'buy', stoploss: '', tp1: '', tp2: '', tp3: '',
   })
+  const [symbols, setSymbols] = useState([])
   const [prev, setPrev] = useState(null)
+  const [calcolando, setCalcolando] = useState(false)
   const [sending, setSending] = useState(false)
+  // Prezzo live del simbolo selezionato
+  const [live, setLive] = useState({ price: null, at: null, prev: null })
+  const prezzoPrec = useRef(null)
 
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  const set = (k, v) => {
+    setForm(f => ({ ...f, [k]: v }))
+    setPrev(null)          // un input cambiato invalida il calcolo precedente
+  }
 
-  const payload = useCallback(() => ({
+  useEffect(() => {
+    fetch('/api/manual-trade/symbols').then(r => r.json())
+      .then(d => setSymbols(d.symbols || [])).catch(() => {})
+  }, [])
+
+  // Indicatore di prezzo il piu' reattivo possibile: aggiornamento ogni secondo
+  // sul simbolo selezionato, con evidenza del movimento (verde sale, rosso scende).
+  useEffect(() => {
+    let vivo = true
+    const tick = () => {
+      fetch(`/api/price/${form.symbol}`).then(r => r.ok ? r.json() : null)
+        .then(d => {
+          if (!vivo || !d?.price) return
+          setLive({ price: d.price, at: new Date(), prev: prezzoPrec.current })
+          prezzoPrec.current = d.price
+        }).catch(() => {})
+    }
+    prezzoPrec.current = null
+    setLive({ price: null, at: null, prev: null })
+    tick()
+    const t = setInterval(tick, 1000)
+    return () => { vivo = false; clearInterval(t) }
+  }, [form.symbol])
+
+  const payload = () => ({
     symbol: form.symbol.trim().toUpperCase(),
     direction: form.direction,
-    stoploss: parseFloat(form.stoploss),
+    stoploss: form.stoploss ? parseFloat(form.stoploss) : null,
     tp1: form.tp1 ? parseFloat(form.tp1) : null,
     tp2: form.tp2 ? parseFloat(form.tp2) : null,
     tp3: form.tp3 ? parseFloat(form.tp3) : null,
-  }), [form])
+  })
 
-  // Anteprima continua: appena stop e almeno un target sono validi, il
-  // backend ricalcola lotti, rischio e problemi.
-  useEffect(() => {
+  const calcola = async () => {
     const p = payload()
-    if (!p.stoploss || !(p.tp1 || p.tp2 || p.tp3)) { setPrev(null); return }
-    let vivo = true
-    const t = setTimeout(() => {
-      fetch('/api/manual-trade/preview', {
+    if (!p.stoploss) { toast.error('Inserisci lo stop loss'); return }
+    if (!(p.tp1 || p.tp2 || p.tp3)) { toast.error('Inserisci almeno un target'); return }
+    setCalcolando(true)
+    try {
+      const d = await fetch('/api/manual-trade/preview', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(p),
-      }).then(r => r.json()).then(d => { if (vivo) setPrev(d) }).catch(() => {})
-    }, 400)
-    return () => { vivo = false; clearTimeout(t) }
-  }, [payload])
+      }).then(r => r.json())
+      setPrev(d)
+    } catch (e) {
+      toast.error(`Errore di rete: ${e.message}`)
+    } finally {
+      setCalcolando(false)
+    }
+  }
 
   const apri = async () => {
     const p = payload()
@@ -70,6 +105,9 @@ export default function ManualTrade() {
 
   const buy = form.direction === 'buy'
   const campo = 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-slate-500'
+  const salito = live.prev != null && live.price != null && live.price > live.prev
+  const sceso = live.prev != null && live.price != null && live.price < live.prev
+  const decimali = form.symbol.includes('JPY') ? 3 : (live.price > 1000 ? 2 : 5)
 
   return (
     <div className="p-6 space-y-6 max-w-3xl">
@@ -81,12 +119,39 @@ export default function ManualTrade() {
         configurato e dalla distanza dello stop, divisi fra i target indicati.
       </p>
 
+      {/* Prezzo live */}
+      <div className="card p-4 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-xs text-slate-400 uppercase tracking-wider">
+          <Activity size={14} className={live.price ? 'text-emerald-400' : 'text-slate-600'} />
+          {form.symbol} · prezzo corrente
+        </div>
+        <div className="text-right">
+          <div className={`text-2xl font-bold font-mono tabular-nums transition-colors ${
+            salito ? 'text-emerald-400' : sceso ? 'text-rose-400' : 'text-white'}`}>
+            {live.price != null ? live.price.toFixed(decimali) : '—'}
+            {salito && <span className="text-sm ml-1">▲</span>}
+            {sceso && <span className="text-sm ml-1">▼</span>}
+          </div>
+          <div className="text-[10px] text-slate-600">
+            {live.at ? `aggiornato ${live.at.toLocaleTimeString('it-IT')}` : 'in attesa...'}
+          </div>
+        </div>
+      </div>
+
       <div className="card p-5 space-y-4">
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-xs text-slate-400 mb-1">Simbolo</label>
-            <input className={campo} value={form.symbol}
-              onChange={e => set('symbol', e.target.value)} />
+            <select className={campo} value={form.symbol}
+              onChange={e => set('symbol', e.target.value)}>
+              {symbols.length === 0 && <option value={form.symbol}>{form.symbol}</option>}
+              {symbols.map(s => (
+                <option key={s.broker_symbol} value={s.simbolo} disabled={!s.disponibile}>
+                  {s.simbolo}{s.simbolo !== s.broker_symbol ? ` (${s.broker_symbol})` : ''}
+                  {!s.disponibile ? ' — non quotato' : ''}
+                </option>
+              ))}
+            </select>
           </div>
           <div>
             <label className="block text-xs text-slate-400 mb-1">Operazione</label>
@@ -113,7 +178,8 @@ export default function ManualTrade() {
             </span>
           </label>
           <input className={campo} type="number" step="any" value={form.stoploss}
-            onChange={e => set('stoploss', e.target.value)} placeholder="es. 4402" />
+            onChange={e => set('stoploss', e.target.value)}
+            placeholder={live.price ? (buy ? (live.price - 5).toFixed(decimali) : (live.price + 5).toFixed(decimali)) : 'es. 4290'} />
         </div>
 
         <div className="grid grid-cols-3 gap-3">
@@ -128,6 +194,12 @@ export default function ManualTrade() {
             </div>
           ))}
         </div>
+
+        <button onClick={calcola} disabled={calcolando}
+          className="w-full px-4 py-2.5 rounded-lg text-sm font-semibold bg-sky-600 hover:bg-sky-500 text-white disabled:opacity-50 flex items-center justify-center gap-2">
+          <Calculator size={16} />
+          {calcolando ? 'Calcolo...' : 'Calcola lotti'}
+        </button>
       </div>
 
       {prev && (
@@ -136,7 +208,7 @@ export default function ManualTrade() {
             Calcolo del lotto
           </h2>
           <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-            <Riga k="Prezzo corrente" v={prev.prezzo_corrente} />
+            <Riga k="Prezzo usato nel calcolo" v={prev.prezzo_corrente} />
             <Riga k="Distanza dallo stop" v={prev.distanza_stop != null ? `${prev.distanza_stop}$` : null} />
             <Riga k="Lotti per ticket" v={prev.lotti_per_ticket} forte />
             <Riga k="Ticket" v={prev.n_ticket} />
@@ -169,6 +241,9 @@ export default function ManualTrade() {
             className="mt-4 w-full px-4 py-2.5 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40 disabled:cursor-not-allowed">
             {sending ? 'Apertura in corso...' : `Apri ${form.direction.toUpperCase()} a mercato`}
           </button>
+          <p className="mt-2 text-[10px] text-slate-600 text-center">
+            Il prezzo si muove: all'apertura il sistema ricalcola i lotti sul fill reale.
+          </p>
         </div>
       )}
     </div>

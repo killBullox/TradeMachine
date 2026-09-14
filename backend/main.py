@@ -1768,6 +1768,59 @@ def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
     }
 
 
+def _canonical_alias(aliases: list, broker_symbol: str) -> str:
+    """Fra piu' nomi logici che puntano allo stesso simbolo del broker (es.
+    USTECH/US100/NAS100/NASDAQ -> US100.cash) sceglie quello piu' vicino al
+    nome del broker, cosi' nel menu compare 'US100' e non 'USTECH'."""
+    bs = (broker_symbol or "").upper()
+    def affinita(a):
+        a = a.upper()
+        comune = 0
+        for x, y in zip(a, bs):
+            if x != y:
+                break
+            comune += 1
+        return (comune, -len(a))
+    return sorted(aliases, key=affinita, reverse=True)[0]
+
+
+@app.get("/api/manual-trade/symbols")
+async def manual_trade_symbols():
+    """Simboli selezionabili per il trade manuale: quelli mappati per il broker
+    attivo, con indicazione di quali sono davvero quotabili adesso."""
+    def _lavora():
+        try:
+            mappa = dict(mt5_trader.MT5_SYMBOL_MAP)
+        except Exception:
+            mappa = {}
+        # raggruppa gli alias che puntano allo stesso simbolo del broker
+        per_broker = {}
+        for logico, broker in mappa.items():
+            per_broker.setdefault(broker, []).append(logico)
+        mt5 = mt5_trader._get_mt5() if mt5_trader.is_enabled() else None
+        out = []
+        for broker, alias in per_broker.items():
+            nome = _canonical_alias(alias, broker)
+            voce = {"simbolo": nome, "broker_symbol": broker,
+                    "disponibile": mt5 is None, "prezzo": None}
+            if mt5:
+                try:
+                    info = mt5.symbol_info(broker)
+                    if info is not None:
+                        if not info.visible:
+                            mt5.symbol_select(broker, True)
+                        tick = mt5.symbol_info_tick(broker)
+                        if tick and tick.ask:
+                            voce["disponibile"] = True
+                            voce["prezzo"] = float(tick.ask)
+                except Exception:
+                    pass
+            out.append(voce)
+        out.sort(key=lambda v: (not v["disponibile"], v["simbolo"]))
+        return {"symbols": out, "mt5_attivo": mt5 is not None}
+    return await asyncio.get_event_loop().run_in_executor(None, _lavora)
+
+
 @app.post("/api/manual-trade/preview")
 async def manual_trade_preview(body: ManualTradeIn, db: Session = Depends(get_db)):
     """Anteprima: quanto rischio, quanti lotti, quali problemi. Non piazza nulla."""
