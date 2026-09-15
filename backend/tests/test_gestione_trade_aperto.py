@@ -253,3 +253,69 @@ class TestNessunDoppioDimezzamento:
         i_scelto = testo.index("_scelto = getattr(sig")
         i_risky = testo.index("if getattr(sig, 'is_risky', False):\n        risk_usd *= 0.5")
         assert i_scelto < i_risky
+
+
+class TestComandiSuiPaper:
+    """Un trade manuale in paper non ha ticket MT5: prima i comandi della tile
+    (lock profit, chiudi trade) non facevano nulla."""
+
+    def test_lock_profit_sposta_lo_stop(self, in_memory_db, fake_mt5, client, monkeypatch):
+        import price_service as ps
+        db = in_memory_db()
+        try:
+            s = _paper(db)
+        finally:
+            db.close()
+        monkeypatch.setattr(ps, "get_current_price", lambda sym: 4295.0)
+        r = client.post(f"/api/mt5/lock-profit/{s.id}").json()
+        assert r["ok"] is True and r["paper"] is True and r["rule"] == "BE+1pip"
+        from database import SessionLocal, Signal
+        db2 = SessionLocal()
+        try:
+            agg = db2.query(Signal).filter(Signal.id == s.id).first()
+            assert agg.stoploss > 4290.0       # BE + 1 pip sopra l'ingresso
+        finally:
+            db2.close()
+
+    def test_lock_profit_a_tp1_dopo_due_target(self, in_memory_db, fake_mt5,
+                                               client, monkeypatch):
+        import price_service as ps
+        db = in_memory_db()
+        try:
+            s = _paper(db, status="tp2")
+            eventi = json.loads(s.trade_log)
+            eventi += [{"ts": "a", "event": "tp1", "price": 4300.0},
+                       {"ts": "b", "event": "tp2", "price": 4310.0}]
+            s.trade_log = json.dumps(eventi); db.commit()
+            sid = s.id          # letto prima della chiusura della sessione
+        finally:
+            db.close()
+        monkeypatch.setattr(ps, "get_current_price", lambda sym: 4312.0)
+        r = client.post(f"/api/mt5/lock-profit/{sid}").json()
+        assert r["ok"] is True and r["rule"] == "TP1" and r["new_sl"] == 4300.0
+
+    def test_chiudi_trade_paper(self, in_memory_db, fake_mt5, client, monkeypatch):
+        import price_service as ps
+        db = in_memory_db()
+        try:
+            s = _paper(db)
+        finally:
+            db.close()
+        monkeypatch.setattr(ps, "get_current_price", lambda sym: 4297.0)
+        r = client.post(f"/api/mt5/close_signal/{s.id}").json()
+        assert r["ok"] is True and r["paper"] is True and r["exit_price"] == 4297.0
+        from database import SessionLocal, Signal
+        db2 = SessionLocal()
+        try:
+            agg = db2.query(Signal).filter(Signal.id == s.id).first()
+            assert agg.status == "closed" and agg.closed_at is not None
+            assert agg.pnl_usd is not None and agg.pnl_usd > 0
+        finally:
+            db2.close()
+
+    def test_la_tile_mostra_i_comandi_ai_paper(self):
+        """Senza is_filtered nella condizione il blocco resta invisibile."""
+        from pathlib import Path
+        jsx = (Path(__file__).resolve().parents[2] / "frontend" / "src" /
+               "components" / "TradeCard.jsx").read_text(encoding="utf-8", errors="replace")
+        assert "{(tickets.length > 0 || sig.is_filtered || sig.status === 'pending') && (" in jsx

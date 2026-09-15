@@ -2525,6 +2525,37 @@ async def mt5_lock_profit(signal_id: int, db: Session = Depends(get_db)):
     if tp_hit >= 3:
         return {"ok": False, "error": "Trade gia' chiuso a TP3"}
 
+    # PAPER: stessa regola, ma senza broker — si scrive lo stop sul segnale e
+    # il monitor lo rispettera' come qualunque altro livello.
+    if getattr(sig, "is_filtered", False):
+        import risk as _risk
+        import price_service as _ps
+        pip = _risk.get_spec(sig.symbol)["pip"]
+        nuovo_sl = round(entry + pip, 5) if is_buy else round(entry - pip, 5)
+        regola = "BE+1pip"
+        if tp_hit == 2 and sig.tp1:
+            try:
+                prezzo = _ps.get_current_price(sig.symbol.upper())
+            except Exception:
+                prezzo = None
+            oltre_tp1 = prezzo is not None and (
+                (is_buy and prezzo > float(sig.tp1)) or
+                (not is_buy and prezzo < float(sig.tp1)))
+            if oltre_tp1:
+                nuovo_sl = float(sig.tp1)
+                regola = "TP1"
+        vecchio = sig.stoploss
+        sig.stoploss = nuovo_sl
+        sig.updated_at = datetime.utcnow()
+        mt5_trader._append_trade_log_mt5(sig, "lock_profit",
+            f"Lock profit (paper): SL {vecchio} -> {nuovo_sl} ({regola}, "
+            f"{tp_hit} target raggiunti)",
+            {"old_sl": vecchio, "new_sl": nuovo_sl, "rule": regola, "paper": True})
+        _ps._recalc_paper(sig)
+        db.add(sig); db.commit()
+        return {"ok": True, "paper": True, "new_sl": nuovo_sl, "rule": regola,
+                "tp_hit": tp_hit}
+
     def _do():
         mt5 = mt5_trader._get_mt5()
         if not mt5:
@@ -2817,6 +2848,26 @@ async def mt5_close_signal(signal_id: int, db: Session = Depends(get_db)):
             tickets = [sig.mt5_ticket]
     except Exception:
         pass
+    if getattr(sig, "is_filtered", False):
+        # PAPER: nessun ordine da chiudere sul broker. Si registra l'uscita al
+        # prezzo corrente e il trade si chiude, come farebbe il monitor.
+        import price_service as _ps
+        try:
+            prezzo = _ps.get_current_price(sig.symbol.upper())
+        except Exception:
+            prezzo = None
+        if not prezzo:
+            return {"ok": False, "error": "Nessuna quotazione disponibile"}
+        _ps._append_event(sig, "closed", float(prezzo), datetime.utcnow())
+        sig.status = "closed"
+        sig.exit_price = float(prezzo)
+        sig.closed_at = datetime.utcnow()
+        sig.updated_at = datetime.utcnow()
+        sig.notes = (sig.notes or "") + f" [Chiusura manuale paper a {prezzo}]"
+        _ps._recalc_paper(sig)
+        db.add(sig); db.commit(); db.refresh(sig)
+        return {"ok": True, "paper": True, "exit_price": prezzo, "pnl": sig.pnl_usd,
+                "results": []}
     if not tickets:
         return {"ok": True, "results": [], "note": "Nessun ticket MT5 associato"}
 

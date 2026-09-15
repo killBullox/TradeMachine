@@ -89,7 +89,7 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
     try {
       const r = await fetch(`/api/mt5/lock-profit/${sig.id}`, { method: 'POST' }).then(r => r.json())
       if (r.ok) {
-        toast.success(`#${sig.id}: SL -> ${r.new_sl} (${r.rule})`)
+        toast.success(`#${sig.id}: SL -> ${r.new_sl} (${r.rule})${r.paper ? ' · paper' : ''}`)
         onClose?.()
       } else {
         toast.error(`Errore: ${r.error || 'lock profit fallito'}`)
@@ -226,7 +226,9 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
     try {
       const r = await fetch(`/api/mt5/close_signal/${sig.id}`, { method: 'POST' }).then(r => r.json())
       if (r.ok) {
-        toast.success(`Trade #${sig.id} chiuso`)
+        toast.success(r.paper
+          ? `Trade #${sig.id} chiuso a ${r.exit_price} · P&L ${r.pnl >= 0 ? '+' : ''}${r.pnl}$`
+          : `Trade #${sig.id} chiuso`)
         onClose?.()
       } else {
         await fetch('/api/mt5/sync', { method: 'POST' })
@@ -317,7 +319,7 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
       )}
 
       {/* Trail toggle + Lock profit + Close buttons */}
-      {(tickets.length > 0 || sig.status === 'pending') && (
+      {(tickets.length > 0 || sig.is_filtered || sig.status === 'pending') && (
         <div className="space-y-2 mt-1">
           {/* Trail stop toggle (solo se trade aperto) */}
           {sig.status !== 'pending' && (
@@ -364,7 +366,7 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
             <>
               <button
                 onClick={handleLockProfit}
-                disabled={locking || closing || !sig.actual_entry_price}
+                disabled={locking || closing || closingNext || !(sig.actual_entry_price || sig.entry_price)}
                 className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/70 hover:text-emerald-200 transition-colors disabled:opacity-50"
                 title="0/1 TP raggiunti: SL = BE+1 pip · 2 TP raggiunti, prezzo oltre TP1: SL = TP1"
               >
