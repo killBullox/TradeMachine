@@ -49,6 +49,10 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
   const [closing, setClosing] = useState(false)
   const [locking, setLocking] = useState(false)
   const [closingNext, setClosingNext] = useState(false)
+  const [pannello, setPannello] = useState(null)     // 'livelli' | null
+  const [stato, setStato] = useState(null)           // prezzo e lotti residui
+  const [salvando, setSalvando] = useState(false)
+  const [form, setForm] = useState({})
   const [trailBusy, setTrailBusy] = useState(false)
 
   // Trail stop effettivo: override per-trade se valorizzato, altrimenti
@@ -103,9 +107,11 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
     if (!confirm(`Chiudere il prossimo ticket di #${sig.id} ${sig.symbol}? Gli altri restano aperti.`)) return
     setClosingNext(true)
     try {
-      const r = await fetch(`/api/mt5/close-next-ticket/${sig.id}`, { method: 'POST' }).then(r => r.json())
+      const r = await fetch(`/api/trades/${sig.id}/chiudi-prossimo-lotto`, { method: 'POST' }).then(r => r.json())
       if (r.ok) {
-        toast.success(`#${sig.id}: chiuso ticket TP${r.tp_level} (${r.tp ?? '—'}) · ${r.rimasti} ancora aperti`)
+        toast.success(r.paper
+          ? `#${sig.id}: chiusi ${r.lotti_chiusi} lotti a ${r.prezzo} · residui ${r.lotti_residui}`
+          : `#${sig.id}: chiuso ticket TP${r.tp_level} (${r.tp ?? '—'}) · ${r.rimasti} ancora aperti`)
         onClose?.()
       } else {
         toast.error(`Errore: ${r.error || 'chiusura fallita'}`)
@@ -115,6 +121,34 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
     } finally {
       setClosingNext(false)
     }
+  }
+
+  const apriPannello = async (quale) => {
+    if (pannello === quale) { setPannello(null); return }
+    try {
+      const st = await fetch(`/api/trades/${sig.id}/stato-posizione`).then(r => r.json())
+      setStato(st)
+      setForm({ stoploss: sig.stoploss ?? '', tp1: sig.tp1 ?? '', tp2: sig.tp2 ?? '', tp3: sig.tp3 ?? '' })
+      setPannello(quale)
+    } catch { toast.error('Errore nel leggere lo stato della posizione') }
+  }
+
+  const salvaLivelli = async () => {
+    setSalvando(true)
+    try {
+      const body = {}
+      for (const k of ['stoploss', 'tp1', 'tp2', 'tp3']) {
+        if (form[k] !== '' && form[k] != null) body[k] = parseFloat(form[k])
+      }
+      const r = await fetch(`/api/trades/${sig.id}/modifica-livelli`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(r => r.json())
+      if (r.ok) {
+        toast.success(`#${sig.id}: livelli aggiornati${r.ticket_aggiornati ? ` (${r.ticket_aggiornati} ticket)` : ''}`)
+        setPannello(null); onClose?.()
+      } else toast.error(r.error || 'Modifica rifiutata')
+    } catch { toast.error('Errore di rete') } finally { setSalvando(false) }
   }
 
   let tickets = []
@@ -336,16 +370,54 @@ export default function TradeCard({ sig, positions, currentPrice, onClose, globa
               >
                 {locking ? 'Lock profit...' : '🔒 Lock profit'}
               </button>
-              {tickets.length > 1 && (
+              {(tickets.length > 1 || sig.is_filtered) && (
                 <button
                   onClick={handleCloseNextTicket}
-                  disabled={closing || locking || closingNext}
+                  disabled={closing || locking || closingNext || salvando}
                   className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-900/40 text-amber-300 hover:bg-amber-900/70 hover:text-amber-200 transition-colors disabled:opacity-50"
-                  title="Chiude solo il ticket col target piu' vicino al prezzo. Gli altri restano aperti."
+                  title="Chiude una sola fetta di posizione: sui reali il ticket col target piu' vicino, sui paper un lotto. Il resto continua."
                 >
-                  {closingNext ? 'Chiusura...' : '↧ Chiudi prossimo ticket'}
+                  {closingNext ? 'Chiusura...' : '↧ Chiudi prossimo lotto'}
                 </button>
               )}
+              <button
+                onClick={() => apriPannello('livelli')}
+                disabled={closing || locking || closingNext}
+                className="w-full px-3 py-1.5 rounded-lg text-xs font-medium bg-sky-900/40 text-sky-300 hover:bg-sky-900/70 hover:text-sky-200 transition-colors disabled:opacity-50"
+                title="Cambia stop e target sui ticket ancora aperti."
+              >
+                ✎ Modifica stop / target
+              </button>
+
+              {pannello === 'livelli' && (
+                <div className="bg-slate-900/70 border border-sky-800/40 rounded-lg p-2 space-y-2">
+                  <p className="text-[11px] text-slate-400">
+                    Modifica dei livelli sui ticket aperti. Lasciando un campo vuoto quel livello resta com'è.
+                    {stato?.prezzo != null && <> Prezzo ora: <span className="font-mono text-slate-200">{stato.prezzo}</span>.</>}
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {['stoploss', 'tp1', 'tp2', 'tp3'].map(k => (
+                      <label key={k} className="text-[11px] text-slate-400">
+                        {k === 'stoploss' ? 'Stop loss' : k.toUpperCase()}
+                        <input type="number" step="any" value={form[k] ?? ''}
+                          onChange={e => setForm(f => ({ ...f, [k]: e.target.value }))}
+                          className="w-full mt-0.5 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-100 text-xs font-mono" />
+                      </label>
+                    ))}
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={salvaLivelli} disabled={salvando}
+                      className="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-sky-700 text-white hover:bg-sky-600 disabled:opacity-50">
+                      {salvando ? 'Salvataggio...' : 'Applica'}
+                    </button>
+                    <button onClick={() => setPannello(null)}
+                      className="px-3 py-1.5 rounded-lg text-xs bg-slate-700 text-slate-300 hover:bg-slate-600">
+                      Annulla
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <button
                 onClick={handleClose}
                 disabled={closing || locking || closingNext}

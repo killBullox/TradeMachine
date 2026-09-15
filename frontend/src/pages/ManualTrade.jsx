@@ -11,7 +11,7 @@ import { PlusCircle, AlertTriangle, TrendingUp, TrendingDown, Calculator, Activi
 export default function ManualTrade() {
   const [form, setForm] = useState({
     symbol: 'XAUUSD', direction: 'buy', stoploss: '', tp1: '', tp2: '', tp3: '',
-    paper: false,
+    paper: false, rischio_usd: '',
   })
   const [symbols, setSymbols] = useState([])
   const [prev, setPrev] = useState(null)
@@ -58,6 +58,7 @@ export default function ManualTrade() {
     tp2: form.tp2 ? parseFloat(form.tp2) : null,
     tp3: form.tp3 ? parseFloat(form.tp3) : null,
     paper: form.paper,
+    rischio_usd: form.rischio_usd ? parseFloat(form.rischio_usd) : null,
   })
 
   const calcola = async () => {
@@ -200,6 +201,24 @@ export default function ManualTrade() {
                 placeholder={i === 0 ? 'obbligatorio' : 'opzionale'} />
             </div>
           ))}
+        </div>
+
+        <div>
+          <label className="block text-xs text-slate-400 mb-1">
+            Rischio per questo trade{' '}
+            <span className="text-slate-500">
+              (opzionale{prev?.rischio_configurato ? ` · massimo ${prev.rischio_configurato}$` : ''} · solo in diminuzione)
+            </span>
+          </label>
+          <input className={campo} type="number" step="any" value={form.rischio_usd}
+            onChange={e => set('rischio_usd', e.target.value)}
+            placeholder={prev?.rischio_configurato
+              ? `vuoto = ${prev.rischio_configurato}$ (massimo configurato)`
+              : 'vuoto = massimo configurato nelle Impostazioni'} />
+          <p className="text-[11px] text-slate-500 mt-1">
+            Abbassandolo entri con meno lotti: il calcolo divide questo importo per la
+            distanza dello stop. Non puoi superare il massimo delle Impostazioni.
+          </p>
         </div>
 
         <label className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer border ${

@@ -1356,6 +1356,23 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     from risk import get_risk_settings, calc_risk_amount, calc_position_size, get_spec
     settings  = get_risk_settings()
     risk_usd  = calc_risk_amount(settings)
+    # Rischio scelto per il singolo trade, SOLO per i trade manuali: vale solo
+    # se e' MINORE del massimo configurato — si puo' entrare piu' leggeri, mai
+    # piu' pesanti del limite generale.
+    # Il filtro sul trade manuale e' necessario: su un segnale Telegram il campo
+    # risk_usd puo' essere gia' stato scritto da recalculate_signal (dimezzato
+    # sui segnali "risky"), e rileggerlo qui lo dimezzerebbe una seconda volta.
+    _manuale = str(getattr(sig, "raw_message", "") or "").startswith("[MANUALE")
+    _scelto = getattr(sig, "risk_usd", None) if _manuale else None
+    if _scelto:
+        try:
+            _scelto = float(_scelto)
+            if 0 < _scelto < risk_usd:
+                log(f"#{sig.id} rischio ridotto per questo trade: "
+                    f"${_scelto:.2f} invece di ${risk_usd:.2f}")
+                risk_usd = _scelto
+        except (TypeError, ValueError):
+            pass
     if getattr(sig, 'is_risky', False):
         risk_usd *= 0.5
         log(f"#{sig.id} segnale RISKY → rischio dimezzato a ${risk_usd:.2f}")
@@ -3299,6 +3316,66 @@ def _build_mt5_trade_log(sig, closed_tickets, is_buy, new_status) -> str:
                        "ts": ts.isoformat() if ts else None})
 
     return jsonlib.dumps(events)
+
+
+def stato_posizione(sig) -> dict:
+    """Fotografia di un trade VIVO, uguale per reale e paper:
+      lotti_residui, lotto_unitario (la fetta per ogni target), rischio_corrente
+      (quanto si perde da qui allo stop), prezzo, distanza_stop.
+    Sui reali legge i volumi dal broker; sui paper li ricava dal trade_log
+    (ogni tp o chiusura parziale consuma una fetta). Mai solleva."""
+    import json as jsonlib
+    from risk import get_spec, calc_pnl
+    try:
+        paper = bool(getattr(sig, "is_filtered", False))
+        entry = sig.actual_entry_price or sig.entry_price or sig.entry_price_high
+        n_tp = sum(1 for t in (sig.tp1, sig.tp2, sig.tp3) if t) or 1
+        size = float(sig.position_size or 0)
+        unitario = round(size / n_tp, 2) if size else 0.0
+        prezzo = None
+        if paper:
+            consumati = 0.0
+            try:
+                for e in jsonlib.loads(sig.trade_log or "[]"):
+                    ev = e.get("event") or ""
+                    if ev.startswith("tp"):
+                        consumati += unitario
+                    elif ev == "partial_close":
+                        consumati += float(e.get("lots") or 0)
+            except Exception:
+                pass
+            residui = round(max(0.0, size - consumati), 2)
+            try:
+                import price_service as _ps
+                prezzo = _ps.get_current_price(sig.symbol.upper())
+            except Exception:
+                prezzo = None
+        else:
+            mt5 = _get_mt5()
+            residui = 0.0
+            for t, _, _ in open_tickets_with_levels(sig):
+                pos = mt5.positions_get(ticket=t) if mt5 else None
+                if pos:
+                    residui += float(pos[0].volume)
+            residui = round(residui, 2)
+            if mt5:
+                tk = mt5.symbol_info_tick(get_mt5_symbol(sig.symbol))
+                if tk:
+                    is_buy = (sig.direction or "buy").lower() == "buy"
+                    prezzo = float(tk.bid if is_buy else tk.ask)
+        distanza = abs(float(entry) - float(sig.stoploss)) if (entry and sig.stoploss) else None
+        rischio = None
+        if distanza and residui:
+            spec = get_spec(sig.symbol)
+            rischio = round(distanza / spec["pip"] * spec["pv"] * residui, 2)
+        return {"paper": paper, "lotti_residui": residui, "lotto_unitario": unitario,
+                "lotti_totali": size, "rischio_corrente": rischio, "prezzo": prezzo,
+                "entry": entry, "distanza_stop": round(distanza, 5) if distanza else None,
+                "n_target": n_tp}
+    except Exception as e:
+        log(f"stato_posizione #{getattr(sig,'id','?')}: {str(e)[:100]}")
+        return {"paper": bool(getattr(sig, "is_filtered", False)), "lotti_residui": 0,
+                "lotto_unitario": 0, "rischio_corrente": None, "prezzo": None}
 
 
 def open_tickets_with_levels(sig):

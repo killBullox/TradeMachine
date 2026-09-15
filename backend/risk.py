@@ -209,7 +209,19 @@ def _calc_pnl_from_trade_log(sig, lots: float, entry: float) -> tuple:
     # Quanti TP sono stati colpiti
     tp_events = [e for e in events if e["event"].startswith("tp")]
     tps_hit = len(tp_events)
-    remaining_lots = round(lots - lots_per_tp * tps_hit, 2)
+    # Chiusure PARZIALI volontarie (pulsante "chiudi prossimo lotto" e riduzione
+    # del rischio su un trade gia' aperto): ogni evento porta con se' i lotti
+    # che ha consumato, quindi riduce il residuo come farebbe un TP.
+    lotti_parziali = 0.0
+    for e in events:
+        if e.get("event") == "partial_close":
+            try:
+                lotti_parziali += float(e.get("lots") or 0)
+            except (TypeError, ValueError):
+                pass
+    remaining_lots = round(lots - lots_per_tp * tps_hit - lotti_parziali, 2)
+    if remaining_lots < 0:
+        remaining_lots = 0.0
 
     total_pnl = 0.0
     updated_events = []
@@ -223,6 +235,17 @@ def _calc_pnl_from_trade_log(sig, lots: float, entry: float) -> tuple:
         elif ev["event"].startswith("tp"):
             if price and entry and lots_per_tp > 0:
                 pnl = calc_pnl(sig.symbol, sig.direction or "buy", entry, price, lots_per_tp)
+                ev_copy["pnl"] = pnl
+                total_pnl += pnl
+        elif ev["event"] == "partial_close":
+            # Chiusura volontaria di una parte della posizione al prezzo di
+            # mercato del momento: P&L sui lotti indicati nell'evento stesso.
+            try:
+                lotti_ev = float(ev.get("lots") or 0)
+            except (TypeError, ValueError):
+                lotti_ev = 0.0
+            if price and entry and lotti_ev > 0:
+                pnl = calc_pnl(sig.symbol, sig.direction or "buy", entry, price, lotti_ev)
                 ev_copy["pnl"] = pnl
                 total_pnl += pnl
         elif ev["event"] in ("sl_hit", "closed"):

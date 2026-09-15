@@ -111,11 +111,18 @@ class TestIntegrazioneOrdine:
         from pathlib import Path
         src = Path(__file__).resolve().parent.parent / "mt5_trader.py"
         righe = src.read_text(encoding="utf-8", errors="replace").splitlines()
-        ultima_entry = max(i for i, l in enumerate(righe)
-                           if re.match(r"^\s+entry = ", l) and i < len(righe))
         reclamp = next(i for i, l in enumerate(righe) if "RE-CLAMP del sizing" in l)
         guardia = next(i for i, l in enumerate(righe) if "GUARDIA FINALE SUL RISCHIO" in l)
         invio = next(i for i, l in enumerate(righe) if 'mt5_preparing"' in l)
+        # Il vincolo riguarda la SEQUENZA dentro la funzione che piazza gli
+        # ordini: si guarda solo il corpo di quella funzione, altrimenti una
+        # qualsiasi altra riga "entry = " altrove nel file falsa il confronto.
+        inizio_fn = max(i for i, l in enumerate(righe[:reclamp])
+                        if re.match(r"^def \w+", l))
+        fine_fn = next((i for i, l in enumerate(righe[reclamp:], start=reclamp)
+                        if re.match(r"^def \w+", l)), len(righe))
+        ultima_entry = max(i for i, l in enumerate(righe)
+                           if inizio_fn < i < fine_fn and re.match(r"^\s+entry = ", l))
         assert reclamp > ultima_entry, "re-clamp prima del prezzo definitivo"
         assert guardia > reclamp, "la guardia deve venire dopo il re-clamp"
         assert invio > guardia, "la guardia deve precedere l'invio degli ordini"

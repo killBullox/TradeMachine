@@ -1653,6 +1653,11 @@ class ManualTradeIn(BaseModel):
     # reali, esattamente come i segnali filtrati. Serve a provare un'idea senza
     # rischiare soldi; resta escluso dalle statistiche reali.
     paper: bool = False
+    # Rischio da usare per QUESTO trade, in dollari. Serve a entrare piu'
+    # leggeri di quanto prevedano le impostazioni: se assente si usa il massimo
+    # configurato. Consentito SOLO in diminuzione — un trade manuale non puo'
+    # rischiare piu' del limite generale.
+    rischio_usd: Optional[float] = None
 
 
 def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
@@ -1723,7 +1728,25 @@ def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
                           "il ticket piu' lontano si chiudera' per primo")
 
     settings = risk_module.get_risk_settings()
-    rischio_max = risk_module.calc_risk_amount(settings)
+    rischio_configurato = risk_module.calc_risk_amount(settings)
+    # Rischio scelto per questo trade: solo in diminuzione rispetto al massimo.
+    rischio_max = rischio_configurato
+    rischio_scelto = getattr(body, "rischio_usd", None)
+    if rischio_scelto is not None:
+        try:
+            rischio_scelto = float(rischio_scelto)
+        except (TypeError, ValueError):
+            rischio_scelto = None
+            errori.append("Rischio non valido")
+    if rischio_scelto is not None:
+        if rischio_scelto <= 0:
+            errori.append("Il rischio deve essere maggiore di zero")
+        elif rischio_scelto > rischio_configurato + 0.01:
+            errori.append(
+                f"Il rischio di questo trade ({rischio_scelto:.0f}$) supera il massimo "
+                f"configurato ({rischio_configurato:.0f}$): si puo' solo ridurre")
+        else:
+            rischio_max = rischio_scelto
     n = len(tps) or 1
     lotti_tot = lotti_ciascuno = rischio_stimato = None
     distanza = None
@@ -1779,7 +1802,8 @@ def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
         "paper": paper,
         "prezzo_corrente": round(prezzo, 5) if prezzo else None,
         "distanza_stop": round(distanza, 2) if distanza else None,
-        "rischio_massimo": round(rischio_max, 2),
+        "rischio_massimo": round(rischio_max, 2),          # usato per questo trade
+        "rischio_configurato": round(rischio_configurato, 2),  # tetto dalle impostazioni
         "rischio_stimato": rischio_stimato,
         "lotti_totali": lotti_tot,
         "lotti_per_ticket": lotti_ciascuno,
@@ -1876,6 +1900,10 @@ async def manual_trade_open(body: ManualTradeIn, db: Session = Depends(get_db)):
                      f"TP={'/'.join(str(t) for t in tps if t)}"),
         created_at=datetime.utcnow(),
     )
+    # Rischio scelto per questo trade: place_orders lo legge da qui e lo usa
+    # al posto del massimo configurato (solo se minore).
+    if prev.get("rischio_massimo") is not None:
+        sig.risk_usd = prev["rischio_massimo"]
     db.add(sig); db.commit(); db.refresh(sig)
     sig_id = sig.id
 
@@ -2590,6 +2618,164 @@ async def mt5_close(ticket: int, db: Session = Depends(get_db)):
     symbol = sig.symbol if sig else "XAUUSD"
     ok = await asyncio.get_event_loop().run_in_executor(None, mt5_trader.close_position, ticket, symbol)
     return {"ok": ok}
+
+class ModificaLivelliIn(BaseModel):
+    stoploss: Optional[float] = None
+    tp1: Optional[float] = None
+    tp2: Optional[float] = None
+    tp3: Optional[float] = None
+
+
+def _chiudi_parziale_paper(sig, lotti: float, prezzo: float, motivo: str):
+    """Registra sul paper la chiusura di una fetta di posizione al prezzo
+    corrente. Non tocca position_size: quella viene ricalcolata dal monitor
+    partendo dallo stop, quindi il consumo va scritto nel trade_log."""
+    import price_service as ps
+    ps._append_event(sig, "partial_close", float(prezzo), datetime.utcnow())
+    try:
+        log_list = json.loads(sig.trade_log)
+        log_list[-1]["lots"] = round(float(lotti), 2)
+        log_list[-1]["detail"] = motivo
+        sig.trade_log = json.dumps(log_list)
+    except Exception:
+        pass
+    ps._recalc_paper(sig)
+
+
+@app.get("/api/trades/{signal_id}/stato-posizione")
+def trade_stato_posizione(signal_id: int, db: Session = Depends(get_db)):
+    """Lotti residui, rischio corrente e prezzo: alimenta i controlli di
+    gestione del trade aperto."""
+    sig = db.query(Signal).filter(Signal.id == signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Trade non trovato")
+    return mt5_trader.stato_posizione(sig)
+
+
+@app.post("/api/trades/{signal_id}/modifica-livelli")
+async def trade_modifica_livelli(signal_id: int, body: ModificaLivelliIn,
+                                 db: Session = Depends(get_db)):
+    """Cambia stop e/o target su un trade APERTO. Sui reali scrive sui ticket
+    del broker, sui paper aggiorna il segnale.
+
+    Uno stop che si ALLARGA aumenta il rischio: consentito solo se il rischio
+    risultante resta sotto il massimo (invariante non negoziabile). In caso
+    contrario va prima ridotta la size."""
+    sig = db.query(Signal).filter(Signal.id == signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Trade non trovato")
+    if sig.closed_at is not None or sig.status not in ("open", "tp1", "tp2", "pending"):
+        return {"ok": False, "error": f"Trade non piu' modificabile (stato {sig.status})"}
+
+    st = mt5_trader.stato_posizione(sig)
+    is_buy = (sig.direction or "buy").lower() == "buy"
+    prezzo = st.get("prezzo")
+    entry = st.get("entry")
+    nuovo_sl = body.stoploss
+    errori = []
+
+    if nuovo_sl is not None and prezzo:
+        if is_buy and nuovo_sl >= prezzo:
+            errori.append(f"Per un BUY lo stop ({nuovo_sl}) deve stare sotto il prezzo ({prezzo})")
+        if not is_buy and nuovo_sl <= prezzo:
+            errori.append(f"Per un SELL lo stop ({nuovo_sl}) deve stare sopra il prezzo ({prezzo})")
+    for nome, val in (("TP1", body.tp1), ("TP2", body.tp2), ("TP3", body.tp3)):
+        if val is None or not prezzo:
+            continue
+        if is_buy and val <= prezzo:
+            errori.append(f"Per un BUY il {nome} ({val}) deve stare sopra il prezzo ({prezzo})")
+        if not is_buy and val >= prezzo:
+            errori.append(f"Per un SELL il {nome} ({val}) deve stare sotto il prezzo ({prezzo})")
+
+    # Allargamento dello stop: verifica il tetto di rischio
+    if nuovo_sl is not None and entry and st.get("lotti_residui"):
+        import risk as _risk
+        spec = _risk.get_spec(sig.symbol)
+        dist_nuova = abs(float(entry) - float(nuovo_sl))
+        rischio_nuovo = dist_nuova / spec["pip"] * spec["pv"] * st["lotti_residui"]
+        rischio_max = _risk.calc_risk_amount(_risk.get_risk_settings())
+        allarga = (is_buy and nuovo_sl < (sig.stoploss or nuovo_sl)) or \
+                  (not is_buy and nuovo_sl > (sig.stoploss or nuovo_sl))
+        if allarga and rischio_nuovo > rischio_max * 1.02:
+            errori.append(
+                f"Lo stop a {nuovo_sl} porterebbe il rischio a {rischio_nuovo:.0f}$ "
+                f"sopra il massimo di {rischio_max:.0f}$: riduci prima la size")
+    if errori:
+        return {"ok": False, "error": " · ".join(errori)}
+
+    vecchi = {"sl": sig.stoploss, "tp1": sig.tp1, "tp2": sig.tp2, "tp3": sig.tp3}
+    aggiornati = 0
+    if not st["paper"]:
+        aperti = mt5_trader.open_tickets_with_levels(sig)
+        if not aperti:
+            return {"ok": False, "error": "Nessun ticket aperto da modificare"}
+        nuovi_tp = {1: body.tp1, 2: body.tp2, 3: body.tp3}
+        for ticket, livello, _tp in aperti:
+            tp_del_ticket = nuovi_tp.get(livello)
+            ok = await asyncio.get_event_loop().run_in_executor(
+                None, mt5_trader.modify_sl_tp, ticket,
+                nuovo_sl if nuovo_sl is not None else None,
+                tp_del_ticket if tp_del_ticket is not None else None,
+                sig.symbol)
+            if ok:
+                aggiornati += 1
+        if aggiornati == 0:
+            return {"ok": False, "error": "Il broker ha rifiutato la modifica su tutti i ticket"}
+
+    if nuovo_sl is not None:
+        sig.stoploss = float(nuovo_sl)
+    for attr, val in (("tp1", body.tp1), ("tp2", body.tp2), ("tp3", body.tp3)):
+        if val is not None:
+            setattr(sig, attr, float(val))
+    sig.updated_at = datetime.utcnow()
+    cambi = [f"{k.upper()} {v} -> {getattr(sig, 'stoploss' if k == 'sl' else k)}"
+             for k, v in vecchi.items()
+             if (getattr(sig, 'stoploss' if k == 'sl' else k) or 0) != (v or 0)]
+    mt5_trader._append_trade_log_mt5(sig, "livelli_modificati",
+        f"Modifica manuale: {', '.join(cambi) if cambi else 'nessun cambio'}"
+        + (f" (aggiornati {aggiornati} ticket)" if not st["paper"] else " (paper)"),
+        {"prima": vecchi, "ticket_aggiornati": aggiornati})
+    if st["paper"]:
+        import price_service as ps
+        ps._recalc_paper(sig)
+    db.add(sig); db.commit(); db.refresh(sig)
+    return {"ok": True, "ticket_aggiornati": aggiornati,
+            "stoploss": sig.stoploss, "tp1": sig.tp1, "tp2": sig.tp2, "tp3": sig.tp3}
+
+
+@app.post("/api/trades/{signal_id}/chiudi-prossimo-lotto")
+async def trade_chiudi_prossimo_lotto(signal_id: int, db: Session = Depends(get_db)):
+    """Chiude UNA fetta di posizione: sui reali il ticket col target piu'
+    vicino, sui paper un lotto unitario al prezzo corrente."""
+    sig = db.query(Signal).filter(Signal.id == signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Trade non trovato")
+    st = mt5_trader.stato_posizione(sig)
+    if not st["paper"]:
+        return await mt5_close_next_ticket(signal_id, db)
+
+    residui = st.get("lotti_residui") or 0
+    unitario = st.get("lotto_unitario") or 0
+    prezzo = st.get("prezzo")
+    if residui <= 0:
+        return {"ok": False, "error": "Nessuna posizione residua"}
+    if not prezzo:
+        return {"ok": False, "error": "Nessuna quotazione disponibile"}
+    lotti = min(unitario, residui) if unitario > 0 else residui
+    lotti = round(lotti, 2)
+    _chiudi_parziale_paper(sig, lotti, prezzo,
+        f"Chiusura manuale di un lotto ({lotti}) a {prezzo}")
+    rimasti = round(residui - lotti, 2)
+    if rimasti < 0.01:
+        sig.status = "closed"
+        sig.exit_price = float(prezzo)
+        sig.closed_at = datetime.utcnow()
+        import price_service as ps
+        ps._recalc_paper(sig)
+    db.add(sig); db.commit(); db.refresh(sig)
+    return {"ok": True, "paper": True, "lotti_chiusi": lotti,
+            "lotti_residui": rimasti, "prezzo": prezzo, "pnl": sig.pnl_usd}
+
 
 @app.post("/api/mt5/close-next-ticket/{signal_id}")
 async def mt5_close_next_ticket(signal_id: int, db: Session = Depends(get_db)):
