@@ -1658,6 +1658,15 @@ class ManualTradeIn(BaseModel):
     # configurato. Consentito SOLO in diminuzione — un trade manuale non puo'
     # rischiare piu' del limite generale.
     rischio_usd: Optional[float] = None
+    # Come si entra:
+    #   "mercato"  -> si compra/vende ADESSO al prezzo corrente (default).
+    #   "pendente" -> si aspetta il prezzo indicato in `entry`; il sistema
+    #                 sceglie LIMIT o STOP in base a dove sta il mercato.
+    # Sono due intenzioni diverse e non vanno mai confuse: fino al 16/09 il
+    # manuale diceva "a mercato" ma passava dal routing dei segnali Telegram,
+    # che poteva trasformarlo in un pendente mai riempito (#763).
+    tipo_ingresso: str = "mercato"
+    entry: Optional[float] = None        # obbligatorio se tipo_ingresso="pendente"
 
 
 def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
@@ -1677,6 +1686,10 @@ def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
         errori.append("Stop loss obbligatorio")
 
     paper = bool(getattr(body, "paper", False))
+    tipo = (getattr(body, "tipo_ingresso", None) or "mercato").lower()
+    if tipo not in ("mercato", "pendente"):
+        errori.append("Tipo di ingresso non valido: usa mercato o pendente")
+        tipo = "mercato"
     mt5 = mt5_trader._get_mt5() if mt5_trader.is_enabled() else None
     prezzo = None
     min_vol = vol_step = None
@@ -1708,6 +1721,23 @@ def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
                 prezzo = float(tick.ask if direction == "buy" else tick.bid)
             min_vol = float(getattr(info, "volume_min", 0.01) or 0.01)
             vol_step = float(getattr(info, "volume_step", 0.01) or 0.01)
+
+    # Con l'ingresso pendente i livelli e il lotto si calcolano sul prezzo
+    # scelto dall'operatore, non su quello di adesso.
+    prezzo_mercato = prezzo
+    if tipo == "pendente":
+        try:
+            prezzo = float(body.entry) if body.entry else None
+        except (TypeError, ValueError):
+            prezzo = None
+        if not prezzo:
+            errori.append("Con l'ingresso in attesa serve il prezzo di ingresso")
+        elif prezzo_mercato:
+            su = prezzo > prezzo_mercato
+            tipo_ordine = ("BUY STOP" if su else "BUY LIMIT") if direction == "buy" \
+                else ("SELL LIMIT" if su else "SELL STOP")
+            avvisi.append(f"Ordine in attesa: {tipo_ordine} a {prezzo} "
+                          f"(mercato adesso {round(prezzo_mercato, 2)})")
 
     # Coerenza dei livelli rispetto al prezzo di ingresso
     if prezzo and body.stoploss:
@@ -1800,7 +1830,9 @@ def _manual_trade_preview(body: "ManualTradeIn", db) -> dict:
     return {
         "ok": not errori,
         "paper": paper,
+        "tipo_ingresso": tipo,
         "prezzo_corrente": round(prezzo, 5) if prezzo else None,
+        "prezzo_mercato": round(prezzo_mercato, 5) if prezzo_mercato else None,
         "distanza_stop": round(distanza, 2) if distanza else None,
         "rischio_massimo": round(rischio_max, 2),          # usato per questo trade
         "rischio_configurato": round(rischio_configurato, 2),  # tetto dalle impostazioni
@@ -1890,13 +1922,18 @@ async def manual_trade_open(body: ManualTradeIn, db: Session = Depends(get_db)):
     prezzo = prev["prezzo_corrente"]
     tps = [body.tp1, body.tp2, body.tp3]
     etichetta = "[MANUALE PAPER]" if paper else "[MANUALE]"
+    # Il modo d'ingresso viaggia nel testo del segnale: "a mercato" e' quello
+    # che fa entrare subito, senza passare dal routing LIMIT/STOP.
+    pendente = prev.get("tipo_ingresso") == "pendente"
+    come = (f"in attesa a {prezzo} (mercato {prev.get('prezzo_mercato')})"
+            if pendente else f"a mercato ({prezzo})")
     sig = Signal(
         symbol=body.symbol.upper(), direction=direction,
         entry_price=prezzo, entry_price_high=prezzo,
         stoploss=body.stoploss, tp1=tps[0], tp2=tps[1], tp3=tps[2],
         status="pending",
-        raw_message=(f"{etichetta} {body.symbol.upper()} {direction} a mercato "
-                     f"({prezzo}) SL={body.stoploss} "
+        raw_message=(f"{etichetta} {body.symbol.upper()} {direction} {come} "
+                     f"SL={body.stoploss} "
                      f"TP={'/'.join(str(t) for t in tps if t)}"),
         created_at=datetime.utcnow(),
     )
@@ -1913,16 +1950,25 @@ async def manual_trade_open(body: ManualTradeIn, db: Session = Depends(get_db)):
         # reali, come per qualunque segnale filtrato.
         sig.is_filtered = True
         sig.filter_reason = "Trade manuale aperto in PAPER MODE (nessun ordine reale)"
-        sig.status = "open"
-        sig.actual_entry_price = prezzo
-        sig.entered_at = datetime.utcnow()
         sig.position_size = prev["lotti_totali"]
         sig.risk_usd = prev["rischio_massimo"]
-        mt5_trader._append_trade_log_mt5(sig, "manual_paper_open",
-            f"Trade manuale in PAPER MODE: {sig.symbol} {direction} simulato a "
-            f"{prezzo} con {prev['lotti_per_ticket']} lotti x {prev['n_ticket']} "
-            f"(rischio teorico {prev['rischio_stimato']}$). Nessun ordine inviato al broker.",
-            {"paper": True, "prezzo": prezzo, "lotti_totali": prev["lotti_totali"]})
+        if pendente:
+            # Resta in attesa: price_service lo fa entrare quando il prezzo
+            # tocca il livello, come per qualunque segnale in paper.
+            mt5_trader._append_trade_log_mt5(sig, "manual_paper_pending",
+                f"Trade manuale in PAPER MODE in attesa a {prezzo} "
+                f"({prev['lotti_per_ticket']} lotti x {prev['n_ticket']}). "
+                f"Entra quando il prezzo tocca il livello.",
+                {"paper": True, "prezzo": prezzo})
+        else:
+            sig.status = "open"
+            sig.actual_entry_price = prezzo
+            sig.entered_at = datetime.utcnow()
+            mt5_trader._append_trade_log_mt5(sig, "manual_paper_open",
+                f"Trade manuale in PAPER MODE: {sig.symbol} {direction} simulato a "
+                f"{prezzo} con {prev['lotti_per_ticket']} lotti x {prev['n_ticket']} "
+                f"(rischio teorico {prev['rischio_stimato']}$). Nessun ordine inviato al broker.",
+                {"paper": True, "prezzo": prezzo, "lotti_totali": prev["lotti_totali"]})
         db.add(sig); db.commit(); db.refresh(sig)
         return {"ok": True, "paper": True, "signal_id": sig.id, "tickets": [],
                 "lotti_per_ticket": prev["lotti_per_ticket"],
@@ -2720,13 +2766,40 @@ async def trade_modifica_livelli(signal_id: int, body: ModificaLivelliIn,
     nuovo_sl = body.stoploss
     errori = []
 
+    if nuovo_sl is not None and sig.stoploss is not None and \
+            abs(float(nuovo_sl) - float(sig.stoploss)) < 1e-9:
+        nuovo_sl = None                   # rimandato indietro uguale: non e' una modifica
     if nuovo_sl is not None and prezzo:
         if is_buy and nuovo_sl >= prezzo:
             errori.append(f"Per un BUY lo stop ({nuovo_sl}) deve stare sotto il prezzo ({prezzo})")
         if not is_buy and nuovo_sl <= prezzo:
             errori.append(f"Per un SELL lo stop ({nuovo_sl}) deve stare sopra il prezzo ({prezzo})")
-    for nome, val in (("TP1", body.tp1), ("TP2", body.tp2), ("TP3", body.tp3)):
-        if val is None or not prezzo:
+    # Quali target sono ancora in gioco. Il modulo arriva sempre compilato con
+    # TUTTI i livelli: quelli gia' raggiunti (ticket chiuso) tornano indietro
+    # uguali a com'erano e non vanno ne' validati ne' toccati — altrimenti un
+    # TP1 gia' preso, che ormai sta sotto il prezzo, fa fallire la modifica del
+    # TP3 che e' l'unica cosa che l'operatore voleva cambiare.
+    if st["paper"]:
+        presi = _signal_tp_hit_count(sig)
+        livelli_vivi = {n for n in (1, 2, 3)
+                        if n > presi and getattr(sig, f"tp{n}", None)}
+        aperti = []
+    else:
+        aperti = mt5_trader.open_tickets_with_levels(sig)
+        livelli_vivi = {liv for _t, liv, _tp in aperti}
+
+    for n, (nome, val) in enumerate((("TP1", body.tp1), ("TP2", body.tp2),
+                                     ("TP3", body.tp3)), 1):
+        if val is None:
+            continue
+        attuale = getattr(sig, f"tp{n}", None)
+        if attuale is not None and abs(float(val) - float(attuale)) < 1e-9:
+            continue                      # invariato: niente da fare
+        if n not in livelli_vivi:
+            errori.append(f"Il {nome} non e' piu' modificabile: quel target "
+                          f"e' gia' stato raggiunto")
+            continue
+        if not prezzo:
             continue
         if is_buy and val <= prezzo:
             errori.append(f"Per un BUY il {nome} ({val}) deve stare sopra il prezzo ({prezzo})")
@@ -2752,7 +2825,6 @@ async def trade_modifica_livelli(signal_id: int, body: ModificaLivelliIn,
     vecchi = {"sl": sig.stoploss, "tp1": sig.tp1, "tp2": sig.tp2, "tp3": sig.tp3}
     aggiornati = 0
     if not st["paper"]:
-        aperti = mt5_trader.open_tickets_with_levels(sig)
         if not aperti:
             return {"ok": False, "error": "Nessun ticket aperto da modificare"}
         nuovi_tp = {1: body.tp1, 2: body.tp2, 3: body.tp3}

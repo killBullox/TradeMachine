@@ -154,6 +154,26 @@ def log(msg: str):
     _logger.info(line)
 
 
+def _e_manuale(sig) -> bool:
+    """Trade deciso dall'operatore dalla Dashboard, non arrivato da Telegram.
+
+    Su un trade manuale i prezzi non possono essere refusi: l'ingresso e' la
+    quotazione viva del broker letta dall'anteprima, e stop/target li ha
+    scelti l'operatore vedendo quel prezzo. Le auto-correzioni "typo
+    single-digit", pensate per i messaggi del trader, qui fanno solo danni
+    (#763 del 16/09: ask 4340.41 riscritto a 4330.41, ordine diventato un
+    LIMIT 10$ sotto il mercato, mai riempito, target raggiunto senza di noi)."""
+    return str(getattr(sig, "raw_message", "") or "").startswith("[MANUALE")
+
+
+def _manuale_a_mercato(sig) -> bool:
+    """Trade manuale con ingresso "a mercato": si entra ADESSO, punto.
+
+    L'altra scelta possibile dalla Dashboard e' l'ingresso in attesa, che
+    porta il prezzo desiderato e passa dal normale routing LIMIT/STOP."""
+    return _e_manuale(sig) and " a mercato " in str(getattr(sig, "raw_message", "") or "")
+
+
 def _append_trade_log_mt5(sig, event: str, detail: str, extra: dict = None):
     """Appende un evento al trade_log del segnale (chiamato da mt5_trader senza DB session)."""
     import json as _json
@@ -1199,7 +1219,7 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     # Variante 2: INSERZIONE di una cifra (caso #431: trader scrive "448" invece
     # di "4348", parser normalizza a 4480 perdendo una posizione). Si prova a
     # inserire ogni cifra in ogni posizione del raw "short" (4480 → 448 + insert).
-    if sl_raw and tps_raw:
+    if sl_raw and tps_raw and not _e_manuale(sig):
         e_f0 = float(entry)
         sl_f = float(sl_raw)
         tp1_v = float(tps_raw[0][1])
@@ -1266,7 +1286,7 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     # SL=4545, TP1=4554, entry=4548 (typo: voleva 4550). Entry_dist da SL=3,
     # da TP1=6 — asimmetrico. Cerca single-digit fix che renda entry vicino
     # al midpoint di SL e TP1, e dentro al range broker.
-    if sl_raw and tps_raw:
+    if sl_raw and tps_raw and not _e_manuale(sig):
         e_f0 = float(entry)
         sl_f = float(sl_raw)
         tp1_v = float(tps_raw[0][1])
@@ -1362,7 +1382,16 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     # Il filtro sul trade manuale e' necessario: su un segnale Telegram il campo
     # risk_usd puo' essere gia' stato scritto da recalculate_signal (dimezzato
     # sui segnali "risky"), e rileggerlo qui lo dimezzerebbe una seconda volta.
-    _manuale = str(getattr(sig, "raw_message", "") or "").startswith("[MANUALE")
+    _manuale = _e_manuale(sig)
+    if _manuale and not force_market and _manuale_a_mercato(sig):
+        # "Apri a mercato" vuol dire a mercato. Il routing LIMIT/STOP serve ai
+        # segnali Telegram, che indicano una zona d'ingresso da aspettare: qui
+        # l'ordine e' di entrare adesso, e bastano pochi dollari di movimento
+        # fra anteprima e invio perche' diventi un pendente che non si riempie
+        # mai (#763 del 16/09). Se invece l'operatore ha scelto l'ingresso in
+        # attesa, il routing resta quello normale.
+        force_market = True
+        log(f"#{sig.id} trade manuale: ingresso forzato a MERCATO")
     _scelto = getattr(sig, "risk_usd", None) if _manuale else None
     if _scelto:
         try:

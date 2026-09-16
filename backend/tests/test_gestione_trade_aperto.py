@@ -143,6 +143,84 @@ class TestModificaLivelli:
         assert r["ok"] is False and "sopra il massimo" in r["error"]
 
 
+class TestModificaSoloDeiLivelliVivi:
+    """Il modulo torna indietro con TUTTI i livelli compilati, anche quelli dei
+    target gia' presi. Il #764 del 16/09: due target raggiunti, si voleva solo
+    spostare il TP3 e la modifica veniva rifiutata perche' TP1 (4346) e TP2
+    (4351) stavano ormai sotto il prezzo (4352.33)."""
+
+    def _due_target_presi(self, db):
+        s = _paper(db, status="tp2")
+        eventi = json.loads(s.trade_log)
+        eventi += [{"ts": "a", "event": "ticket_closed", "reason": "TP", "price": 4300.0},
+                   {"ts": "b", "event": "ticket_closed", "reason": "TP", "price": 4310.0}]
+        s.trade_log = json.dumps(eventi); db.commit()
+        return s
+
+    def test_caso_764_si_puo_spostare_il_target_che_resta(self, in_memory_db,
+                                                          fake_mt5, client, monkeypatch):
+        import price_service as ps
+        db = in_memory_db()
+        try:
+            s = self._due_target_presi(db)
+            sid = s.id
+        finally:
+            db.close()
+        monkeypatch.setattr(ps, "get_current_price", lambda sym: 4312.0)
+        # il modulo rimanda indietro tutto com'e', col solo TP3 cambiato
+        r = client.post(f"/api/trades/{sid}/modifica-livelli",
+                        json={"stoploss": 4280.0, "tp1": 4300.0, "tp2": 4310.0,
+                              "tp3": 4330.0}).json()
+        assert r["ok"] is True, r.get("error")
+        assert r["tp3"] == 4330.0
+        assert r["tp1"] == 4300.0 and r["tp2"] == 4310.0   # intatti
+
+    def test_cambiare_un_target_gia_preso_viene_detto(self, in_memory_db, fake_mt5,
+                                                      client, monkeypatch):
+        import price_service as ps
+        db = in_memory_db()
+        try:
+            s = self._due_target_presi(db)
+            sid = s.id
+        finally:
+            db.close()
+        monkeypatch.setattr(ps, "get_current_price", lambda sym: 4312.0)
+        r = client.post(f"/api/trades/{sid}/modifica-livelli",
+                        json={"tp1": 4325.0}).json()
+        assert r["ok"] is False
+        assert "gia' stato raggiunto" in r["error"]
+
+    def test_un_target_vivo_dal_lato_sbagliato_resta_rifiutato(self, in_memory_db,
+                                                               fake_mt5, client, monkeypatch):
+        import price_service as ps
+        db = in_memory_db()
+        try:
+            s = self._due_target_presi(db)
+            sid = s.id
+        finally:
+            db.close()
+        monkeypatch.setattr(ps, "get_current_price", lambda sym: 4312.0)
+        r = client.post(f"/api/trades/{sid}/modifica-livelli",
+                        json={"tp3": 4305.0}).json()      # sotto il prezzo
+        assert r["ok"] is False and "sopra il prezzo" in r["error"]
+
+    def test_stop_rimandato_uguale_non_e_una_modifica(self, in_memory_db, fake_mt5,
+                                                      client, monkeypatch):
+        """Uno stop gia' portato in profitto sta sopra l'ingresso: rimandarlo
+        indietro identico non deve far scattare nessun controllo."""
+        import price_service as ps
+        db = in_memory_db()
+        try:
+            s = _paper(db, stoploss=4295.0)
+            sid = s.id
+        finally:
+            db.close()
+        monkeypatch.setattr(ps, "get_current_price", lambda sym: 4312.0)
+        r = client.post(f"/api/trades/{sid}/modifica-livelli",
+                        json={"stoploss": 4295.0, "tp3": 4330.0}).json()
+        assert r["ok"] is True and r["stoploss"] == 4295.0
+
+
 class TestChiudiProssimoLotto:
     def test_paper_chiude_un_lotto(self, in_memory_db, fake_mt5, client, monkeypatch):
         import price_service as ps
@@ -247,7 +325,8 @@ class TestNessunDoppioDimezzamento:
         from pathlib import Path
         testo = (Path(__file__).resolve().parent.parent / "mt5_trader.py").read_text(
             encoding="utf-8", errors="replace")
-        assert '_manuale = str(getattr(sig, "raw_message", "") or "").startswith("[MANUALE")' in testo
+        assert "def _e_manuale(sig)" in testo
+        assert "_manuale = _e_manuale(sig)" in testo
         assert '_scelto = getattr(sig, "risk_usd", None) if _manuale else None' in testo
         # il controllo deve precedere il dimezzamento dei segnali risky
         i_scelto = testo.index("_scelto = getattr(sig")

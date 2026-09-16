@@ -11,7 +11,7 @@ import { PlusCircle, AlertTriangle, TrendingUp, TrendingDown, Calculator, Activi
 export default function ManualTrade() {
   const [form, setForm] = useState({
     symbol: 'XAUUSD', direction: 'buy', stoploss: '', tp1: '', tp2: '', tp3: '',
-    paper: false, rischio_usd: '',
+    paper: false, rischio_usd: '', tipo_ingresso: 'mercato', entry: '',
   })
   const [symbols, setSymbols] = useState([])
   const [prev, setPrev] = useState(null)
@@ -59,12 +59,17 @@ export default function ManualTrade() {
     tp3: form.tp3 ? parseFloat(form.tp3) : null,
     paper: form.paper,
     rischio_usd: form.rischio_usd ? parseFloat(form.rischio_usd) : null,
+    tipo_ingresso: form.tipo_ingresso,
+    entry: form.tipo_ingresso === 'pendente' && form.entry ? parseFloat(form.entry) : null,
   })
 
   const calcola = async () => {
     const p = payload()
     if (!p.stoploss) { toast.error('Inserisci lo stop loss'); return }
     if (!(p.tp1 || p.tp2 || p.tp3)) { toast.error('Inserisci almeno un target'); return }
+    if (p.tipo_ingresso === 'pendente' && !p.entry) {
+      toast.error("Inserisci il prezzo di ingresso o scegli 'a mercato'"); return
+    }
     setCalcolando(true)
     try {
       const d = await fetch('/api/manual-trade/preview', {
@@ -99,7 +104,7 @@ export default function ManualTrade() {
         toast.success(d.paper
           ? `Paper trade #${d.signal_id} avviato (simulato, nessun ordine reale)`
           : `Trade #${d.signal_id} aperto: ${d.tickets?.length || 0} ticket`)
-        setForm(f => ({ ...f, stoploss: '', tp1: '', tp2: '', tp3: '' }))
+        setForm(f => ({ ...f, stoploss: '', tp1: '', tp2: '', tp3: '', entry: '' }))
         setPrev(null)
       } else {
         toast.error(d.detail || 'Apertura fallita')
@@ -112,6 +117,7 @@ export default function ManualTrade() {
   }
 
   const buy = form.direction === 'buy'
+  const mercato = form.tipo_ingresso === 'mercato'
   const campo = 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-slate-500'
   const salito = live.prev != null && live.price != null && live.price > live.prev
   const sceso = live.prev != null && live.price != null && live.price < live.prev
@@ -123,8 +129,9 @@ export default function ManualTrade() {
         <PlusCircle size={20} /> Apri trade manuale
       </h1>
       <p className="text-xs text-slate-500 -mt-4">
-        Ingresso a mercato al prezzo corrente. I lotti li calcola il sistema dal rischio
-        configurato e dalla distanza dello stop, divisi fra i target indicati.
+        Scegli se entrare subito al prezzo corrente o mettere un ordine in attesa a un
+        prezzo tuo. I lotti li calcola il sistema dal rischio configurato e dalla distanza
+        dello stop, divisi fra i target indicati.
       </p>
 
       {/* Prezzo live */}
@@ -179,10 +186,45 @@ export default function ManualTrade() {
         </div>
 
         <div>
+          <label className="block text-xs text-slate-400 mb-1">Ingresso</label>
+          <div className="flex gap-2">
+            <button onClick={() => set('tipo_ingresso', 'mercato')}
+              className={`flex-1 px-3 py-2 rounded-lg text-sm font-semibold ${
+                mercato ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>
+              A mercato
+            </button>
+            <button onClick={() => set('tipo_ingresso', 'pendente')}
+              className={`flex-1 px-3 py-2 rounded-lg text-sm font-semibold ${
+                !mercato ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>
+              In attesa (limit/stop)
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-500 mt-1">
+            {mercato
+              ? 'Compra o vende adesso al prezzo corrente, sempre: nessun ordine in attesa.'
+              : "Aspetta il prezzo indicato. Limit o stop lo sceglie il sistema in base a dove sta il mercato quando invii l'ordine."}
+          </p>
+        </div>
+
+        {!mercato && (
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">
+              Prezzo di ingresso <span className="text-rose-400">*</span>
+              <span className="text-slate-600 ml-1">
+                ({live.price != null ? `mercato ora ${live.price.toFixed(decimali)}` : 'in attesa del prezzo'})
+              </span>
+            </label>
+            <input className={campo} type="number" step="any" value={form.entry}
+              onChange={e => set('entry', e.target.value)}
+              placeholder={live.price ? live.price.toFixed(decimali) : 'es. 4330'} />
+          </div>
+        )}
+
+        <div>
           <label className="block text-xs text-slate-400 mb-1">
             Stop loss <span className="text-rose-400">*</span>
             <span className="text-slate-600 ml-1">
-              ({buy ? 'sotto' : 'sopra'} il prezzo corrente)
+              ({buy ? 'sotto' : 'sopra'} il prezzo di ingresso)
             </span>
           </label>
           <input className={campo} type="number" step="any" value={form.stoploss}
@@ -245,6 +287,7 @@ export default function ManualTrade() {
           </h2>
           <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
             <Riga k="Prezzo usato nel calcolo" v={prev.prezzo_corrente} />
+            {prev.tipo_ingresso === 'pendente' && <Riga k="Mercato al calcolo" v={prev.prezzo_mercato} />}
             <Riga k="Distanza dallo stop" v={prev.distanza_stop != null ? `${prev.distanza_stop}$` : null} />
             <Riga k="Lotti per ticket" v={prev.lotti_per_ticket} forte />
             <Riga k="Ticket" v={prev.n_ticket} />
@@ -279,10 +322,14 @@ export default function ManualTrade() {
             {sending ? 'Apertura in corso...'
               : form.paper
                 ? `Simula ${form.direction.toUpperCase()} (paper)`
-                : `Apri ${form.direction.toUpperCase()} a mercato`}
+                : mercato
+                  ? `Apri ${form.direction.toUpperCase()} a mercato`
+                  : `Metti ${form.direction.toUpperCase()} in attesa a ${form.entry || '—'}`}
           </button>
           <p className="mt-2 text-[10px] text-slate-600 text-center">
-            Il prezzo si muove: all'apertura il sistema ricalcola i lotti sul fill reale.
+            {mercato
+              ? "A mercato l'ingresso e' immediato al prezzo del momento: il sistema ricalcola i lotti sul fill reale."
+              : "L'ordine resta in attesa finche' il prezzo non tocca il livello."}
           </p>
         </div>
       )}

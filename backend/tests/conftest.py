@@ -29,6 +29,9 @@ class _MT5Constants:
     ORDER_TYPE_SELL_STOP = 5
     POSITION_TYPE_BUY = 0
     POSITION_TYPE_SELL = 1
+    ORDER_TIME_GTC = 0
+    ORDER_TIME_DAY = 1
+    ORDER_TIME_SPECIFIED = 2
     ORDER_FILLING_FOK = 0
     ORDER_FILLING_IOC = 1
     ORDER_FILLING_RETURN = 2
@@ -48,6 +51,11 @@ class _SymbolInfo:
     trade_freeze_level: int = 0
     trade_contract_size: float = 100.0
     filling_mode: int = 1  # FOK
+    volume_min: float = 0.01
+    volume_step: float = 0.01
+    volume_max: float = 100.0
+    visible: bool = True
+    name: str = "XAUUSD"
 
 
 @dataclass
