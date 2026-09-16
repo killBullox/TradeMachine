@@ -640,6 +640,29 @@ def _backfill_signal(sig: Signal) -> dict:
     return evaluate_signal_on_history(sig, df)
 
 
+# Eventi che testimoniano un'esecuzione REALE sul broker. Un registro che li
+# contiene e' la nostra unica traccia di cosa e' stato mandato al mercato
+# (i ticket stanno li' dentro) e non va MAI sostituito da una ricostruzione.
+EVENTI_ESECUZIONE_REALE = ("mt5_order_sent", "mt5_placed", "mt5_preparing",
+                           "mt5_placing", "posizioni_riagganciate")
+
+
+def ha_eventi_di_esecuzione_reale(sig) -> bool:
+    """True se il trade_log contiene tracce di ordini realmente inviati.
+    Caso #761 (16/09): il trade manuale aveva i ticket solo nel log (non erano
+    stati salvati sul segnale), il backfill non l'ha saltato perche' guardava
+    solo i campi ticket, e ha riscritto il registro cancellando l'unica prova
+    di cosa fosse finito sul broker."""
+    import json as _j
+    try:
+        for e in _j.loads(sig.trade_log or "[]"):
+            if (e.get("event") or "") in EVENTI_ESECUZIONE_REALE:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 async def backfill_all(force: bool = False):
     """
     Valuta segnali con tick MT5 (o OHLC yfinance) + ricalcola P&L.
@@ -659,6 +682,13 @@ async def backfill_all(force: bool = False):
         for sig in signals:
             # Segnali MT5: stato e P&L autorevoli da sync_positions, non toccare
             if sig.mt5_ticket or sig.mt5_tickets:
+                continue
+            # Ordini realmente inviati al broker: il backfill e' una
+            # ricostruzione dai prezzi e non deve sovrascrivere i fatti. Senza
+            # questo controllo un trade i cui ticket non erano stati salvati
+            # perdeva anche la traccia nel log (#761).
+            if ha_eventi_di_esecuzione_reale(sig):
+                log(f"[Backfill] #{sig.id} saltato: ha ordini reali nel log")
                 continue
             try:
                 result = await asyncio.get_event_loop().run_in_executor(
