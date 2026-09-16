@@ -1931,6 +1931,7 @@ async def manual_trade_open(body: ManualTradeIn, db: Session = Depends(get_db)):
 
     def _run_place():
         from database import SessionLocal as _SL, Signal as _Sig
+        import json as _json_mt
         s = _SL()
         try:
             ss = s.query(_Sig).get(sig_id)
@@ -1938,6 +1939,20 @@ async def manual_trade_open(body: ManualTradeIn, db: Session = Depends(get_db)):
                 return []
             try:
                 tks = mt5_trader.place_orders(ss) or []
+                # I ticket vanno SCRITTI sul segnale: place_orders li restituisce
+                # soltanto, e ogni chiamante deve salvarli (come fa il percorso
+                # Telegram). Qui mancava: il #761 del 16/09 e' finito sul broker
+                # con tre posizioni aperte mentre a database restava 'pending'
+                # senza ticket, quindi fuori da ogni gestione del bot.
+                if tks:
+                    ss.mt5_ticket = tks[0]
+                    ss.mt5_tickets = _json_mt.dumps(tks)
+                    ss.status = "open"
+                    ss.mt5_account = mt5_trader.MT5_ACCOUNT
+                    ss.broker = mt5_trader.MT5_BROKER
+                    mt5_trader._append_trade_log_mt5(ss, "mt5_placed",
+                        f"Ordini MT5 piazzati con successo: tickets={tks}")
+                    s.add(ss)
                 s.commit()
                 return tks
             except Exception as e:

@@ -3446,6 +3446,107 @@ def close_ticket_for_level(sig, tp_level: int) -> dict:
         return {"ok": False, "chiusi": 0, "motivo": str(e)[:120]}
 
 
+def aggancia_posizioni_orfane() -> int:
+    """Posizioni APERTE sul broker che il database non conosce.
+
+    Caso #761 (16/09): un trade manuale reale e' finito sul broker con tre
+    posizioni aperte mentre a database restava 'pending' senza ticket —
+    place_orders restituisce i ticket ma non li scrive, e quel percorso si era
+    dimenticato di salvarli. Il bot non le gestiva: niente break-even, niente
+    trail, fuori dal P&L di giornata, con il solo stop a proteggerle.
+
+    Il riaggancio e' sicuro perche' non si indovina nulla: i ticket sono gia'
+    scritti nel trade_log del segnale dagli eventi mt5_order_sent, quindi si
+    riconnette solo cio' che quel segnale aveva davvero inviato.
+    Idempotente, mai solleva."""
+    from database import SessionLocal, Signal
+    import json as jsonlib
+    from datetime import timedelta
+    mt5 = _get_mt5()
+    if mt5 is None:
+        return 0
+    db = SessionLocal()
+    agganciati = 0
+    try:
+        aperte = mt5.positions_get() or ()
+        if not aperte:
+            return 0
+        noti = set()
+        for s in db.query(Signal).filter(Signal.is_archived == False).all():  # noqa: E712
+            if s.mt5_tickets:
+                try: noti.update(int(t) for t in jsonlib.loads(s.mt5_tickets))
+                except Exception: pass
+            if s.mt5_ticket:
+                noti.add(int(s.mt5_ticket))
+        orfane = [p for p in aperte if int(p.ticket) not in noti]
+        if not orfane:
+            return 0
+        log(f"[Orfane] {len(orfane)} posizioni aperte non collegate a nessun trade")
+
+        cutoff = datetime.utcnow() - timedelta(hours=6)
+        candidati = db.query(Signal).filter(
+            Signal.is_archived == False,          # noqa: E712
+            Signal.is_filtered == False,          # noqa: E712
+            Signal.created_at >= cutoff,
+            Signal.mt5_tickets.is_(None),
+            Signal.mt5_ticket.is_(None),
+            Signal.status.in_(("pending", "open")),
+        ).all()
+        for sig in candidati:
+            # Ticket che QUESTO segnale ha davvero inviato, dal suo log
+            inviati = []
+            try:
+                for e in jsonlib.loads(sig.trade_log or "[]"):
+                    if e.get("event") != "mt5_order_sent":
+                        continue
+                    d = e.get("detail") or ""
+                    if "ticket=" in d:
+                        try:
+                            inviati.append(int(d.split("ticket=")[1].split(" ")[0].strip()))
+                        except (ValueError, IndexError):
+                            pass
+            except Exception:
+                pass
+            suoi = [p for p in orfane if int(p.ticket) in inviati]
+            if not suoi:
+                continue
+            tks = [int(p.ticket) for p in suoi]
+            sig.mt5_ticket = tks[0]
+            sig.mt5_tickets = jsonlib.dumps(tks)
+            sig.status = "open"
+            if sig.actual_entry_price is None:
+                sig.actual_entry_price = float(suoi[0].price_open)
+            if sig.entered_at is None:
+                sig.entered_at = sig.created_at or datetime.utcnow()
+            if sig.mt5_account is None:
+                sig.mt5_account = MT5_ACCOUNT
+            if getattr(sig, "broker", None) is None:
+                sig.broker = MT5_BROKER
+            sig.updated_at = datetime.utcnow()
+            _append_trade_log_mt5(sig, "posizioni_riagganciate",
+                f"Posizioni aperte sul broker ma non registrate: riagganciate "
+                f"al trade dai ticket del suo stesso log ({tks}). "
+                f"Da ora tornano sotto la gestione del bot.",
+                {"tickets": tks, "prezzo_apertura": float(suoi[0].price_open)})
+            db.add(sig)
+            agganciati += len(tks)
+            log(f"[Orfane] #{sig.id} riagganciato a {tks}")
+            orfane = [p for p in orfane if int(p.ticket) not in tks]
+        if agganciati:
+            db.commit()
+        if orfane:
+            log(f"[Orfane] ATTENZIONE: {len(orfane)} posizioni restano senza trade "
+                f"associato: {[int(p.ticket) for p in orfane]}")
+        return agganciati
+    except Exception as e:
+        log(f"[Orfane] errore: {str(e)[:120]}")
+        try: db.rollback()
+        except Exception: pass
+        return 0
+    finally:
+        db.close()
+
+
 def finalize_orphan_closed_trades() -> int:
     """Trade con stato TERMINALE ma mai finalizzati: tutti i ticket sono chiusi
     sul broker, ma closed_at/exit_price/pnl_usd non sono stati scritti.
@@ -3736,6 +3837,13 @@ def sync_positions() -> list:
         reconcile_entered_but_cancelled()
     except Exception as _e:
         log(f"[Reconcile] chiamata fallita: {str(_e)[:80]}")
+
+    # Posizioni aperte sul broker che il DB non conosce: senza questo il bot
+    # non le gestisce affatto (caso #761).
+    try:
+        aggancia_posizioni_orfane()
+    except Exception as _e:
+        log(f"[Orfane] chiamata fallita: {str(_e)[:80]}")
 
     # Trade chiusi sul broker ma mai finalizzati (closed_at vuoto): senza
     # questo il loro P&L non entra nel totale di giornata ne' nel kill-switch.
