@@ -162,3 +162,81 @@ class TestSalvataggioTicketNelManuale:
             encoding="utf-8", errors="replace")
         i_def = src.index("def sync_positions()")
         assert "aggancia_posizioni_orfane()" in src[i_def:i_def + 3000]
+
+
+class TestRiaggancioTicketChiusi:
+    """Il #761 e' stato scoperto DOPO che lo stop aveva gia' chiuso tutto:
+    il riaggancio deve funzionare anche sui ticket non piu' aperti, leggendoli
+    dallo storico dei deal."""
+
+    def _deal(self, fake, ticket, entry_tipo, price, profit=0.0):
+        d = types.SimpleNamespace(entry=entry_tipo, price=price, volume=0.01,
+                                  profit=profit, commission=0.0, swap=0.0, time=0)
+        fake.history_deals_by_position.setdefault(ticket, []).append(d)
+
+    def test_ticket_gia_chiusi_vengono_riagganciati(self, in_memory_db, fake_mt5, monkeypatch):
+        import mt5_trader
+        db = in_memory_db()
+        try:
+            s = _sig(db, status="closed")
+            sid = s.id
+        finally:
+            db.close()
+        for t in (184575436, 184575438, 184575441):
+            self._deal(fake_mt5, t, fake_mt5.DEAL_ENTRY_IN, 4333.92)
+            self._deal(fake_mt5, t, fake_mt5.DEAL_ENTRY_OUT, 4324.99, profit=-8.93)
+        monkeypatch.setattr(mt5_trader, "_get_mt5", lambda: fake_mt5)
+        assert mt5_trader.aggancia_posizioni_orfane() == 3
+        from database import SessionLocal, Signal
+        db2 = SessionLocal()
+        try:
+            r = db2.query(Signal).filter(Signal.id == sid).first()
+            assert json.loads(r.mt5_tickets) == [184575436, 184575438, 184575441]
+            assert r.actual_entry_price == 4333.92
+            assert r.status == "closed"      # nessuno aperto: lo stato resta
+        finally:
+            db2.close()
+
+    def test_ticket_mai_esistiti_non_si_agganciano(self, in_memory_db, fake_mt5, monkeypatch):
+        """Se il broker non sa nulla di quei ticket non si inventa niente."""
+        import mt5_trader
+        db = in_memory_db()
+        try:
+            s = _sig(db)
+            sid = s.id
+        finally:
+            db.close()
+        monkeypatch.setattr(mt5_trader, "_get_mt5", lambda: fake_mt5)
+        assert mt5_trader.aggancia_posizioni_orfane() == 0
+        from database import SessionLocal, Signal
+        db2 = SessionLocal()
+        try:
+            assert db2.query(Signal).filter(Signal.id == sid).first().mt5_tickets is None
+        finally:
+            db2.close()
+
+    def test_poi_il_finalizzatore_ricostruisce_il_pnl(self, in_memory_db, fake_mt5, monkeypatch):
+        """Riaggancio + finalizzazione: il trade rientra con i numeri veri."""
+        import mt5_trader
+        db = in_memory_db()
+        try:
+            s = _sig(db, status="closed")
+            sid = s.id
+        finally:
+            db.close()
+        for t in (184575436, 184575438, 184575441):
+            self._deal(fake_mt5, t, fake_mt5.DEAL_ENTRY_IN, 4333.92)
+            self._deal(fake_mt5, t, fake_mt5.DEAL_ENTRY_OUT, 4324.99, profit=-8.93)
+        monkeypatch.setattr(mt5_trader, "_get_mt5", lambda: fake_mt5)
+        monkeypatch.setattr(mt5_trader, "_get_mt5_utc", lambda e: datetime(2026, 9, 16, 8, 38, 8))
+        mt5_trader.aggancia_posizioni_orfane()
+        assert mt5_trader.finalize_orphan_closed_trades() == 1
+        from database import SessionLocal, Signal
+        db2 = SessionLocal()
+        try:
+            r = db2.query(Signal).filter(Signal.id == sid).first()
+            assert r.pnl_usd == -26.79          # 3 x -8.93
+            assert r.exit_price == 4324.99
+            assert r.closed_at is not None
+        finally:
+            db2.close()

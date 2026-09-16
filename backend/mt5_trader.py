@@ -3469,8 +3469,6 @@ def aggancia_posizioni_orfane() -> int:
     agganciati = 0
     try:
         aperte = mt5.positions_get() or ()
-        if not aperte:
-            return 0
         noti = set()
         for s in db.query(Signal).filter(Signal.is_archived == False).all():  # noqa: E712
             if s.mt5_tickets:
@@ -3479,9 +3477,9 @@ def aggancia_posizioni_orfane() -> int:
             if s.mt5_ticket:
                 noti.add(int(s.mt5_ticket))
         orfane = [p for p in aperte if int(p.ticket) not in noti]
-        if not orfane:
-            return 0
-        log(f"[Orfane] {len(orfane)} posizioni aperte non collegate a nessun trade")
+        if orfane:
+            log(f"[Orfane] {len(orfane)} posizioni aperte non collegate a nessun trade")
+        aperti_orfani = {int(p.ticket): p for p in orfane}
 
         cutoff = datetime.utcnow() - timedelta(hours=6)
         candidati = db.query(Signal).filter(
@@ -3490,7 +3488,11 @@ def aggancia_posizioni_orfane() -> int:
             Signal.created_at >= cutoff,
             Signal.mt5_tickets.is_(None),
             Signal.mt5_ticket.is_(None),
-            Signal.status.in_(("pending", "open")),
+            # NESSUN filtro sullo stato: proprio perche' i ticket mancavano, il
+            # segnale puo' essere stato marcato 'cancelled' o 'closed' da una
+            # pulizia automatica mentre le posizioni erano vive sul broker
+            # (e' successo al #761). L'aggancio resta sicuro: guarda solo i
+            # ticket che quel segnale ha davvero inviato.
         ).all()
         for sig in candidati:
             # Ticket che QUESTO segnale ha davvero inviato, dal suo log
@@ -3507,15 +3509,33 @@ def aggancia_posizioni_orfane() -> int:
                             pass
             except Exception:
                 pass
-            suoi = [p for p in orfane if int(p.ticket) in inviati]
-            if not suoi:
+            # Un ticket vale se esiste sul broker: aperto, oppure gia' chiuso
+            # ma presente nello storico dei deal. Il #761 e' finito proprio
+            # cosi': riagganciato dopo che lo stop lo aveva gia' chiuso.
+            tks, prezzo_ing, qualcuno_aperto = [], None, False
+            for t in inviati:
+                if t in noti:
+                    continue
+                if t in aperti_orfani:
+                    tks.append(t); qualcuno_aperto = True
+                    if prezzo_ing is None:
+                        prezzo_ing = float(aperti_orfani[t].price_open)
+                    continue
+                deals = mt5.history_deals_get(position=t) or ()
+                ins = [d for d in deals if d.entry == mt5.DEAL_ENTRY_IN]
+                if ins:
+                    tks.append(t)
+                    if prezzo_ing is None:
+                        prezzo_ing = float(ins[0].price)
+            if not tks:
                 continue
-            tks = [int(p.ticket) for p in suoi]
+            tks.sort()
             sig.mt5_ticket = tks[0]
             sig.mt5_tickets = jsonlib.dumps(tks)
-            sig.status = "open"
-            if sig.actual_entry_price is None:
-                sig.actual_entry_price = float(suoi[0].price_open)
+            if qualcuno_aperto:
+                sig.status = "open"
+            if sig.actual_entry_price is None and prezzo_ing is not None:
+                sig.actual_entry_price = prezzo_ing
             if sig.entered_at is None:
                 sig.entered_at = sig.created_at or datetime.utcnow()
             if sig.mt5_account is None:
@@ -3524,13 +3544,18 @@ def aggancia_posizioni_orfane() -> int:
                 sig.broker = MT5_BROKER
             sig.updated_at = datetime.utcnow()
             _append_trade_log_mt5(sig, "posizioni_riagganciate",
-                f"Posizioni aperte sul broker ma non registrate: riagganciate "
-                f"al trade dai ticket del suo stesso log ({tks}). "
-                f"Da ora tornano sotto la gestione del bot.",
-                {"tickets": tks, "prezzo_apertura": float(suoi[0].price_open)})
+                f"Ordini eseguiti sul broker ma non registrati: riagganciati al "
+                f"trade dai ticket del suo stesso log ({tks}), "
+                f"{'ancora aperti' if qualcuno_aperto else 'gia chiusi'}. "
+                f"Il P&L viene ricostruito dai deal.",
+                {"tickets": tks, "prezzo_apertura": prezzo_ing,
+                 "aperti": qualcuno_aperto})
             db.add(sig)
             agganciati += len(tks)
             log(f"[Orfane] #{sig.id} riagganciato a {tks}")
+            noti.update(tks)
+            for t in tks:
+                aperti_orfani.pop(t, None)
             orfane = [p for p in orfane if int(p.ticket) not in tks]
         if agganciati:
             db.commit()
