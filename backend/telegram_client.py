@@ -395,11 +395,9 @@ def _apply_signal_correction(db, cand, parsed, msg_id) -> bool:
 # Backup news dal trader (post-mortem FOMC #622/#623): durata blocco ingressi.
 TRADER_NEWS_BLOCK_MIN = 30
 
-# "Target done" e "enter now" del trader parlano del trade in corso, non di
-# quelli dei giorni scorsi: oltre questa finestra un segnale non viene toccato.
+# "Target done" del trader parla del trade in corso, non di quelli dei giorni
+# scorsi: oltre questa finestra un segnale non viene toccato.
 TARGET_DONE_FINESTRA_ORE = 24
-# "Enter Now" senza simbolo: vale per il segnale arrivato da pochi minuti.
-ENTER_NOW_FINESTRA_MIN = 10
 
 
 def apply_trader_news_block(db, minutes: int = TRADER_NEWS_BLOCK_MIN):
@@ -2328,25 +2326,25 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
             try:
                 import mt5_trader as _mt5t
                 import json as _jl_en
-                # Trova signal ref
+                # Trova signal ref: il messaggio a cui l'Enter Now e' collegato.
+                # Il trader lo manda sempre in risposta al segnale originale:
+                # quel collegamento e' l'unico riferimento certo. Il 17/09 alle
+                # 09:25:42 "#HighRisky Enter Now" collegato al #771 e' stato
+                # ignorato perche' qui si cercava solo per simbolo, e il testo
+                # il simbolo non lo contiene.
                 ref = None
-                if parsed.symbol:
-                    ref = db.query(Signal).filter(Signal.symbol == parsed.symbol).order_by(Signal.created_at.desc()).first()
-                else:
-                    # "#HighRisky Enter Now" (17/09 09:25:42) non nomina il
-                    # simbolo: arriva subito dopo il segnale e si riferisce a
-                    # quello. Senza questo ripiego veniva ignorato mentre il
-                    # #771, piazzato 2 secondi prima come LIMIT, non si e' mai
-                    # riempito e il trader ha preso il secondo target.
-                    from datetime import timedelta as _td_en
+                if reply_to_msg_id:
                     ref = db.query(Signal).filter(
-                        Signal.is_archived == False,
-                        Signal.created_at >= datetime.utcnow() - _td_en(minutes=ENTER_NOW_FINESTRA_MIN),
-                    ).order_by(Signal.created_at.desc()).first()
+                        Signal.telegram_msg_id == reply_to_msg_id).first()
                     if ref:
-                        log(f"[EnterNow] msg={msg_id} senza simbolo -> segnale piu' recente #{ref.id} {ref.symbol}")
+                        log(f"[EnterNow] msg={msg_id} collegato a msg={reply_to_msg_id} -> #{ref.id} {ref.symbol}")
+                    else:
+                        log(f"[EnterNow] msg={msg_id} collegato a msg={reply_to_msg_id}, che non e' un segnale")
+                elif parsed.symbol:
+                    ref = db.query(Signal).filter(Signal.symbol == parsed.symbol).order_by(Signal.created_at.desc()).first()
                 if not ref:
-                    log(f"[EnterNow] msg={msg_id} nessun signal di riferimento per {parsed.symbol} → ignore")
+                    log(f"[EnterNow] msg={msg_id} nessun signal di riferimento "
+                        f"(collegato a={reply_to_msg_id}, simbolo={parsed.symbol}) → ignore")
                 else:
                     tickets_ref = []
                     if ref.mt5_tickets:

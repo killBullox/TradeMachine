@@ -1,10 +1,12 @@
 """Mattina del 17/09: messaggi del trader non trattati.
 
-1. "#HighRisky Enter Now" (09:25:42) non nomina il simbolo: il gestore
-   cercava il segnale per simbolo, non trovava nulla e ignorava il messaggio.
-   Il #771, piazzato 2 secondi prima come BUY LIMIT, non si e' mai riempito e
-   il trader ha preso due target. Anche trovandolo, il ripiazzamento passava
-   dal routing normale e avrebbe rimesso lo stesso LIMIT.
+1. "#HighRisky Enter Now" (09:25:42) collegato al segnale del #771 non nomina
+   il simbolo: il gestore cercava solo per simbolo, non trovava nulla e
+   ignorava il messaggio. Il #771, piazzato 2 secondi prima come BUY LIMIT,
+   non si e' mai riempito e il trader ha preso due target. Anche trovandolo,
+   il ripiazzamento passava dal routing normale e avrebbe rimesso il LIMIT.
+   Il trader manda l'Enter Now sempre collegato al segnale originale: e' quel
+   collegamento a dire su quale trade entrare, non l'orario.
 2. Il monitor prezzi faceva query e scritture sul thread dell'event loop:
    un lock SQLite fermava l'intero processo, il healthcheck (timeout 8s) lo
    uccideva — 5 riavvii in una mattina.
@@ -56,57 +58,78 @@ def enter_now(in_memory_db, fake_mt5, monkeypatch):
     fake_mt5.TRADE_ACTION_REMOVE = 8
     fake_mt5.order_send = lambda req: types.SimpleNamespace(retcode=10009)
 
-    def esegui(simbolo=None, testo="#HighRisky  Enter Now"):
+    def esegui(collegato_a=None, simbolo=None, testo="#HighRisky  Enter Now"):
         monkeypatch.setattr(llm_parser, "parse_with_llm",
                             lambda t: {"type": "enter_now", "symbol": simbolo, "sl": None})
-        asyncio.run(tc.process_message(10795, "trader", testo, use_llm=True))
+        asyncio.run(tc.process_message(10795, "trader", testo,
+                                       reply_to_msg_id=collegato_a, use_llm=True))
         return chiamate
     return esegui
 
 
-class TestEnterNowSenzaSimbolo:
-    def test_caso_771_entra_a_mercato(self, in_memory_db, fake_mt5, enter_now):
+class TestEnterNowCollegato:
+    def test_caso_771_entra_a_mercato_sul_trade_collegato(self, in_memory_db,
+                                                          fake_mt5, enter_now):
         db = in_memory_db()
         try:
-            s = _sig(db)
-            sid = s.id
+            sid = _sig(db, telegram_msg_id=10794).id
         finally:
             db.close()
         _pendenti(fake_mt5, (184976205, 184976208, 184976211))
-        chiamate = enter_now()
+        chiamate = enter_now(collegato_a=10794)
         assert len(chiamate) == 1, "Enter Now ignorato"
         assert chiamate[0][0] == sid
         assert chiamate[0][1].get("force_market") is True
 
-    def test_segnale_vecchio_non_viene_agganciato(self, in_memory_db, fake_mt5, enter_now):
-        """Oltre la finestra un 'Enter Now' anonimo non tocca niente."""
+    def test_con_piu_segnali_recenti_sceglie_quello_collegato(self, in_memory_db,
+                                                              fake_mt5, enter_now):
+        """Tre segnali negli ultimi minuti: conta solo il collegamento."""
         db = in_memory_db()
         try:
-            _sig(db, created_at=datetime.utcnow() - timedelta(minutes=45))
+            collegato = _sig(db, telegram_msg_id=10794,
+                             created_at=datetime.utcnow() - timedelta(minutes=6)).id
+            _sig(db, telegram_msg_id=10796, symbol="USDJPY",
+                 mt5_tickets=json.dumps([501, 502]), mt5_ticket=501,
+                 created_at=datetime.utcnow() - timedelta(minutes=3))
+            _sig(db, telegram_msg_id=10797, symbol="BTCUSD",
+                 mt5_tickets=json.dumps([601]), mt5_ticket=601,
+                 created_at=datetime.utcnow() - timedelta(minutes=1))
+        finally:
+            db.close()
+        _pendenti(fake_mt5, (184976205, 184976208, 184976211, 501, 502, 601))
+        chiamate = enter_now(collegato_a=10794)
+        assert [c[0] for c in chiamate] == [collegato]
+
+    def test_senza_collegamento_ne_simbolo_non_indovina(self, in_memory_db,
+                                                        fake_mt5, enter_now):
+        """Nessun ripiego sull'orario: senza riferimento certo non si entra."""
+        db = in_memory_db()
+        try:
+            _sig(db, telegram_msg_id=10794)            # arrivato 2 secondi fa
         finally:
             db.close()
         _pendenti(fake_mt5, (184976205, 184976208, 184976211))
         assert enter_now() == []
 
-    def test_col_simbolo_anche_a_mercato(self, in_memory_db, fake_mt5, enter_now):
+    def test_collegato_a_un_messaggio_che_non_e_un_segnale(self, in_memory_db,
+                                                           fake_mt5, enter_now):
         db = in_memory_db()
         try:
-            _sig(db)
+            _sig(db, telegram_msg_id=10794)
         finally:
             db.close()
         _pendenti(fake_mt5, (184976205, 184976208, 184976211))
-        chiamate = enter_now(simbolo="XAUUSD", testo="#XAUUSD Enter Now")
-        assert len(chiamate) == 1 and chiamate[0][1].get("force_market") is True
+        assert enter_now(collegato_a=10790) == []
 
     def test_gia_dentro_non_raddoppia(self, in_memory_db, fake_mt5, enter_now):
         db = in_memory_db()
         try:
-            _sig(db, status="open")
+            _sig(db, telegram_msg_id=10794, status="open")
         finally:
             db.close()
         for t in (184976205, 184976208, 184976211):
             fake_mt5.positions[t] = types.SimpleNamespace(ticket=t, symbol="XAUUSD")
-        assert enter_now() == []
+        assert enter_now(collegato_a=10794) == []
 
 
 class TestMonitorFuoriDalLoop:
@@ -151,7 +174,7 @@ class TestTargetDoneSoloTradeRecenti:
     def test_finestra_ragionevole(self):
         import telegram_client as tc
         assert 6 <= tc.TARGET_DONE_FINESTRA_ORE <= 48
-        assert 1 <= tc.ENTER_NOW_FINESTRA_MIN <= 30
+        assert not hasattr(tc, "ENTER_NOW_FINESTRA_MIN")   # niente ripiego sull'orario
 
 
 class TestTargetDoneEseguito:
