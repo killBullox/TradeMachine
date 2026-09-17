@@ -9,7 +9,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Set, Optional
 
 # Forza UTF-8 su stdout/stderr (necessario su Windows con terminali cp1252)
@@ -394,6 +394,12 @@ def _apply_signal_correction(db, cand, parsed, msg_id) -> bool:
 
 # Backup news dal trader (post-mortem FOMC #622/#623): durata blocco ingressi.
 TRADER_NEWS_BLOCK_MIN = 30
+
+# "Target done" e "enter now" del trader parlano del trade in corso, non di
+# quelli dei giorni scorsi: oltre questa finestra un segnale non viene toccato.
+TARGET_DONE_FINESTRA_ORE = 24
+# "Enter Now" senza simbolo: vale per il segnale arrivato da pochi minuti.
+ENTER_NOW_FINESTRA_MIN = 10
 
 
 def apply_trader_news_block(db, minutes: int = TRADER_NEWS_BLOCK_MIN):
@@ -1524,10 +1530,17 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 if is_target_hit and detected_symbol and mt5_trader.is_enabled():
                     # Tutti i signal del simbolo non ancora chiusi (pending o open/tp1/tp2)
                     from sqlalchemy import or_ as _or_td
+                    from datetime import timedelta as _td_win
+                    # Solo trade RECENTI: l'annuncio del trader parla del trade
+                    # di oggi. Senza limite di data il 17/09 un "2nd Target Done"
+                    # ha fatto passare 130 trade vecchi rimasti in stato tp1/tp2,
+                    # con chiamate MT5 per ciascuno: 41 secondi di listener
+                    # Telegram fermo.
                     affected_sigs = db.query(Signal).filter(
                         Signal.status.in_(("pending", "open", "tp1", "tp2")),
                         _or_td(Signal.mt5_tickets.isnot(None), Signal.is_filtered == True),
                         Signal.symbol == detected_symbol,
+                        Signal.created_at >= datetime.utcnow() - _td_win(hours=TARGET_DONE_FINESTRA_ORE),
                     ).all()
                     mt5_inst = mt5_trader._get_mt5()
                     sigs_to_ema = []
@@ -2319,6 +2332,19 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 ref = None
                 if parsed.symbol:
                     ref = db.query(Signal).filter(Signal.symbol == parsed.symbol).order_by(Signal.created_at.desc()).first()
+                else:
+                    # "#HighRisky Enter Now" (17/09 09:25:42) non nomina il
+                    # simbolo: arriva subito dopo il segnale e si riferisce a
+                    # quello. Senza questo ripiego veniva ignorato mentre il
+                    # #771, piazzato 2 secondi prima come LIMIT, non si e' mai
+                    # riempito e il trader ha preso il secondo target.
+                    from datetime import timedelta as _td_en
+                    ref = db.query(Signal).filter(
+                        Signal.is_archived == False,
+                        Signal.created_at >= datetime.utcnow() - _td_en(minutes=ENTER_NOW_FINESTRA_MIN),
+                    ).order_by(Signal.created_at.desc()).first()
+                    if ref:
+                        log(f"[EnterNow] msg={msg_id} senza simbolo -> segnale piu' recente #{ref.id} {ref.symbol}")
                 if not ref:
                     log(f"[EnterNow] msg={msg_id} nessun signal di riferimento per {parsed.symbol} → ignore")
                 else:
@@ -2354,9 +2380,12 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                             {"trigger_msg_id": msg_id, "old_sl": old_sl, "new_sl": parsed.sl})
                         db.add(ref); db.commit(); db.refresh(ref)
                         try:
+                            # force_market: "enter now" vuol dire a mercato. Senza,
+                            # il routing rimetteva lo stesso LIMIT appena
+                            # cancellato (prezzo ancora sopra il range).
                             tickets_new = _mt5t.place_orders(ref, catch_origin="realtime",
                                 catch_reason="trader: enter now su signal pending non filled",
-                                signal_ts=ref.created_at)
+                                signal_ts=ref.created_at, force_market=True)
                             if tickets_new:
                                 ref.mt5_tickets = _jl_en.dumps(tickets_new) if len(tickets_new) > 1 else None
                                 ref.mt5_ticket = tickets_new[0]

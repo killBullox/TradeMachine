@@ -895,6 +895,18 @@ def _news_protection_tick():
 
 
 async def _check_open_signals():
+    """Il giro del monitor gira TUTTO in un thread di lavoro, mai sull'event loop.
+
+    Fino al 17/09 query e scritture stavano sul thread principale: quando il
+    database era occupato dal thread di sync_positions, la query restava in
+    attesa del lock SQLite e con lei si fermava l'intero processo — pagine web,
+    listener Telegram, risposta al healthcheck. Il healthcheck (timeout 8s)
+    uccideva e riavviava il backend: 5 volte in una mattina, e durante un
+    riavvio i messaggi del trader non vengono trattati."""
+    await asyncio.get_event_loop().run_in_executor(None, _check_open_signals_sync)
+
+
+def _check_open_signals_sync():
     db = SessionLocal()
     try:
         # closed_at IS NULL: un trade gia' chiuso non va MAI riprocessato.
@@ -917,9 +929,7 @@ async def _check_open_signals():
         symbols = list({s.symbol.upper() for s in signals})
         prices = {}
         for sym in symbols:
-            price = await asyncio.get_event_loop().run_in_executor(
-                None, get_current_price, sym
-            )
+            price = get_current_price(sym)
             if price is not None:
                 prices[sym] = price
 
@@ -930,8 +940,7 @@ async def _check_open_signals():
         ranges = {}
         if any(getattr(s, "is_filtered", False) for s in signals):
             for sym in symbols:
-                r = await asyncio.get_event_loop().run_in_executor(
-                    None, range_dal_check_precedente, sym, now)
+                r = range_dal_check_precedente(sym, now)
                 if r:
                     ranges[sym] = r
         else:
