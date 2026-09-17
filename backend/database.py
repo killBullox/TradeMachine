@@ -1,7 +1,8 @@
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, Enum
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import event
+from sqlalchemy.pool import StaticPool, NullPool
 from datetime import datetime
 import enum
 import os
@@ -10,12 +11,43 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tradesdb.sqlite")
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-    isolation_level=None,  # autocommit: ogni statement è la propria transazione
-)
+
+
+def crea_engine(url: str):
+    """Una connessione SQLite per ogni sessione, mai una condivisa fra thread.
+
+    Fino al 17/09 il backend usava StaticPool: UNA sola connessione per tutto
+    il processo, usata insieme dall'event loop e dai thread di lavoro
+    (sync_positions, news, monitor prezzi). Una connessione sqlite3 non regge
+    l'uso contemporaneo: comandi di thread diversi si mescolano e saltano
+    fuori "cannot commit - no transaction is active" e "bad parameter or other
+    API misuse", con scritture perse. Quel pomeriggio il backend si e'
+    piantato alle 15:19 dopo errori di questo tipo.
+
+    NullPool apre una connessione per sessione (per SQLite costa pochissimo).
+    WAL fa leggere mentre un altro scrive; busy_timeout fa aspettare un lock
+    invece di fallire subito. La semantica resta autocommit come prima."""
+    in_memoria = ":memory:" in url or url.rstrip("/") in ("sqlite:", "sqlite://")
+    eng = create_engine(
+        url,
+        connect_args={"check_same_thread": False, "timeout": 30},
+        # un DB in memoria vive solo dentro la sua connessione: li' serve condividerla
+        poolclass=StaticPool if in_memoria else NullPool,
+        isolation_level=None,  # autocommit: ogni statement è la propria transazione
+    )
+    if not in_memoria and url.startswith("sqlite"):
+        @event.listens_for(eng, "connect")
+        def _pragma(dbapi_conn, _record):
+            cur = dbapi_conn.cursor()
+            try:
+                cur.execute("PRAGMA journal_mode=WAL")
+                cur.execute("PRAGMA busy_timeout=30000")
+            finally:
+                cur.close()
+    return eng
+
+
+engine = crea_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

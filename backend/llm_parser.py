@@ -155,7 +155,9 @@ CLASSIFICAZIONE TYPE:
   Questo principio copre wording futuri non listati negli esempi (es.
   "Catch up now", "Get in fast", "Jump in", "Hop on", "Late entry ok").
 
-▸ "risky_flag" — segnala rischio elevato: "highly risky", "#risky", "aggressive", "#RiskyTrade"
+▸ "risky_flag" — segnala rischio elevato o chiede di entrare leggeri: "highly risky",
+  "#risky", "aggressive", "#RiskyTrade", "Take Small Qty Only", "Keep limited qty",
+  "take only small risks", "small lot size"
 
 ▸ "news_warning" — SOLO se il trader da' un'ISTRUZIONE ESPLICITA di NON entrare /
   stare fuori dal mercato ADESSO. ESEMPI VALIDI:
@@ -272,7 +274,7 @@ def llm_to_parsed(data: dict):
     """
     from parser import (
         ParsedSignal, ParsedUpdate, ParsedSLMove, ParsedClose,
-        _expand_range, _parse_float
+        _expand_range, _parse_float, e_avviso_rischio_ridotto
     )
 
     msg_type = data.get("type", "ignore")
@@ -299,7 +301,8 @@ def llm_to_parsed(data: dict):
             tp3=data.get("tp3"),
             stoploss=data.get("sl"),
             raw=raw_text,
-            is_risky=data.get("is_risky", False),
+            # L'LLM puo' non accorgersene: la regola deterministica vale comunque.
+            is_risky=bool(data.get("is_risky", False)) or e_avviso_rischio_ridotto(raw_text),
             entry_type=entry_type,
         )
 

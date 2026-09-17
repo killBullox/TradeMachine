@@ -90,6 +90,22 @@ class ParsedEnterNow:
     sl: Optional[float] = None  # SL aggiornato se il msg lo specifica ("with 4084 SL")
 
 
+# Tutti i modi in cui il trader dice "entrate leggeri": ognuno dimezza il rischio.
+# Fino al 17/09 valevano solo risky/aggressive/high risk: "Take Small Qty Only"
+# (#776) e "Keep limited qty" (#769) passavano inosservati e il trade partiva
+# a rischio pieno.
+_RISCHIO_RIDOTTO = re.compile(
+    r"(?:^|[^a-z])(?:highly[ _-]?risky|risky|high[ _-]?risk|aggressive|rischioso|pericoloso)"
+    r"|\b(?:small|smaller|limited|low|lower|less|minimum|min|reduced|light)"
+    r"\s+(?:qty|quantity|quantities|lots?|lot size|risks?|size|position)\b",
+    re.IGNORECASE)
+
+
+def e_avviso_rischio_ridotto(text: str) -> bool:
+    """True se il testo chiede di entrare con rischio/quantita' ridotti."""
+    return bool(_RISCHIO_RIDOTTO.search(text or ""))
+
+
 def _clean(text: str) -> str:
     """Rimuove emoji e caratteri non ASCII mantenendo testo leggibile."""
     return re.sub(r'[^\x00-\x7F]+', '', text).strip()
@@ -422,8 +438,7 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
                             break
 
     # Rilevamento segnale "risky" → dimezza il rischio
-    risky_keywords = r'\b(risky|aggressive|high.?risk|rischioso|pericoloso)\b'
-    is_risky = bool(re.search(risky_keywords, text, re.IGNORECASE))
+    is_risky = e_avviso_rischio_ridotto(text)
 
     return ParsedSignal(
         symbol=symbol,

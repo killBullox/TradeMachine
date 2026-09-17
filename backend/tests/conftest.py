@@ -268,10 +268,11 @@ def in_memory_db(monkeypatch, tmp_path):
     for mod in list(sys.modules.keys()):
         if mod.startswith("database"):
             del sys.modules[mod]
-    from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     import database as db_mod
-    engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
+    # Stessa configurazione della produzione (una connessione per sessione,
+    # WAL, autocommit): i test devono girare sul motore vero.
+    engine = db_mod.crea_engine(f"sqlite:///{db_file}")
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db_mod.Base.metadata.create_all(bind=engine)
     monkeypatch.setattr(db_mod, "SessionLocal", SessionLocal)

@@ -400,6 +400,37 @@ TRADER_NEWS_BLOCK_MIN = 30
 TARGET_DONE_FINESTRA_ORE = 24
 
 
+def _testo_normalizzato(text: str) -> str:
+    """Minuscolo, senza emoji/markdown/punteggiatura, spazi compattati."""
+    t = re.sub(r"[^\w\s]+", " ", (text or "").lower())
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def e_annuncio_trade_chiuso(text: str) -> bool:
+    """Il messaggio e' SOLO l'annuncio "Trade Closed" (con emoji o poco altro).
+
+    Il 17/09 lo stesso identico "Trade Closed ??" e' stato letto come
+    chiusura alle 16:18:26 e come "altro" alle 16:12:38: la classificazione
+    dell'LLM non e' stabile su un testo cosi' corto. Qui la risposta e'
+    deterministica. Solo messaggi brevi: una frase piu' lunga che contiene
+    "trade closed" puo' voler dire altro e resta all'LLM."""
+    t = _testo_normalizzato(text)
+    return bool(re.fullmatch(r"(the |our |this )?trade (is )?(now )?closed?( here| now)?", t))
+
+
+def e_chiusura_o_uscita(text: str) -> bool:
+    """Qualunque messaggio che dica che il trade e' finito o va chiuso:
+    usato per NON entrare in ritardo su un segnale gia' concluso."""
+    t = _testo_normalizzato(text)
+    if e_annuncio_trade_chiuso(text):
+        return True
+    return bool(re.search(
+        r"\b(trade (is )?closed|close (the |this |your )?trades?|closing (the )?trades?|"
+        r"everyone close|exit (the )?trade|exit now|"
+        r"(sl|stop ?loss) (hit|triggered)|"
+        r"cancel (all )?(the )?pending)\b", t))
+
+
 def apply_trader_news_block(db, minutes: int = TRADER_NEWS_BLOCK_MIN):
     """Attiva il blocco ingressi per un avviso news del trader: imposta
     RiskSettings.trader_block_until = now + minutes e cancella i pending non
@@ -927,8 +958,10 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
     # Altrimenti: marca il segnale piu' recente entro 120s con status attivo
     # (caso #312: hashtag standalone arrivato 6s dopo il segnale).
     import re as _re
-    risky_re = _re.compile(r'(?i)(?:^|[\s#])(?:risky|highly.?risky|high.?risk|aggressive)')
-    if risky_re.search(text or ""):
+    from parser import e_avviso_rischio_ridotto
+    # Se il messaggio E' un segnale, l'avviso vale per lui stesso (lo marca il
+    # parser alla creazione): qui non va attribuito al segnale precedente.
+    if e_avviso_rischio_ridotto(text) and parse_message(text or "")[0] != "signal":
         db = SessionLocal()
         try:
             sig = None
@@ -980,6 +1013,12 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
     except Exception as e:
         log(f"[Parser] Errore LLM, uso regex: {str(e)[:80]}")
         msg_type, parsed = parse_message(text)
+
+    # "Trade Closed" secco: sempre chiusura, qualunque cosa abbia detto il parser.
+    if msg_type != "close" and e_annuncio_trade_chiuso(text):
+        log(f"[Close] msg={msg_id} '{text[:40]}' riconosciuto come chiusura (era {msg_type})")
+        msg_type, parsed = "close", ParsedClose(symbol=None, close_price=None,
+                                                 reason="trade closed", raw=text)
 
     # FALLBACK REENTER: se LLM/regex hanno classificato come "other" o "update" ma
     # il msg contiene chiaramente un pattern di reenter ("re enter", "re-enter",
@@ -2482,6 +2521,14 @@ async def load_history(limit: int = 500, since: datetime = None):
 
     log(f"[Telegram] Recuperati {len(messages_batch)} messaggi, salvataggio in DB...")
 
+    # Messaggi di chiusura presenti nello storico: un segnale recuperato in
+    # ritardo NON va aperto se dopo di lui il trader ha gia' chiuso. Caso #775
+    # (17/09): segnale delle 16:10:39, "Trade Closed" alle 16:12:38, il bot
+    # appena ripartito lo ha aperto alle 16:14:29 ed e' andato subito in stop.
+    chiusure_nello_storico = sorted(
+        mid for mid, _s, txt, _d in messages_batch
+        if txt and (e_chiusura_o_uscita(txt) or parse_message(txt)[0] == "close"))
+
     # Usa una singola sessione DB per tutto il batch
     db = SessionLocal()
     try:
@@ -2543,7 +2590,19 @@ async def load_history(limit: int = 500, since: datetime = None):
                         try:
                             import mt5_trader as _mt5t
                             delay_sec = (datetime.utcnow() - ts).total_seconds()
-                            if delay_sec < 1800 and _mt5t.is_enabled() and not getattr(sig, "is_filtered", False):
+                            chiuso_dopo = next((c for c in chiusure_nello_storico if c > msg_id), None)
+                            if (chiuso_dopo is not None and delay_sec < 1800
+                                    and not getattr(sig, "is_filtered", False)):
+                                sig.status = "cancelled"
+                                sig.closed_at = datetime.utcnow()
+                                sig.notes = (sig.notes or "") + " [Recupero in ritardo: il trader aveva gia' chiuso]"
+                                _append_trade_log(sig, "replay_skip_chiuso",
+                                    f"Segnale recuperato in ritardo ({int(delay_sec)}s) ma dopo di lui "
+                                    f"il trader ha gia' scritto una chiusura (msg {chiuso_dopo}): non aperto.",
+                                    {"msg_chiusura": chiuso_dopo})
+                                db.add(sig); db.commit()
+                                log(f"[Replay] #{sig.id} NON aperto: chiusura del trader successiva (msg {chiuso_dopo})")
+                            elif delay_sec < 1800 and _mt5t.is_enabled() and not getattr(sig, "is_filtered", False):
                                 log(f"[Replay] #{sig.id} signal recente (delay {int(delay_sec)}s): tentativo place_orders con catch_origin=replay")
                                 tickets = _mt5t.place_orders(sig, catch_origin="replay",
                                     catch_reason=f"recuperato da history replay, delay {int(delay_sec)}s",
