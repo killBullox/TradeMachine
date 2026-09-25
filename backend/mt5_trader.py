@@ -2196,7 +2196,8 @@ def summarize_closed_deals(deals_by_ticket, tp1, tp2, tp3, is_buy, deal_in, deal
     return round(total, 2), best_tp, complete, actual_entry, avg_exit
 
 
-def detect_tp_hits(closed_tickets, closed_reasons, tickets_order, tp1, tp2, tp3, is_buy):
+def detect_tp_hits(closed_tickets, closed_reasons, tickets_order, tp1, tp2, tp3,
+                   is_buy, ingresso=None):
     """Rileva quali TP sono stati raggiunti dai ticket chiusi, ROBUSTO allo
     slippage (caso #636: TP1 4057.00 riempito a 4057.07 su un SELL -> il confronto
     di prezzo esatto falliva e l'auto-BE non scattava).
@@ -2226,6 +2227,13 @@ def detect_tp_hits(closed_tickets, closed_reasons, tickets_order, tp1, tp2, tp3,
         for tp_num, tp_price in levels:
             if tp_price is None:
                 continue
+            # Un target dalla parte della perdita e' un refuso del trader, non
+            # un target: qualunque uscita lo "supererebbe" (caso #807).
+            if ingresso is not None:
+                lato_giusto = (tp_price > float(ingresso)) if is_buy \
+                    else (tp_price < float(ingresso))
+                if not lato_giusto:
+                    continue
             if (is_buy and cp >= tp_price) or (not is_buy and cp <= tp_price):
                 tp_levels_hit = max(tp_levels_hit, tp_num)
                 if tp_num == 1:
@@ -4098,7 +4106,8 @@ def sync_positions() -> list:
             # l'auto-BE / auto-trail scattano. Pilota SIA be_at_tp1 SIA l'auto-trail.
             tp1_hit, tp_levels_hit = detect_tp_hits(
                 closed_tickets, closed_reasons, tickets,
-                sig.tp1, sig.tp2, sig.tp3, is_buy)
+                sig.tp1, sig.tp2, sig.tp3, is_buy,
+                ingresso=sig.actual_entry_price or sig.entry_price_high or sig.entry_price)
 
             # ─── SL trail logic ─────────────────────────────────────────────────
             # Se trail_stop_enabled e' attivo (per-trade override o default
@@ -4311,11 +4320,32 @@ def sync_positions() -> list:
                         tp_from_tickets = max(tp_from_tickets, _idx + 1)
                 if tp_from_tickets > 0:
                     new_status = f"tp{tp_from_tickets}"
+                elif all(closed_reasons.get(_tk) not in (None, "?")
+                         for _tk, _, _, _ in closed_tickets):
+                    # Il broker ha detto per OGNI ticket perche' l'ha chiuso e
+                    # nessuno e' un TP: il trade e' finito in stop, punto. Il
+                    # confronto sui prezzi qui sotto non deve poter ribaltare
+                    # un motivo certo (caso #807 del 24/09: tre ticket chiusi
+                    # con motivo SL registrati come "tp1").
+                    pass
                 else:
-                    # 2) Fallback prezzo (trade legacy / chiusure manuali)
+                    # 2) Fallback prezzo (trade legacy / chiusure manuali), solo
+                    #    quando il motivo del broker manca.
+                    _ancora = sig.actual_entry_price or sig.entry_price_high or sig.entry_price
                     for tp_num, tp_price in [(3, sig.tp3), (2, sig.tp2), (1, sig.tp1)]:
                         if tp_price is None:
                             continue
+                        # Un target dalla parte della perdita non e' un target:
+                        # e' un refuso del trader. Sul #807 (vendita da 4258.35)
+                        # il TP1 in scheda era 4352, cioe' 94$ SOPRA l'ingresso:
+                        # qualunque uscita ci stava "sotto" e risultava presa.
+                        if _ancora is not None:
+                            lato_giusto = (tp_price > float(_ancora)) if is_buy \
+                                else (tp_price < float(_ancora))
+                            if not lato_giusto:
+                                log(f"#{sig.id} TP{tp_num}={tp_price} dal lato della perdita "
+                                    f"rispetto all'ingresso {_ancora}: ignorato nel calcolo dello stato")
+                                continue
                         if any((is_buy and cp >= tp_price) or (not is_buy and cp <= tp_price)
                                for _, cp, _, _ in closed_tickets):
                             new_status = f"tp{tp_num}"
