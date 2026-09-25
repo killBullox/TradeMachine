@@ -64,19 +64,27 @@ class TestMotivoDelBrokerVince:
     """Il codice dello stato finale: quando il broker dice perche' ha chiuso
     ogni ticket, il confronto sui prezzi non deve poterlo ribaltare."""
 
-    def test_il_fallback_e_subordinato_ai_motivi_noti(self):
+    def test_lo_stato_si_legge_dai_ticket(self):
         from pathlib import Path
         src = (Path(__file__).resolve().parent.parent / "mt5_trader.py").read_text(
             encoding="utf-8", errors="replace")
-        i = src.index('new_status = "sl_hit"\n                # 1) Metodo ticket-based')
+        i = src.index("LO STATO SI LEGGE DAI TICKET")
         blocco = src[i:i + 2600]
-        # il fallback prezzo sta in un ramo che si attiva SOLO con motivi ignoti
-        assert 'closed_reasons.get(_tk) not in (None, "?")' in blocco
-        i_guardia = blocco.index('closed_reasons.get(_tk) not in (None, "?")')
-        i_fallback = blocco.index("2) Fallback prezzo")
-        assert i_guardia < i_fallback
-        # e comunque scarta i target dalla parte della perdita
-        assert "lato_giusto" in blocco
+        # (a) motivo del broker, (b) bersaglio scritto sull'ordine del ticket
+        assert 'closed_reasons.get(_tk) == "TP"' in blocco
+        assert "tp_sul_ticket[_tk]" in blocco
+        # i target in scheda si usano SOLO senza motivi e senza bersagli dal broker
+        i_guardia = blocco.index("elif not motivi_tutti_noti and not tp_sul_ticket:")
+        i_scheda = blocco.index("(3, sig.tp3), (2, sig.tp2), (1, sig.tp1)")
+        assert i_guardia < i_scheda
+        assert "lato_giusto" in blocco      # e comunque niente target in perdita
+
+    def test_il_bersaglio_del_ticket_viene_letto_dal_broker(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent / "mt5_trader.py").read_text(
+            encoding="utf-8", errors="replace")
+        assert "tp_sul_ticket[ticket] = float(_o.tp)" in src
+        assert "history_orders_get(position=ticket)" in src
 
     def test_detect_tp_hits_riceve_l_ingresso(self):
         from pathlib import Path

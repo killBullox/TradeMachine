@@ -3972,6 +3972,7 @@ def sync_positions() -> list:
             pendings_count = 0
             closed_tickets = []
             closed_reasons = {}  # ticket -> "TP" | "SL" | "SL@BE" | "manuale/Close" | "?"
+            tp_sul_ticket = {}   # ticket -> take profit scritto sull'ordine del broker
             tp1_hit        = False
 
             for ticket in tickets:
@@ -4006,6 +4007,17 @@ def sync_positions() -> list:
                     close_ts    = _get_mt5_utc(close_deal.time)
                     total_profit += profit
                     closed_tickets.append((ticket, close_price, profit, close_ts))
+                    # Bersaglio REALE di questo ticket, letto dall'ordine sul
+                    # broker: e' l'unico numero che conta. Quello in scheda puo'
+                    # essere stato riscritto dal trader (#807: 4352 su una
+                    # vendita partita da 4258, mentre sul ticket c'era 4252).
+                    try:
+                        for _o in (mt5.history_orders_get(position=ticket) or []):
+                            if getattr(_o, "tp", 0):
+                                tp_sul_ticket[ticket] = float(_o.tp)
+                                break
+                    except Exception:
+                        pass
                     # Determina motivo dal commento del deal (es. '[tp 4530.00]',
                     # '[sl 4525.40]', 'IC-close'). Calcolato SEMPRE (non solo per il
                     # log): serve alla determinazione dello status TP robusta a
@@ -4310,41 +4322,42 @@ def sync_positions() -> list:
                 # "sl_hit". Caso #442 GBPJPY 11/06: entry 214.836, trail TG sposta SL
                 # a 214.845, close 214.845 → profit +5.45$ ma status era "sl_hit".
                 new_status = "sl_hit"
-                # 1) Metodo ticket-based (robusto a slippage, caso #538): l'ordine
-                #    dei ticket in sig.mt5_tickets e' [TP1, TP2, TP3]. Se il deal
-                #    di chiusura del ticket i-esimo ha comment TP, quel livello e'
-                #    stato raggiunto indipendentemente dal prezzo di fill.
+                # LO STATO SI LEGGE DAI TICKET, SEMPRE. La scheda del segnale
+                # puo' contenere numeri riscritti dal trader (#807 del 24/09: TP1
+                # 4352 su una VENDITA partita da 4258, mentre sui ticket c'era
+                # 4252) e non deve mai decidere com'e' finito un trade.
+                #   a) motivo di chiusura scritto dal broker sul deal
+                #   b) bersaglio scritto sull'ordine del ticket vs prezzo d'uscita
+                #   c) solo per i trade vecchi senza queste informazioni:
+                #      i target in scheda, ignorando quelli dalla parte della perdita
                 tp_from_tickets = 0
+                motivi_tutti_noti = bool(closed_tickets) and all(
+                    closed_reasons.get(_tk) not in (None, "?") for _tk, _, _, _ in closed_tickets)
                 for _idx, _tk in enumerate(tickets):
-                    if _idx < 3 and closed_reasons.get(_tk) == "TP":
+                    if _idx >= 3:
+                        continue
+                    if closed_reasons.get(_tk) == "TP":                       # (a)
                         tp_from_tickets = max(tp_from_tickets, _idx + 1)
+                        continue
+                    if closed_reasons.get(_tk) in (None, "?") and _tk in tp_sul_ticket:   # (b)
+                        _tp = tp_sul_ticket[_tk]
+                        _cp = next((cp for tk2, cp, _, _ in closed_tickets if tk2 == _tk), None)
+                        if _cp is not None and ((is_buy and _cp >= _tp) or (not is_buy and _cp <= _tp)):
+                            tp_from_tickets = max(tp_from_tickets, _idx + 1)
+                            log(f"#{sig.id} ticket {_tk}: uscita {_cp} ha raggiunto il "
+                                f"bersaglio {_tp} scritto sull'ordine")
                 if tp_from_tickets > 0:
                     new_status = f"tp{tp_from_tickets}"
-                elif all(closed_reasons.get(_tk) not in (None, "?")
-                         for _tk, _, _, _ in closed_tickets):
-                    # Il broker ha detto per OGNI ticket perche' l'ha chiuso e
-                    # nessuno e' un TP: il trade e' finito in stop, punto. Il
-                    # confronto sui prezzi qui sotto non deve poter ribaltare
-                    # un motivo certo (caso #807 del 24/09: tre ticket chiusi
-                    # con motivo SL registrati come "tp1").
-                    pass
-                else:
-                    # 2) Fallback prezzo (trade legacy / chiusure manuali), solo
-                    #    quando il motivo del broker manca.
+                elif not motivi_tutti_noti and not tp_sul_ticket:             # (c)
                     _ancora = sig.actual_entry_price or sig.entry_price_high or sig.entry_price
                     for tp_num, tp_price in [(3, sig.tp3), (2, sig.tp2), (1, sig.tp1)]:
                         if tp_price is None:
                             continue
-                        # Un target dalla parte della perdita non e' un target:
-                        # e' un refuso del trader. Sul #807 (vendita da 4258.35)
-                        # il TP1 in scheda era 4352, cioe' 94$ SOPRA l'ingresso:
-                        # qualunque uscita ci stava "sotto" e risultava presa.
                         if _ancora is not None:
-                            lato_giusto = (tp_price > float(_ancora)) if is_buy \
-                                else (tp_price < float(_ancora))
+                            lato_giusto = (tp_price > float(_ancora)) if is_buy                                 else (tp_price < float(_ancora))
                             if not lato_giusto:
                                 log(f"#{sig.id} TP{tp_num}={tp_price} dal lato della perdita "
-                                    f"rispetto all'ingresso {_ancora}: ignorato nel calcolo dello stato")
+                                    f"rispetto all'ingresso {_ancora}: ignorato")
                                 continue
                         if any((is_buy and cp >= tp_price) or (not is_buy and cp <= tp_price)
                                for _, cp, _, _ in closed_tickets):
