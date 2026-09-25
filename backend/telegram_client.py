@@ -1042,6 +1042,38 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
         elif _RF.search(text):
             log(f"[FallbackReenter] msg con 're-enter' ma al FUTURO -> NON eseguito (guard #640)")
 
+    def _registra_bloccato(db, parsed, msg_id, motivo):
+        """Un segnale rifiutato dalle guardie deve restare NELLO STORICO.
+
+        Prima si usciva e basta: il segnale spariva, e dall'app sembrava che il
+        trader non avesse mandato niente (25/09: tre segnali bloccati dalla
+        soglia FTMO, nessuna traccia nello storico)."""
+        try:
+            s = Signal(
+                telegram_msg_id=msg_id,
+                symbol=parsed.symbol, direction=parsed.direction,
+                entry_price=parsed.entry_price, entry_price_high=parsed.entry_price_high,
+                tp1=parsed.tp1, tp2=parsed.tp2, tp3=parsed.tp3,
+                stoploss=parsed.stoploss,
+                status="cancelled",
+                is_filtered=True,
+                filter_reason=motivo,
+                raw_message=parsed.raw,
+                is_risky=getattr(parsed, "is_risky", False),
+                entry_type=getattr(parsed, "entry_type", None),
+                created_at=datetime.utcnow(), closed_at=datetime.utcnow(),
+                notes=f"[Trade non aperto: {motivo}]",
+            )
+            _append_trade_log(s, "prop_block",
+                              f"Segnale ricevuto ma NON aperto: {motivo}",
+                              {"msg_id": msg_id})
+            db.add(s); db.commit()
+            log(f"[PropGuard] segnale msg={msg_id} registrato nello storico come non aperto")
+        except Exception as _e:
+            try: db.rollback()
+            except Exception: pass
+            log(f"[PropGuard] impossibile registrare il segnale bloccato: {str(_e)[:120]}")
+
     db = SessionLocal()
     try:
         _save_raw(db, msg_id, sender, text, msg_type)
@@ -1057,10 +1089,12 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                 _block_reason = _block_check()
                 if _block_reason:
                     log(f"[PropGuard] signal msg={msg_id} BLOCCATO (daily DD): {_block_reason}")
+                    _registra_bloccato(db, parsed, msg_id, _block_reason)
                     return
                 _conc_reason = _conc_check()
                 if _conc_reason:
                     log(f"[PropGuard] signal msg={msg_id} BLOCCATO (max concurrent): {_conc_reason}")
+                    _registra_bloccato(db, parsed, msg_id, _conc_reason)
                     return
                 # Perdita TOTALE (soglia statica FTMO 2-Step), anch'essa
                 # prospettica: si guarda dove finirebbe l'equity con lo stop pieno.
@@ -1078,6 +1112,7 @@ async def process_message(msg_id: int, sender: str, text: str, reply_to_msg_id: 
                     _tot_reason = _tot_check(_eq)
                     if _tot_reason:
                         log(f"[PropGuard] signal msg={msg_id} BLOCCATO (perdita totale): {_tot_reason}")
+                        _registra_bloccato(db, parsed, msg_id, _tot_reason)
                         return
             except Exception as _e:
                 log(f"[PropGuard] errore check: {str(_e)[:80]}")
