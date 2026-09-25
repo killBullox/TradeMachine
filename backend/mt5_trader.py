@@ -1483,6 +1483,53 @@ def place_orders(sig, catch_origin: str = "realtime", catch_reason: Optional[str
     effective_risk = sl_pips * spec["pv"] * lots_total
     log(f"#{sig.id} risk=${risk_usd:.0f} lots={lots_each}x{n}={lots_total} size_entry={size_entry} sl_pips={sl_pips:.0f} eff_risk=${effective_risk:.2f}")
 
+    # LOTTO MINIMO DEL BROKER vs RISCHIO MASSIMO.
+    # Sotto il lotto minimo non si scende, quindi l'unica leva che resta sono i
+    # TICKET: con tre target si rischia tre volte il minimo. Caso #808 del
+    # 25/09: rischio massimo 9$, distanza dallo stop 6.30$, minimo 0.01 ->
+    # 6.30$ per ticket, 18.90$ su tre. Il bot apriva lo stesso e ha perso
+    # 18.91$, il doppio del limite. Ora si riducono i ticket; se nemmeno uno
+    # solo rientra, il trade non parte e resta scritto nello storico.
+    if sl_pips > 0 and effective_risk > risk_usd * 1.02 and lots_each <= min_vol + 1e-9:
+        rischio_un_ticket = sl_pips * spec["pv"] * min_vol
+        n_max = int(risk_usd // rischio_un_ticket) if rischio_un_ticket > 0 else 0
+        if n_max < 1:
+            msg = (f"Lotto minimo del broker troppo grande per il rischio massimo: "
+                   f"un solo ticket da {min_vol} rischia ${rischio_un_ticket:.2f}, "
+                   f"oltre il massimo di ${risk_usd:.2f}. Trade non aperto: allarga il "
+                   f"rischio massimo o aspetta un segnale con stop piu' stretto.")
+            log(f"#{sig.id} {msg}")
+            from database import SessionLocal as _SL
+            sig.status = "cancelled"
+            sig.is_filtered = True
+            sig.filter_reason = msg
+            sig.notes = (sig.notes or "") + f" [Trade non aperto: {msg}]"
+            sig.closed_at = datetime.utcnow()
+            _append_trade_log_mt5(sig, "rischio_minimo_superato", msg,
+                                  {"rischio_un_ticket": round(rischio_un_ticket, 2),
+                                   "rischio_massimo": risk_usd, "lotto_minimo": min_vol})
+            _db = _SL()
+            try:
+                _db.merge(sig); _db.commit()
+            finally:
+                _db.close()
+            return []
+        if n_max < n:
+            msg = (f"Ticket ridotti da {n} a {n_max}: col lotto minimo {min_vol} ogni "
+                   f"ticket rischia ${rischio_un_ticket:.2f} e {n} avrebbero superato "
+                   f"il massimo di ${risk_usd:.2f}. Restano i target piu' vicini.")
+            log(f"#{sig.id} {msg}")
+            _append_trade_log_mt5(sig, "ticket_ridotti_per_rischio", msg,
+                                  {"n_originale": n, "n_nuovo": n_max,
+                                   "rischio_un_ticket": round(rischio_un_ticket, 2)})
+            tps_raw = tps_raw[:n_max]
+            n = n_max
+            lots_each = min_vol
+            lots_total = _round_volume(lots_each * n, vol_step, min_vol, max_vol)
+            effective_risk = sl_pips * spec["pv"] * lots_total
+            log(f"#{sig.id} dopo riduzione ticket: lots={lots_each}x{n}={lots_total} "
+                f"eff_risk=${effective_risk:.2f}")
+
     # MARGIN CAP: ogni trade puo' usare al massimo X% del free margin (default 50%).
     # Calcola il margin necessario per lots_total e, se eccede il cap, riduce i lotti.
     # Cosi' i trade su simboli ad alta richiesta margin (es. BTC con leva 1:2 su Avatrade)
